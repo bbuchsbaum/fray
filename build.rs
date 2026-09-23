@@ -32,7 +32,8 @@ fn main() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
-    for path in ["src", "Cargo.toml", "Cargo.lock", "build.rs"] {
+    // Everything compiled into the binary, including the embedded skills.
+    for path in ["src", "skills", "Cargo.toml", "Cargo.lock", "build.rs"] {
         println!("cargo:rerun-if-changed={path}");
     }
 }
