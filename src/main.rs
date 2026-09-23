@@ -631,6 +631,30 @@ fn changed_paths(dir: &Path) -> Vec<String> {
     paths
 }
 
+/// Staged paths, NUL-separated so names are never quoted, with both sides
+/// of a staged rename or copy.
+fn staged_paths(dir: &Path) -> Vec<String> {
+    let out = Process::new("git")
+        .current_dir(dir)
+        .args(["diff", "--cached", "--name-status", "-z", "-M"])
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let mut paths = Vec::new();
+    while let Some(status) = fields.next() {
+        let n = if matches!(&status[..1], "R" | "C") {
+            2
+        } else {
+            1
+        };
+        paths.extend(fields.by_ref().take(n).map(str::to_owned));
+    }
+    paths
+}
+
 /// Resolve a path the user typed (relative to where they are, or absolute)
 /// to a repo-relative path. Symlinks are resolved through the longest
 /// existing ancestor (the file itself may not exist yet). A path outside the
@@ -700,7 +724,7 @@ fn preflight(home: &Path, actor: &str, typed: Vec<String>, staged: bool) -> Resu
         .pop()
         .unwrap_or_default();
     let paths: Vec<String> = if staged {
-        git_lines(&top, &["diff", "--cached", "--name-only"])
+        staged_paths(&top)
     } else if typed.is_empty() {
         changed_paths(&top)
     } else {

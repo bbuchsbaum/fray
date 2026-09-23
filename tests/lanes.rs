@@ -49,6 +49,10 @@ fn overlap_semantics() {
     assert!(paths_overlap("docs/", "docs/my file.md"));
     // Unparseable input is never reported clear.
     assert!(paths_overlap("../outside", "src/x"));
+    // Review of 64f05e6: Unicode names compare normally; they do not
+    // overlap everything.
+    assert!(!paths_overlap("src/\u{e9} q.rs", "docs/x"));
+    assert!(paths_overlap("docs/", "docs/caf\u{e9}.md"));
 }
 
 #[test]
@@ -188,7 +192,15 @@ fn status_is_one_line_per_agent_updated_in_place() {
 #[test]
 fn bad_lane_paths_are_refused() {
     let mut s = board();
-    for bad in ["/etc/passwd", "../outside", "a/../b", "tab\there", ""] {
+    for bad in [
+        "/etc/passwd",
+        "../outside",
+        "a/../b",
+        "tab\there",
+        "",
+        " ",
+        "src/ /x",
+    ] {
         assert_eq!(
             take(&mut s, "claude", &[bad], false).unwrap_err(),
             "invalid",
@@ -296,6 +308,13 @@ fn preflight_sees_declared_lanes_and_real_edits_in_other_worktrees() {
     let absolute = sub(&["preflight", repo.join("my file.md").to_str().unwrap()]);
     let renamed_from = sub(&["preflight", "../main.rs"]);
     let outside = sub(&["preflight", "/etc/hosts"]);
+    // Review of 64f05e6: staged names are read NUL-separated, so a Unicode
+    // name is not quoted into a false clear.
+    fray("peer", &["lane", "take", "docs/", "--purpose", "docs"]);
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::write(repo.join("docs/caf\u{e9}.md"), "x\n").unwrap();
+    git(&repo, &["add", "docs"]);
+    let staged = fray("me", &["preflight", "--staged"]);
     fray("me", &["stop"]);
     let _ = fs::remove_dir_all(&root);
     assert_eq!(report["clear"], false, "{report}");
@@ -319,6 +338,8 @@ fn preflight_sees_declared_lanes_and_real_edits_in_other_worktrees() {
         "{renamed_from}"
     );
     assert_eq!(outside["error"]["code"], "invalid", "{outside}");
+    assert_eq!(staged["clear"], false, "{staged}");
+    assert_eq!(staged["paths"], json!(["docs/caf\u{e9}.md"]), "{staged}");
 }
 
 #[test]
@@ -455,4 +476,86 @@ fn review_reading_keeps_an_agent_present() {
         .unwrap()
         .clone();
     assert_eq!(lane["stale"], false);
+}
+
+#[test]
+fn review_queued_lanes_do_not_deadlock_the_holder_they_wait_on() {
+    let mut s = board();
+    take(&mut s, "claude", &["src/x"], false).unwrap();
+    // codex waits on claude's src/x.
+    let queued = take(&mut s, "codex", &["src/"], true).unwrap();
+    assert_eq!(queued["lane"]["state"], "queued");
+    // claude can still take more under src/: codex is waiting for claude.
+    let more = take(&mut s, "claude", &["src/y"], false).unwrap();
+    assert_eq!(more["lane"]["state"], "held");
+    // A third agent still waits behind codex's queued lane.
+    assert_eq!(
+        take(&mut s, "deepseek", &["src/z"], false).unwrap_err(),
+        "lane_busy"
+    );
+}
+
+#[test]
+fn review_handover_keeps_queue_position_and_stale_takeover_cannot_jump() {
+    let mut s = board();
+    run(&mut s, "extra", "join", json!({}), NOW).unwrap();
+    let held = take(&mut s, "claude", &["src/x"], false).unwrap();
+    let first = take(&mut s, "codex", &["src/x"], true).unwrap();
+    let second = take(&mut s, "extra", &["src/x"], true).unwrap();
+    // codex hands its queued lane to deepseek: same lane, same turn.
+    let handed = run(
+        &mut s,
+        "codex",
+        "lane_release",
+        json!({"id": first["lane"]["id"], "to": "deepseek"}),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(handed["handed_to_lane"], first["lane"]["id"]);
+    // Once claude is stale, a third party may release but not hand over.
+    let later = NOW + IDENTITY_TTL_MS + 1;
+    for who in ["deepseek", "extra"] {
+        run(&mut s, who, "heartbeat", json!({}), later).unwrap();
+    }
+    assert_eq!(
+        run(
+            &mut s,
+            "extra",
+            "lane_release",
+            json!({"id": held["lane"]["id"], "to": "extra"}),
+            later
+        )
+        .unwrap_err(),
+        "lane_not_yours"
+    );
+    let freed = run(
+        &mut s,
+        "extra",
+        "lane_release",
+        json!({"id": held["lane"]["id"]}),
+        later,
+    )
+    .unwrap();
+    assert_eq!(freed["promoted"], json!([first["lane"]["id"]]));
+    let lanes = run(&mut s, "extra", "lanes", json!({}), later).unwrap()["lanes"].clone();
+    let state = |id: &Value| {
+        lanes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| &l["id"] == id)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state(&first["lane"]["id"]), "held");
+    assert_eq!(state(&second["lane"]["id"]), "queued");
+}
+
+#[test]
+fn review_a_whole_repository_lane_is_warned() {
+    let mut s = board();
+    let whole = take(&mut s, "claude", &["."], false).unwrap();
+    assert!(whole["warning"].is_string(), "{whole}");
+    let narrow = take(&mut s, "codex", &["docs/"], true).unwrap();
+    assert!(narrow["warning"].is_null());
 }

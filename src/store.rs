@@ -1397,9 +1397,16 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 params![actor, serde_json::to_string(&paths)?, purpose, card, state, now],
             )?;
             let id = conn.last_insert_rowid();
-            Ok(
-                json!({"lane":{"id":id,"agent":actor,"paths":paths,"purpose":purpose,"card":card,"state":state},"waiting_on":conflicts}),
-            )
+            let mut result = json!({"lane":{"id":id,"agent":actor,"paths":paths,"purpose":purpose,"card":card,"state":state},"waiting_on":conflicts});
+            if paths
+                .iter()
+                .any(|p| lane_path(p).is_ok_and(|p| p.is_empty()))
+            {
+                result["warning"] = json!(
+                    "this lane covers the whole repository; release it and take narrower paths unless that is intended"
+                );
+            }
+            Ok(result)
         }
         "lane_release" => {
             // Release (or hand over) a lane. The next queued lane that no
@@ -1420,6 +1427,27 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ));
             }
             let to = a.get("to").map(|_| string(a, "to")).transpose()?;
+            if to.is_some() && holder != actor {
+                return Err(Error::new(
+                    "lane_not_yours",
+                    format!("only {holder} can hand over lane {id}; release it, then take (or --queue) it yourself so earlier queuers keep their turn"),
+                ));
+            }
+            if let Some(to) = to {
+                let joined: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agents WHERE name=? AND enabled=1)",
+                    [to],
+                    |r| r.get(0),
+                )?;
+                if !joined {
+                    return Err(Error::new(
+                        "unknown_agent",
+                        format!(
+                            "{to} has not joined, so it cannot hold a lane; nothing was changed"
+                        ),
+                    ));
+                }
+            }
             let reason = match (&to, holder == actor) {
                 (Some(to), _) => format!("handed to {to}"),
                 (None, true) => a
@@ -1431,10 +1459,16 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 (None, false) => format!("stale; released by {actor}"),
             };
             text(&reason, "reason", 200, false)?;
-            conn.execute(
-                "UPDATE lanes SET released_ms=?,released_reason=? WHERE id=?",
-                params![now, reason, id],
-            )?;
+            if let Some(to) = to {
+                // A handover moves the lane as it is, in place: a queued lane
+                // stays queued and keeps its turn.
+                conn.execute("UPDATE lanes SET agent=? WHERE id=?", params![to, id])?;
+            } else {
+                conn.execute(
+                    "UPDATE lanes SET released_ms=?,released_reason=? WHERE id=?",
+                    params![now, reason, id],
+                )?;
+            }
             let paths: Vec<String> = serde_json::from_value(lane["paths"].clone())?;
             let mut handed = Value::Null;
             if holder != actor {
@@ -1452,25 +1486,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 )?;
             }
             if let Some(to) = to {
-                let joined: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM agents WHERE name=? AND enabled=1)",
-                    [to],
-                    |r| r.get(0),
-                )?;
-                if !joined {
-                    return Err(Error::new(
-                        "unknown_agent",
-                        format!(
-                            "{to} has not joined, so it cannot hold a lane; nothing was changed"
-                        ),
-                    ));
-                }
-                // A handover moves the lane as it is: a queued lane stays queued.
-                conn.execute(
-                    "INSERT INTO lanes(agent,paths,purpose,card_id,state,created_ms) VALUES(?,?,?,?,?,?)",
-                    params![to, serde_json::to_string(&paths)?, lane["purpose"].as_str().unwrap_or(""), lane["card"].as_i64(), lane["state"].as_str().unwrap_or("queued"), now],
-                )?;
-                handed = json!(conn.last_insert_rowid());
+                handed = json!(id);
                 lane_notice(
                     conn,
                     actor,
@@ -2161,8 +2177,8 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
     Ok(json!({"bound":bound,"recent_takeover":takeover}))
 }
 
-/// A lane path, normalized for comparison: repo-relative, no `..`, printable
-/// ASCII (spaces allowed). `./` and repeated or trailing slashes are dropped;
+/// A lane path, normalized for comparison: repo-relative, no `..`, no
+/// control characters, no blank segments (Unicode names are fine). `./` and repeated or trailing slashes are dropped;
 /// a glob (`*`, `?`, `[`) stands for its whole directory; comparison is
 /// case-insensitive. Deliberately conservative: when unsure, paths overlap.
 /// Returns the prefix ("" means the whole repository).
@@ -2171,10 +2187,12 @@ fn lane_path(p: &str) -> Result<String> {
         || p.len() > 200
         || p.starts_with('/')
         || p.split('/').any(|seg| seg == "..")
-        || !p.chars().all(|c| c == ' ' || c.is_ascii_graphic())
+        || p.chars().any(char::is_control)
+        || p.split('/')
+            .any(|seg| !seg.is_empty() && seg.trim().is_empty())
     {
         return Err(Error::invalid(format!(
-            "lane path {p:?}: repo-relative, no .., 1..200 printable characters"
+            "lane path {p:?}: repo-relative, no .., 1..200 characters, no blank names"
         )));
     }
     let mut parts: Vec<&str> = p
@@ -2201,9 +2219,11 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
         || a.starts_with(&format!("{b}/"))
 }
 
-/// Whether an agent is still present. Reads count as much as writes: a live
-/// session or recent write, a connected listener, a running drive loop, a
-/// recent inbox/wait/thread presentation or a hook exposure.
+/// Whether an agent is still present, meaning reachable: a live session or
+/// recent write, an armed (connected) listener or running drive loop, which
+/// will hear a lane notice, or a recent presentation of receipts (inbox, wait,
+/// thread or hook). Polling an empty inbox is not recorded; arm a wait or set
+/// a status instead.
 fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
     let seen: Option<i64> = conn.query_row(
         "SELECT max(t) FROM (SELECT last_seen_ms AS t FROM sessions WHERE agent=?1 AND ended_ms IS NULL UNION ALL SELECT last_seen_ms FROM agents WHERE name=?1 AND enabled=1 UNION ALL SELECT updated_ms FROM listeners WHERE agent=?1 AND connected=1 UNION ALL SELECT updated_ms FROM controllers WHERE agent=?1 AND state IN ('waiting','running') UNION ALL SELECT max(created_ms) FROM presented_batches WHERE agent=?1 UNION ALL SELECT max(shown_at_ms) FROM deliveries WHERE agent=?1)",
@@ -2242,26 +2262,40 @@ fn live_lanes(conn: &Connection, now: i64) -> Result<Vec<Value>> {
 /// Other agents' lanes that block `paths`: any overlapping held lane, and any
 /// overlapping queued lane that was there first (queues are first come,
 /// first served). `before` is the queued lane's own id, or None for a new take.
+/// A queued lane that is itself waiting on one of the actor's held lanes does
+/// not block the actor: it is waiting for the actor to finish, and blocking
+/// the actor would deadlock both.
 fn lane_conflicts(
     lanes: &[Value],
     actor: &str,
     paths: &[String],
     before: Option<i64>,
 ) -> Vec<Value> {
+    let lane_paths = |l: &Value| -> Vec<String> {
+        l["paths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str().map(str::to_owned))
+            .collect()
+    };
+    let overlap =
+        |a: &[String], b: &[String]| a.iter().any(|x| b.iter().any(|y| paths_overlap(x, y)));
+    let mine: Vec<Vec<String>> = lanes
+        .iter()
+        .filter(|l| l["agent"] == actor && l["state"] == "held")
+        .map(lane_paths)
+        .collect();
     lanes
         .iter()
         .filter(|l| l["agent"] != actor)
         .filter(|l| {
             l["state"] == "held"
                 || (l["state"] == "queued"
-                    && before.is_none_or(|b| l["id"].as_i64().is_some_and(|id| id < b)))
+                    && before.is_none_or(|b| l["id"].as_i64().is_some_and(|id| id < b))
+                    && !mine.iter().any(|m| overlap(m, &lane_paths(l))))
         })
-        .filter(|l| {
-            l["paths"].as_array().into_iter().flatten().any(|held| {
-                held.as_str()
-                    .is_some_and(|held| paths.iter().any(|p| paths_overlap(held, p)))
-            })
-        })
+        .filter(|l| overlap(&lane_paths(l), paths))
         .cloned()
         .collect()
 }
