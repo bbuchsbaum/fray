@@ -111,17 +111,24 @@ fn selected_manager_sees_incoming_outgoing_and_named_topics_not_firehose() {
     );
     note(&mut s);
     assert_eq!(selected(&mut s, "manager")["total"], 3);
+    // The runner reads in excerpt mode (its packet has its own byte budget),
+    // so compare against the same selection with full text disabled.
     assert_eq!(
         s.selected_attention("manager", 0, 100, "involved", NOW)
             .unwrap(),
-        selected(&mut s, "manager")
-            .as_object()
-            .map(|v| {
-                let mut v = v.clone();
-                v.remove("store_id");
-                Value::Object(v)
-            })
-            .unwrap()
+        call(
+            &mut s,
+            "manager",
+            "inbox",
+            json!({"selection":"involved","full_text_budget":0}),
+        )
+        .as_object()
+        .map(|v| {
+            let mut v = v.clone();
+            v.remove("store_id");
+            Value::Object(v)
+        })
+        .unwrap()
     );
 }
 

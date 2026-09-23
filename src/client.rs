@@ -190,6 +190,15 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     if !matches!(req.op.as_str(), "ping" | "shutdown") {
         let daemon = handshake(&mut reader, home)?;
         wire_request = session_request(req, &daemon)?;
+        // Optional excerpt control: a daemon without full text needs no limit.
+        if !daemon["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|c| c == "addressed_full_text"))
+        {
+            if let Some(args) = wire_request.args.as_object_mut() {
+                args.remove("full_text_budget");
+            }
+        }
         let capability = match req.op.as_str() {
             "join" if req.args.get("takeover").is_some() => Some(("sessions", "join --takeover")),
             "patch" if req.args.get("over_objection").is_some() => {
@@ -197,6 +206,8 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             }
             "mute" | "unmute" => Some(("mute", "thread muting")),
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
+            "ack" if req.args.get("last").is_some() => Some(("ack_last", "ack --last")),
+            "send" if req.args.get("pending").is_some() => Some(("pending_send", "send --pending")),
             "ack" if req.args.get("batch").is_some() => {
                 Some(("read_batches", "batch acknowledgments"))
             }

@@ -336,7 +336,7 @@ impl Store {
         fresh: bool,
         now: i64,
     ) -> Result<Value> {
-        inbox(&self.conn, actor, after, limit, fresh, "all".into(), now)
+        inbox(&self.conn, actor, after, limit, fresh, "all".into(), 0, now)
     }
     pub fn selected_attention(
         &self,
@@ -353,6 +353,7 @@ impl Store {
             limit,
             false,
             selection.into(),
+            0,
             now,
         )
     }
@@ -364,7 +365,16 @@ impl Store {
         selection: InboxSelection<'_>,
         now: i64,
     ) -> Result<Value> {
-        inbox(&self.conn, actor, after, limit, false, selection, now)
+        inbox(
+            &self.conn,
+            actor,
+            after,
+            limit,
+            false,
+            selection,
+            ADDRESSED_FULL_TEXT_BUDGET,
+            now,
+        )
     }
 }
 fn highwater(conn: &Connection) -> Result<i64> {
@@ -392,12 +402,62 @@ fn assignee_known(conn: &Connection, who: &Option<String>) -> Result<()> {
             |r| r.get(0),
         )?;
         if !exists {
-            return Err(Error::invalid(format!(
-                "unknown assignee {who}; join that identity first"
-            )));
+            let near = nearest_agents(conn, who)?;
+            let hint = if near.is_empty() {
+                String::new()
+            } else {
+                format!(" Did you mean {}?", near.join(", "))
+            };
+            return Err(Error::new(
+                "unknown_agent",
+                format!(
+                    "no agent named {who:?} has joined.{hint} To leave a message for an agent that will join later, use send --pending {who}."
+                ),
+            ));
         }
     }
     Ok(())
+}
+
+/// Registered names that are probably what a mistyped or shortened name meant:
+/// a prefix either way (codex -> codex-attention-0923), or a small edit distance.
+fn nearest_agents(conn: &Connection, who: &str) -> Result<Vec<String>> {
+    let mut s = conn.prepare("SELECT name FROM agents")?;
+    let names = s
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let wanted = who.to_lowercase();
+    let mut scored: Vec<(usize, String)> = names
+        .into_iter()
+        .filter_map(|name| {
+            let lower = name.to_lowercase();
+            let score = if lower.starts_with(&wanted) || wanted.starts_with(&lower) {
+                0
+            } else {
+                edit_distance(&lower, &wanted)
+            };
+            (score <= (wanted.chars().count() / 4).max(2)).then_some((score, name))
+        })
+        .collect();
+    scored.sort();
+    Ok(scored.into_iter().take(3).map(|(_, name)| name).collect())
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(ca != *cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 fn row_card(r: &Row<'_>) -> rusqlite::Result<Card> {
     let raw: String = r.get(9)?;
@@ -690,10 +750,22 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "send" => {
-            check_fields(a, &["to", "body", "title", "ask", "priority", "refs"])?;
+            check_fields(
+                a,
+                &["to", "body", "title", "ask", "priority", "refs", "pending"],
+            )?;
             let target = string(a, "to")?;
             if !valid_name(target) {
                 return Err(Error::invalid("to must be a registered agent name"));
+            }
+            // Explicitly leave mail for an agent that has not joined yet: it
+            // is registered disabled and receives the message when it joins.
+            // Only on request, so a typo still fails with suggestions.
+            if boolean(a, "pending", false)? {
+                conn.execute(
+                    "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
+                    params![target, "[\"*\"]", now],
+                )?;
             }
             let body = string(a, "body")?;
             text(body, "body", 8000, false)?;
@@ -947,8 +1019,20 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "ack" => {
-            if let Some(batch) = a.get("batch") {
-                check_fields(a, &["batch", "ids"])?;
+            let last = if boolean(a, "last", false)? {
+                check_fields(a, &["last", "ids"])?;
+                Some(last_batch(conn, actor, req.session.as_deref(), now)?)
+            } else {
+                None
+            };
+            if let Some(batch) = last
+                .as_ref()
+                .map(|b| json!(b))
+                .or_else(|| a.get("batch").cloned())
+            {
+                if last.is_none() {
+                    check_fields(a, &["batch", "ids"])?;
+                }
                 let batch = batch
                     .as_str()
                     .ok_or_else(|| Error::invalid("batch must be a string"))?;
@@ -1087,8 +1171,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             let batch = random_key()?;
             conn.execute(
-                "INSERT INTO presented_batches(batch,agent,session,source,created_ms) VALUES(?,?,NULL,?,?)",
-                params![batch, actor, source, now],
+                "INSERT INTO presented_batches(batch,agent,session,source,created_ms) VALUES(?,?,?,?,?)",
+                params![batch, actor, req.session, source, now],
             )?;
             for (id, through) in &items {
                 conn.execute(
@@ -1169,7 +1253,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1294,6 +1378,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "unresolved",
                     "kinds",
                     "min_priority",
+                    "full_text_budget",
                 ],
             )?;
             inbox(
@@ -1303,6 +1388,13 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 bounded(a, "limit", 20, 1, 100)?,
                 boolean(a, "fresh", false)?,
                 InboxSelection::parse(a)?,
+                bounded(
+                    a,
+                    "full_text_budget",
+                    ADDRESSED_FULL_TEXT_BUDGET as i64,
+                    0,
+                    64_000,
+                )? as usize,
                 now,
             )
         }
@@ -1633,6 +1725,32 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
 
 const BATCH_TTL_MS: i64 = 86_400_000;
 
+/// The newest batch this session explicitly read (inbox or thread). Waits and
+/// attention packets are excluded: both often run in the background, so the
+/// newest one may have arrived after what the agent actually read. Ack those
+/// by their batch token.
+/// Without a session there is no safe notion of "last": fail closed.
+fn last_batch(conn: &Connection, actor: &str, session: Option<&str>, now: i64) -> Result<String> {
+    let session = session.ok_or_else(|| {
+        Error::new(
+            "session_required",
+            "ack --last needs a host session (Claude/Codex sessions are detected automatically; else set FRAY_SESSION); use ack --batch ID",
+        )
+    })?;
+    conn.query_row(
+        "SELECT batch FROM presented_batches WHERE agent=? AND session=? AND source IN ('inbox','thread') AND created_ms>=? ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+        params![actor, session, now - BATCH_TTL_MS],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| {
+        Error::new(
+            "batch_unknown",
+            "this session has no inbox/thread batch to acknowledge (waits and attention packets are acked by their batch token); nothing was acknowledged",
+        )
+    })
+}
+
 /// The exact (card, through_seq) pairs one presented batch showed this actor.
 fn batch_items(conn: &Connection, actor: &str, batch: &str, now: i64) -> Result<Vec<(i64, i64)>> {
     let owner: Option<(String, i64)> = conn
@@ -1812,6 +1930,12 @@ fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Resul
         .collect::<rusqlite::Result<Vec<_>>>()?;
     raw.into_iter().map(|(seq,ts,actor,op,id,payload)|Ok(json!({"seq":seq,"ts_ms":ts,"actor":actor,"op":op,"card_id":id,"payload":serde_json::from_str::<Value>(&payload)?}))).collect()
 }
+/// Bytes of full message text one inbox page may carry for addressed items.
+const ADDRESSED_FULL_TEXT_BUDGET: usize = 16_000;
+
+// One read path shared by every consumer; each argument is a distinct,
+// caller-chosen dimension, so a parameter struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn inbox(
     conn: &Connection,
     actor: &str,
@@ -1819,6 +1943,7 @@ fn inbox(
     limit: i64,
     fresh: bool,
     selection: InboxSelection<'_>,
+    full_budget: usize,
     now: i64,
 ) -> Result<Value> {
     registered(conn, actor)?;
@@ -1845,19 +1970,82 @@ fn inbox(
         conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
             r.get(0)
         })?;
+    // Full text for what is addressed to you (assigned to you, or replies on
+    // a question/task you asked), within a page-wide budget measured in encoded
+    // JSON bytes; broadcasts keep previews.
+    let mut full_budget = full_budget;
+    let encoded = |text: &str| serde_json::to_string(text).map_or(usize::MAX, |t| t.len());
     for (id, pending, ack) in rows {
         let card = get_card(conn, id)?;
+        let addressed = card.assignee.as_deref() == Some(actor)
+            || (card.author == actor && matches!(card.kind.as_str(), "question" | "task"));
         let count: i64 = conn.query_row(
             "SELECT count(*) FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=?",
             params![id, ack, pending],
             |r| r.get(0),
         )?;
         let mut s=conn.prepare("SELECT seq,actor,json_extract(payload,'$.detail.kind'),json_extract(payload,'$.detail.body'),json_extract(payload,'$.detail.follow_up_id') FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=? ORDER BY seq DESC LIMIT 2")?;
-        let annotations=s.query_map(params![id,ack,pending],|r|{
-            let body:String=r.get(3)?;
-            Ok(json!({"seq":r.get::<_,i64>(0)?,"actor":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"excerpt":clip(&body,200),"excerpt_truncated":body.chars().count()>200,"follow_up_id":r.get::<_,Option<i64>>(4)?}))
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
-        items.push(json!({"card":card.compact(now),"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
+        let raw = s
+            .query_map(params![id, ack, pending], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut compact = card.compact(now);
+        let mut full = false;
+        if addressed {
+            // A long send keeps only a bounded head on the card; the whole
+            // message lives in its creation event. Use it only while the card
+            // still shows that original head: after a patch, the current
+            // summary is the truth, never the superseded original.
+            let original: Option<(Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT json_extract(payload,'$.detail.body'),json_extract(payload,'$.card.summary') FROM events WHERE card_id=? AND op='post' ORDER BY seq LIMIT 1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let text = match original {
+                Some((Some(body), Some(head)))
+                    if head == card.summary && body.len() > card.summary.len() =>
+                {
+                    body
+                }
+                _ => card.summary.clone(),
+            };
+            let cost = encoded(&text);
+            if cost <= full_budget {
+                full_budget -= cost;
+                compact["summary"] = json!(text);
+                compact["summary_truncated"] = json!(false);
+                full = true;
+            } else if text.len() > card.summary.len() {
+                // The preview is of a head that itself omits the full message.
+                compact["summary_truncated"] = json!(true);
+            }
+            // Otherwise keep compact()'s own flag: a short ask shown whole is
+            // not truncated just because full text was not requested.
+        }
+        let mut annotations = Vec::new();
+        for (seq, who, kind, body, follow_up) in raw {
+            let cost = encoded(&body);
+            let whole = addressed && cost <= full_budget;
+            if whole {
+                full_budget -= cost;
+            }
+            let excerpt = if whole {
+                body.clone()
+            } else {
+                clip(&body, 200)
+            };
+            annotations.push(json!({"seq":seq,"actor":who,"kind":kind,"excerpt":excerpt,"excerpt_truncated":!whole && body.chars().count()>200,"full":whole,"follow_up_id":follow_up}));
+        }
+        items.push(json!({"card":compact,"addressed":addressed,"full_text":full,"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
     }
     Ok(
         json!({"agent":actor,"selection":selection.mode,"card_ids":selection.card_ids,"addressed_to_me":selection.addressed_to_me,"unresolved":selection.unresolved,"kinds":selection.kinds,"min_priority":selection.min_priority,"cursor":highwater(conn)?,"items":items,"total":total,"more":(items.len() as i64)<total,"read_is_not_ack":true}),
@@ -1886,7 +2074,7 @@ fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?}));
     }
     Ok(json!({"items":items,"more":more}))
 }
@@ -1973,7 +2161,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
             r.get(0)
         })?;
-    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
+    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
     out["idle_readiness"] = idle_readiness(conn, actor, now)?;
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {

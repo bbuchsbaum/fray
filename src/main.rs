@@ -145,6 +145,10 @@ enum Cmd {
         /// Attach a searchable reference, for example --ref mote:ISSUE. Repeatable.
         #[arg(long = "ref")]
         refs: Vec<String>,
+        /// Leave the message for an agent that has not joined yet; it is
+        /// delivered when that name joins. Without this, unknown names fail.
+        #[arg(long)]
+        pending: bool,
     },
     /// Reply in a conversation. Questions and objections open linked questions.
     Reply {
@@ -276,18 +280,22 @@ enum Cmd {
     },
     /// Mark only the delivery version you actually handled; this does not close work.
     Ack {
-        #[arg(required_unless_present_any = ["receipts", "batch"], conflicts_with_all = ["receipts", "batch"])]
+        #[arg(required_unless_present_any = ["receipts", "batch", "last"], conflicts_with_all = ["receipts", "batch", "last"])]
         id: Option<i64>,
-        #[arg(long, requires = "id", required_unless_present_any = ["receipts", "batch"])]
+        #[arg(long, requires = "id", required_unless_present_any = ["receipts", "batch", "last"])]
         through: Option<i64>,
         /// JSON receipt array, or '-' for stdin. Copy receipts from the packet you handled.
-        #[arg(long, conflicts_with_all = ["id", "through", "batch"])]
+        #[arg(long, conflicts_with_all = ["id", "through", "batch", "last"])]
         receipts: Option<String>,
         /// Acknowledge exactly what an inbox/wait/thread batch showed you.
-        #[arg(long, conflicts_with_all = ["id", "through"])]
+        #[arg(long, conflicts_with_all = ["id", "through", "last"])]
         batch: Option<String>,
-        /// With --batch: only these card IDs from that batch.
-        #[arg(long, requires = "batch", value_delimiter = ',')]
+        /// Acknowledge the batch this session's latest inbox/wait/thread showed
+        /// you (never a fresh read, never an attention packet).
+        #[arg(long)]
+        last: bool,
+        /// With --batch or --last: only these card IDs from that batch.
+        #[arg(long, value_delimiter = ',')]
         ids: Vec<i64>,
     },
     /// Show the exact receipts a presented batch covers. Never acknowledges.
@@ -695,10 +703,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             ask,
             priority,
             refs,
+            pending,
         } => {
             let mut a = json!({"to":to,"body":message_body(body,body_file)?,"ask":ask,"priority":priority,"refs":refs});
             if let Some(title) = title {
                 a["title"] = json!(title);
+            }
+            if pending {
+                a["pending"] = json!(true);
             }
             ("send", a)
         }
@@ -901,10 +913,17 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             through,
             receipts,
             batch,
+            last,
             ids,
         } => {
-            let args = if let Some(batch) = batch {
-                let mut args = json!({"batch":batch});
+            if !ids.is_empty() && batch.is_none() && !last {
+                return Err(Error::invalid("--ids requires --batch or --last"));
+            }
+            let args = if batch.is_some() || last {
+                let mut args = match batch {
+                    Some(batch) => json!({"batch":batch}),
+                    None => json!({"last":true}),
+                };
                 if !ids.is_empty() {
                     args["ids"] = json!(ids);
                 }
@@ -1278,12 +1297,28 @@ fn human(v: &Value, out: &mut String) {
                 ));
                 if let Some(notes) = item["annotations"].as_array() {
                     for n in notes {
-                        out.push_str(&format!(
-                            "      @{} {}: {}\n",
-                            n["seq"],
-                            clean(n["kind"].as_str().unwrap_or("note")),
-                            clean(n["excerpt"].as_str().unwrap_or(""))
-                        ));
+                        let text = n["excerpt"].as_str().unwrap_or("");
+                        if n["full"] == true {
+                            // Addressed to you: the whole message, layout kept.
+                            out.push_str(&format!(
+                                "      @{} {} {} (full):\n",
+                                n["seq"],
+                                clean(n["actor"].as_str().unwrap_or("")),
+                                clean(n["kind"].as_str().unwrap_or("note"))
+                            ));
+                            for line in text.lines() {
+                                out.push_str("        ");
+                                out.push_str(&clean(line));
+                                out.push('\n');
+                            }
+                        } else {
+                            out.push_str(&format!(
+                                "      @{} {}: {}\n",
+                                n["seq"],
+                                clean(n["kind"].as_str().unwrap_or("note")),
+                                clean(text)
+                            ));
+                        }
                     }
                 }
             } else if item.get("rev").is_some() {
@@ -1431,7 +1466,10 @@ fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Re
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
-    let mut args = json!({"selection":selection,"fresh":event != "Stop","limit":4});
+    // Excerpts only: the hook must surface every addressed item within its
+    // byte cap; the agent reads full text with `thread ID --unread`.
+    let mut args =
+        json!({"selection":selection,"fresh":event != "Stop","limit":4,"full_text_budget":0});
     if event != "SessionStart" {
         args["addressed_to_me"] = json!(true);
         args["min_priority"] = json!(1);

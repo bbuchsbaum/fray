@@ -554,3 +554,99 @@ fn unread_skips_the_readers_own_messages() {
     assert_eq!(after["unread"].as_array().unwrap().len(), 0);
     assert_eq!(after["own_skipped"], 0);
 }
+
+fn as_session(
+    store: &mut Store,
+    actor: &str,
+    session: &str,
+    op: &str,
+    args: Value,
+) -> Result<Value, String> {
+    store
+        .execute_at(
+            &Request::new(op, actor, args).with_session(Some(session.to_owned())),
+            NOW,
+        )
+        .map_err(|e| e.code)
+}
+
+fn present_as(store: &mut Store, actor: &str, session: &str, source: &str) -> String {
+    let page = call(store, actor, "inbox", json!({}));
+    let receipts: Vec<Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["receipt"].clone())
+        .collect();
+    as_session(
+        store,
+        actor,
+        session,
+        "present",
+        json!({"source": source, "receipts": receipts}),
+    )
+    .unwrap()["batch"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn ack_last_acknowledges_this_sessions_latest_pull_only() {
+    let mut s = pair();
+    let first = ask(&mut s, "First?");
+    // No session: there is no safe "last"; nothing is acknowledged.
+    assert_eq!(
+        fails(&mut s, "claude", "ack", json!({"last": true})),
+        "session_required"
+    );
+    let pulled = present_as(&mut s, "claude", "claude:me", "inbox");
+    // Later, a background attention packet and a background wait under the
+    // same session show more. Neither may be taken as "last".
+    let second = ask(&mut s, "Second?");
+    present_as(&mut s, "claude", "claude:me", "attention");
+    present_as(&mut s, "claude", "claude:me", "wait");
+    // A different live session cannot even present under this name.
+    assert_eq!(
+        as_session(
+            &mut s,
+            "claude",
+            "claude:other",
+            "present",
+            json!({"source": "inbox", "receipts": []})
+        )
+        .unwrap_err(),
+        "identity_busy"
+    );
+    let acked = as_session(&mut s, "claude", "claude:me", "ack", json!({"last": true})).unwrap();
+    assert_eq!(acked["batch"], pulled);
+    assert_eq!(acked["acknowledged"].as_array().unwrap().len(), 1);
+    assert_eq!(acked["acknowledged"][0]["id"], first);
+    // The item shown only by the attention packet stays pending.
+    let left = call(&mut s, "claude", "inbox", json!({}));
+    assert_eq!(left["total"], 1);
+    assert_eq!(left["items"][0]["card"]["id"], second);
+}
+
+#[test]
+fn ack_last_supports_an_ids_subset_and_fails_closed_without_a_pull() {
+    let mut s = pair();
+    assert_eq!(
+        as_session(&mut s, "claude", "claude:me", "ack", json!({"last": true})).unwrap_err(),
+        "batch_unknown"
+    );
+    let first = ask(&mut s, "First?");
+    let second = ask(&mut s, "Second?");
+    present_as(&mut s, "claude", "claude:me", "inbox");
+    as_session(
+        &mut s,
+        "claude",
+        "claude:me",
+        "ack",
+        json!({"last": true, "ids": [second]}),
+    )
+    .unwrap();
+    let left = call(&mut s, "claude", "inbox", json!({}));
+    assert_eq!(left["total"], 1);
+    assert_eq!(left["items"][0]["card"]["id"], first);
+}
