@@ -173,6 +173,16 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     if !matches!(req.op.as_str(), "ping" | "shutdown") {
         let daemon = handshake(&mut reader, home)?;
         let capability = match req.op.as_str() {
+            "present" | "batch" => Some(("read_batches", "immutable read batches")),
+            "ack" if req.args.get("batch").is_some() => {
+                Some(("read_batches", "batch acknowledgments"))
+            }
+            "show" if req.args.get("unread").is_some() => {
+                Some(("thread_unread", "unread conversation view"))
+            }
+            "show" if req.args.get("compact").is_some() => {
+                Some(("thread_compact", "compact conversation view"))
+            }
             "wait"
                 if req.args.get("addressed_to_me").is_some()
                     || req.args.get("unresolved").is_some() =>
@@ -239,7 +249,13 @@ fn check_attention_filters(daemon: &Value, args: &Value) -> Result<()> {
 /// Reconnect deliberately re-offers unacknowledged receipts; consumers deduplicate
 /// by (store_id, agent, id, through_seq), never by a global stream cursor.
 pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: bool) -> Result<()> {
-    crate::attention::Options::parse(&args)?;
+    let notification = boolean(&args, "notification", false)?;
+    if let Some(args) = args.as_object_mut() {
+        args.remove("notification");
+    }
+    let mut selection_args = args.clone();
+    let activation = crate::notification::take_activation(&mut selection_args)?;
+    crate::attention::Options::parse(&selection_args)?;
     if !valid_name(actor) {
         return Err(Error::invalid(
             "watch --attention requires a unique --as name",
@@ -275,6 +291,19 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                 return Err(Error::new("unsupported_capability", "Daemon does not support attention streams. No operational request sent; coordinate an upgrade with its owner."));
             }
             check_attention_filters(&daemon, &args)?;
+            let mut wire_args = args.clone();
+            if activation.is_some()
+                && !daemon["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|cap| cap == "listener_activation"))
+            {
+                wire_args.as_object_mut().unwrap().remove("activation");
+                wire_args
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("activation_expires_ms");
+                eprintln!("fray attention: daemon cannot record adapter activation; continuing with unknown activation");
+            }
             if let Some(id) = daemon["store_id"].as_str() {
                 if expected_store.as_ref().is_some_and(|old| old != id) {
                     return Err(Error::new(
@@ -288,10 +317,10 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                 .set_read_timeout(Some(Duration::from_secs(45)))?;
             write_request(
                 reader.get_mut(),
-                &Request::new("watch_attention", actor, args.clone()),
+                &Request::new("watch_attention", actor, wire_args),
             )?;
             while let Some(line) = read_frame(&mut reader, RESPONSE_LIMIT)? {
-                let data = unpack(serde_json::from_str(&line)?)?;
+                let mut data = unpack(serde_json::from_str(&line)?)?;
                 let id = string(&data, "store_id")?;
                 if expected_store.as_ref().is_some_and(|old| old != id) {
                     return Err(Error::new(
@@ -307,9 +336,45 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                 retry_delay = 1;
                 match data["type"].as_str() {
                     Some("attention") => {
+                        if daemon["capabilities"]
+                            .as_array()
+                            .is_some_and(|caps| caps.iter().any(|cap| cap == "read_batches"))
+                        {
+                            let receipts: Vec<_> = data["items"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|item| item["receipt"].clone())
+                                .collect();
+                            // Registration precedes output so a notice can contain
+                            // the token. It proves neither host exposure nor handling.
+                            let presented = rpc(
+                                home,
+                                &Request::new(
+                                    "present",
+                                    actor,
+                                    json!({"source":"attention","receipts":receipts}),
+                                ),
+                                10,
+                            )?;
+                            if presented["store_id"] != data["store_id"] {
+                                return Err(Error::new(
+                                    "store_changed",
+                                    "batch came from a replaced database",
+                                ));
+                            }
+                            data["batch"] = presented["batch"]["id"].clone();
+                        }
                         // Broken consumer output is terminal, never an excuse to reconnect.
-                        write_frame(&mut std::io::stdout().lock(), &data)
-                            .map_err(|e| Error::new("output_closed", e.message))?;
+                        if notification {
+                            for notice in crate::notification::notices(&data)? {
+                                write_frame(&mut std::io::stdout().lock(), &notice)
+                                    .map_err(|e| Error::new("output_closed", e.message))?;
+                            }
+                        } else {
+                            write_frame(&mut std::io::stdout().lock(), &data)
+                                .map_err(|e| Error::new("output_closed", e.message))?;
+                        }
                         if once {
                             return Ok(());
                         }

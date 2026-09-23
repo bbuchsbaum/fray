@@ -86,11 +86,14 @@ fray --as reviewer wait --timeout none --selection involved \
   --kinds question,objection --addressed-to-me --min-priority p2 --json
 ```
 
-`wait` exits 0 for selected attention, 3 for quiet timeout, 4 for an unavailable
+`wait` exits 0 for selected attention, 3 for quiet timeout, 4 for an unavailable or busy
 or disconnected daemon, and 1 for other runtime errors (CLI usage errors use 2).
 Finite waits retain the 300-second default. Quiet timeouts still return a JSON
 page with `timed_out: true`; they are not message arrivals. Cancellation of an
-indefinite wait releases its socket handler without leaving a stranded waiter.
+finite or indefinite wait releases its socket handler without leaving a stranded waiter.
+Finite waits preserve sequential RPC reuse on that socket; their EOF observer can
+add about 100 ms while it finishes a bounded socket read. It does not poll the
+database or invoke a model during that interval.
 
 Omit `--after` for durable resume. Fray already persists a separate acknowledged
 version for every agent/conversation. After handling, use `ack --receipts` with
@@ -190,9 +193,27 @@ individual Monitor tool watches have a separate deadline (currently at most 30
 minutes). Disabling a plugin mid-session does not stop its existing monitors;
 stop the task explicitly or end the owning session. See the
 [official monitor reference](https://code.claude.com/docs/en/plugins-reference#monitors).
-The host may truncate long lines in its notification display even when Fray's JSON
-is complete. Fetch `thread ID --bodies` when context is clipped; never infer a
-receipt version from a truncated notification.
+The adapter uses `--notification`: each NDJSON line is at most 768 bytes including
+its newline. A capable daemon supplies an immutable `batch` token and a
+`fetch: ["batch", TOKEN]` command. Fetch the batch, then read each needed
+`thread ID --unread` or `--bodies` page before acknowledging considered items with
+`ack --batch TOKEN --ids N,M`. The batch holds exact receipts; its fetched heads
+are current, and `newer_pending` identifies later delivery. It is not a historical
+snapshot or evidence that a host displayed the packet. Older attention daemons
+get one bounded notice per exact receipt instead. A host may still truncate its
+display; never reconstruct a token or receipt from clipped text.
+
+Use `fray --as NAME doctor` for a read-only diagnostic. It neither starts a daemon
+nor records a presentation batch. Listener presence and host activation are separate:
+the monitor declares `native-monitor`; the one-shot adapter declares
+`background-completion` with its expiry. Generic hosts can declare `manual`,
+`boundary`, or `managed` using `--activation` and optionally
+`--activation-expires-ms`. These are adapter assertions, not observed model
+responsiveness. An expired activation declaration is reported even if the socket
+remains alive. The core uses the same protocol for Claude, Codex and other agents.
+Against older attention daemons the client omits unsupported activation metadata
+with a stderr warning. Notifications still work, but activation remains unknown.
+`doctor` names missing activation/batch capabilities so that degradation is visible.
 
 For hosts with `asyncRewake` but no plugin monitors, `claude-rewake.example.json`
 shows a **one-shot SessionStart** fallback. Replace its absolute script path, merge

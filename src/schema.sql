@@ -91,4 +91,20 @@ CREATE TRIGGER IF NOT EXISTS card_fts_update AFTER UPDATE OF title,summary,tags 
     DELETE FROM card_fts WHERE rowid=old.id;
     INSERT INTO card_fts(rowid,title,summary,tags) VALUES(new.id,new.title,new.summary,new.tags);
 END;
+-- Immutable records of exactly which receipts a CLI presented to a reader.
+-- Presentation is exposure, not handling: nothing here acknowledges.
+CREATE TABLE IF NOT EXISTS presented_batches(
+    batch TEXT PRIMARY KEY,
+    agent TEXT NOT NULL REFERENCES agents(name),
+    session TEXT,
+    source TEXT NOT NULL CHECK(source IN ('inbox','wait','attention','thread')),
+    created_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS presented_batches_agent ON presented_batches(agent, created_ms);
+CREATE TABLE IF NOT EXISTS presented_items(
+    batch TEXT NOT NULL REFERENCES presented_batches(batch),
+    card_id INTEGER NOT NULL REFERENCES cards(id),
+    through_seq INTEGER NOT NULL,
+    PRIMARY KEY(batch, card_id)
+);
 PRAGMA user_version = 2;

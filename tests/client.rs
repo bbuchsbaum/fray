@@ -17,6 +17,45 @@ struct Mock {
     home: PathBuf,
     server: Option<thread::JoinHandle<Vec<Vec<Request>>>>,
 }
+
+#[test]
+fn batch_and_compact_operations_require_capability_before_sending() {
+    for (op, args, capability) in [
+        ("show", json!({"id":1,"compact":true}), "thread_compact"),
+        ("show", json!({"id":1,"unread":true}), "thread_unread"),
+        (
+            "ack",
+            json!({"batch":"0123456789abcdef0123456789abcdef"}),
+            "read_batches",
+        ),
+        (
+            "batch",
+            json!({"batch":"0123456789abcdef0123456789abcdef"}),
+            "read_batches",
+        ),
+        (
+            "present",
+            json!({"source":"inbox","receipts":[]}),
+            "read_batches",
+        ),
+    ] {
+        let request = Request::new(op, "fixture", args);
+        let mock = Mock::new(vec![hello("0.2.1", json!(2))]);
+        assert_eq!(
+            client::rpc(&mock.home, &request, 5).unwrap_err().code,
+            "unsupported_capability"
+        );
+        assert_eq!(mock.requests()[0].len(), 1);
+        let mut metadata = hello("0.2.1", json!(2));
+        metadata["capabilities"] = json!([capability]);
+        let mock = Mock::new(vec![metadata]);
+        assert_eq!(
+            client::rpc(&mock.home, &request, 5).unwrap()["args"],
+            request.args
+        );
+        assert_eq!(mock.requests()[0].len(), 2);
+    }
+}
 impl Mock {
     fn new(hellos: Vec<Value>) -> Self {
         let home = PathBuf::from("/tmp").join(format!("fray-client-{}", random_key().unwrap()));

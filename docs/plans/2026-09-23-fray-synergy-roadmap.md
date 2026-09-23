@@ -35,7 +35,7 @@ breaking one should be visible.
 
 - one authoritative SQLite store; state-first;
 - no model calls, no async runtime, no network stack;
-- the five direct dependencies; Git is used through subprocess calls;
+- the five direct dependencies and no unsafe code (the user approved libc on 2026-09-23, but it proved unnecessary: the fd limit is read via a fixed `sh -c "ulimit -n"`); Git is used through subprocess calls;
 - transport ≠ exposure ≠ handling ≠ completion;
 - a lease is not a filesystem lock;
 - peer text is data, not authority;
@@ -75,11 +75,15 @@ update.
 4. **Stats baseline and friction capture**, which are the plan's success metric
    and must exist before the phases they judge.
    - `fray stats` computed from the store:
-     - misroutes (follow-ups reassigned by hand);
+     - possible misroutes (follow-ups reassigned by hand; a reassignment is
+       a signal, not proof);
      - time to first answer;
      - open-objection age;
-     - wake-to-handle latency;
-     - noise ratio (acked with no action);
+     - wake-to-handle latency, measured from exposure timestamps (the time a
+       host actually displayed an item), not from socket delivery;
+     - (Codex's critique: an ack with no follow-up action is *not* noise,
+       because handling often needs no mutation. A noise measure must be
+       defined some other way before it is used as a metric.)
      - hand-fetched truncations (`thread --bodies` after a truncated preview).
    - `fray friction "..."` posts a note tagged `friction`.
    - Record the baseline from today's board.
@@ -101,9 +105,9 @@ update.
 
 | # | Change | Where | Owner |
 |---|---|---|---|
-| 1.1 | **Identity sessions: collision prevention, not authentication.** A `sessions` table. A session binds to something that persists across fresh shells: the worktree's gitignored `.fray-agent` file (name and session id), or the Claude hook's `session_id`. It never binds to an exported variable or a PID. `join` refuses a name held by a live *different* session (`identity_busy`, naming the holder and when it was last seen) unless given `--takeover`, which is logged and visible. | store: store.rs join (485-518); hook and client binding: main.rs hook (1122-1133) | Claude (store), Codex (hook and client) |
+| 1.1 | **Identity sessions: collision prevention, not authentication.** A `sessions` table. A session binds to something that persists across fresh shells: the worktree's gitignored `.fray-agent` file, or the Claude hook's `session_id`. The binding must allow several independent agents in one checkout (as today), so the file maps agent name to session and is never a single identity. It never binds to an exported variable or a PID. `join` refuses a name held by a live *different* session (`identity_busy`, naming the holder and when it was last seen) unless given `--takeover`, which is logged and visible. | store: store.rs join (485-518); hook and client binding: main.rs hook (1122-1133) | Claude (store), Codex (hook and client) |
 | 1.2 | **Quiet by default.** `wait` defaults to `--selection involved`. Fan-out to participants respects `enabled`, so nothing is routed to an agent after `leave`. `mute ID` silences a thread. | main.rs:301, emit (store.rs:440) | Codex |
-| 1.3 | **Objections visible, and closure gated.** `thread` and `show` list open linked follow-ups with status. Resolving a card that has open objections fails (`open_objections`) unless given `--over-objection "reason"`. `superseded` and `withdrawn` are exempt, and so is an objection whose objector has left or gone stale. It is capability-gated. | show (877-897), the patch status path | Claude |
+| 1.3 | **Objections visible, and closure gated.** `thread` and `show` list open linked follow-ups with status. Resolving a card that has open objections fails (`open_objections`) unless given `--over-objection "reason"`. `superseded` and `withdrawn` are exempt. An objector who has left or gone stale does *not* waive an unresolved correctness objection; the override records who overrode it and why. It is capability-gated. | show (877-897), the patch status path | Claude |
 | 1.4 | **Full text for what is addressed to you,** up to the budget, in inbox, wait and attention packets. | model.rs:213, store.rs:1251, attention.rs | Claude |
 | 1.5 | **`ack --last`.** A per-agent `presented` table records what each wait, inbox or packet showed. `ack --last` acks exactly those and never a newer version. | new table, ack (store.rs:748-802) | Claude |
 | 1.6 | **Thread-scoped wakes:** `wait/watch --card N[,M]`. | InboxSelection::condition | Codex |

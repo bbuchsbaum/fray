@@ -1,5 +1,54 @@
 # Vision and source review
 
+## Cooperative follow-up (2026-09-23)
+
+Outcome: reliable waits under load, compact reads, immutable receipt batches,
+read-only listening diagnostics and quieter collaboration.
+Scope: the five changes authorized in this conversation; broader lane/Git/metrics
+roadmap work remains separate. Mote retains ownership authority where adopted.
+Invariants: exact ACK versions, no read-as-ACK, session-scoped batch aliases,
+complete or explicitly paginated context, transport presence distinct from host
+activation, no shared daemon restart by a test or branch binary.
+Paths: Claude owns store/main/model/schema/attention and practice/skills; Codex
+owns server/client/diagnostics/notification and transport/adapter tests.
+Acceptance: required Cargo/IPC/SQL gates plus saturation and cancellation tests,
+actual-thread byte comparison, concurrent read/ACK cases, and host-qualified
+notification evidence.
+Observed friction: `reply --body-file -` opens a literal file named `-`; use a
+real temporary file or positional `-` for stdin. The current board still needs
+manual boundary checks. Its quiet roster is not evidence of peer inactivity.
+Implementation and required gates are complete at source manifest
+`36191df61576d7f21dbcc9c4c8af6b41b454584492684c07721e790ed77863c9`:
+113 Rust tests, 63 IPC tests, Cargo format/check/Clippy/build, SQL and plugin
+validation pass. The real review thread shrank 55.46% without losing checked
+context. Claude's native Monitor handled the compact notification on an isolated
+board; the fixture was stopped. Transport re-review is recorded on Fray #8.
+
+Field observations from this exchange (evidence, not inferred activity metrics):
+
+| Observed friction | Consequence / bounded response |
+| --- | --- |
+| `reply --body-file -` tried to open a literal file named `-` | A failed command and temporary-file retry; document positional stdin syntax, consider consistent file/stdin handling later |
+| A new Git baseline captured edits still in progress | The baseline is a snapshot, not a tested change boundary; bind review to an exact candidate and keep one writer per file |
+| An enabled roster entry gave no evidence that the host would wake | Report transport and declared activation separately; no responsiveness claim |
+| Thread reads repeated full head snapshots | Measure compact JSON against the actual review thread; preserve every body/ref/receipt |
+| Receipt bookkeeping required manually carrying sequence numbers | Explicit immutable batch IDs remove copying while preserving newer pending versions |
+| A diagnostic sent `agents {limit:100}` to the old daemon, whose API takes no arguments | Actual-board trial caught the compatibility bug; use the bounded roster response and its `more` flag |
+| Tests launched from a mutable shared `target/debug/fray` while either agent could rebuild | Freeze a private copy of the candidate binary before final IPC gates |
+| A proposed agent-wide `ack --last` could select another reader's batch | Rejected during negotiation; omit the alias until stable session binding exists |
+| The two agents had overlapping plans and different scopes | Agree on a shared contract and narrow file ownership; keep broader roadmap work separate from this batch |
+| Unread output offered a continuation but ignored the incoming cursor | Independent regression failed before the fix; permit reading all pages before ACK, and withhold cumulative receipts when a skipped prefix was not presented |
+| The first compact projection omitted a changed summary | Preserve conversation state changes as well as message bodies and references; test against a counterexample |
+| Saturation tests passed with a high descriptor limit, but the peer reproduced daemon death at 256 | Derive connection limits from the inherited OS limit and test low-limit admission and short-RPC survival |
+| Optional activation metadata made the adapter reject old attention daemons | Negotiate metadata independently, warn when activation is unknown, and exercise the real adapter against an old-protocol fixture |
+| `doctor` checked fewer capabilities than the shipped adapter used | Include activation and batch capabilities; verify the report against that old-protocol fixture |
+| Open follow-up lists silently stopped at 50 | Return an explicit omission flag and continuation command; test 51 linked questions |
+| Crossed messages requested approval for a dependency after its replacement was ready | Keep one current implementation decision tied to source; the final code retains five dependencies and uses a fixed startup limit probe |
+
+The user observed the negotiation while it was happening. These observations do
+not establish that every acknowledgment requires another action, that every
+reassignment was a misroute, or that quiet presence means an agent is idle.
+
 ## Attention and durable waits (2026-09-23)
 
 Outcome: host-neutral selected attention with bounded packets and an optional
@@ -16,7 +65,8 @@ Acceptance: cargo fmt/check/clippy/test/build with locked dependencies; Python I
 and SQL gates; real-host qualification separately recorded, with no fabricated
 claim from a synthetic host. No live shared daemon or global installation changed.
 Risks: additive capability required on the daemon; monitor availability differs
-by host/version. No Git metadata exists in this source copy.
+by host/version. This source copy had no Git metadata during the initial checks;
+the subsequent cooperative batch began after baseline commit `d74e398`.
 Independent Claude review reproduced two defects: near-budget packet construction
 could shrink urgent content or terminate a stream; a killed idle watcher held its
 lease until the next heartbeat. The fixes defer later items before shrinking the
@@ -54,8 +104,8 @@ Assessment of the remaining requests:
 | Mote link-through | Existing `reply --ref` adds searchable references. Automatic notes mirroring remains unimplemented: it needs explicit destination/actor, idempotent pointer publication, and visible partial-failure recovery across two stores. |
 
 The tests use temporary stores and deterministic hosts. No live pilot daemon,
-global binary, or installed project skill was changed. This source folder has no
-Git metadata or Mote store, so these are local changes and an assessment, not a
+global binary, or installed project skill was changed. This source folder had no
+Git metadata or Mote store during that review, so these were local changes and an assessment, not a
 published release or filed tracker backlog.
 
 ## Compatibility follow-up (0.2.1)

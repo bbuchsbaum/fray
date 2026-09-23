@@ -128,6 +128,11 @@ just to clear a queue.
 Say "agreed", "objecting" or "done" in words when you mean them. Silence is not
 consent.
 
+The tool keeps this honest by recording what it showed you. Each `inbox`, `wait`
+or `thread --unread` names an immutable batch, and `fray ack --batch` acknowledges
+that batch and nothing newer. A later reply that arrived while you were reading
+stays pending, which is the point: you have not read it yet.
+
 ### 9. Idle is a valid outcome
 
 When there is nothing useful to do, do nothing. Do not open work to look busy,

@@ -60,11 +60,17 @@ impl<'a> InboxSelection<'a> {
             condition.push_str(ACTIVE);
         }
         if !self.kinds.is_empty() {
-            // Only enum values validated by attention_kinds enter this SQL.
+            // Only fixed literals enter this SQL, even if a caller built the
+            // selection directly; an unknown kind matches nothing.
             let kinds = self
                 .kinds
                 .iter()
-                .map(|kind| format!("'{kind}'"))
+                .map(|kind| {
+                    ATTENTION_KINDS
+                        .iter()
+                        .find(|known| **known == kind.as_str())
+                        .map_or("NULL".to_owned(), |known| format!("'{known}'"))
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             condition.push_str(&format!(" AND (c.kind IN ({kinds}) OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.op='annotate' AND e.actor<>d.agent AND e.seq>d.ack_seq AND e.seq<=d.pending_seq AND json_extract(e.payload,'$.detail.kind') IN ({kinds})) OR EXISTS(SELECT 1 FROM events child JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE child.card_id=c.id AND child.op='post' AND parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind') IN ({kinds})))"));
@@ -87,6 +93,17 @@ impl<'a> From<&'a str> for InboxSelection<'a> {
     }
 }
 
+const ATTENTION_KINDS: [&str; 8] = [
+    "goal",
+    "task",
+    "question",
+    "decision",
+    "note",
+    "evidence",
+    "objection",
+    "answer",
+];
+
 pub(crate) fn attention_kinds(args: &Value) -> Result<Vec<String>> {
     let Some(value) = args.get("kinds") else {
         return Ok(Vec::new());
@@ -105,18 +122,7 @@ pub(crate) fn attention_kinds(args: &Value) -> Result<Vec<String>> {
             let kind = value
                 .as_str()
                 .ok_or_else(|| Error::invalid("kinds must contain strings"))?;
-            if ![
-                "goal",
-                "task",
-                "question",
-                "decision",
-                "note",
-                "evidence",
-                "objection",
-                "answer",
-            ]
-            .contains(&kind)
-            {
+            if !ATTENTION_KINDS.contains(&kind) {
                 return Err(Error::invalid("unknown attention kind"));
             }
             Ok(kind.to_owned())
@@ -199,6 +205,7 @@ impl Store {
                 | "release"
                 | "ack"
                 | "expose"
+                | "present"
                 | "follow"
                 | "unfollow"
                 | "controller"
@@ -244,10 +251,14 @@ impl Store {
             registered(&tx, &req.actor)?;
         }
         let mut result = mutate(&tx, req, now)?;
-        tx.execute(
-            "UPDATE agents SET last_seen_ms=? WHERE name=?",
-            params![now, req.actor],
-        )?;
+        // A listener registering what it displayed is not the agent acting;
+        // keep presence tied to deliberate activity.
+        if req.op != "present" {
+            tx.execute(
+                "UPDATE agents SET last_seen_ms=? WHERE name=?",
+                params![now, req.actor],
+            )?;
+        }
         let identity: String =
             tx.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
                 r.get(0)
@@ -817,6 +828,46 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "ack" => {
+            if let Some(batch) = a.get("batch") {
+                check_fields(a, &["batch", "ids"])?;
+                let batch = batch
+                    .as_str()
+                    .ok_or_else(|| Error::invalid("batch must be a string"))?;
+                let items = batch_items(conn, actor, batch, now)?;
+                let chosen: Vec<(i64, i64)> = match a.get("ids") {
+                    None => items,
+                    Some(ids) => {
+                        let ids = ids
+                            .as_array()
+                            .filter(|ids| !ids.is_empty() && ids.len() <= 100)
+                            .ok_or_else(|| Error::invalid("ids must be a nonempty array"))?;
+                        let mut chosen = Vec::new();
+                        for id in ids {
+                            let id = id
+                                .as_i64()
+                                .ok_or_else(|| Error::invalid("ids must be integers"))?;
+                            let item =
+                                items.iter().find(|(card, _)| *card == id).ok_or_else(|| {
+                                    Error::new(
+                                        "batch_mismatch",
+                                        format!("card #{id} is not in batch {batch}"),
+                                    )
+                                })?;
+                            chosen.push(*item);
+                        }
+                        chosen
+                    }
+                };
+                let mut acknowledged = Vec::new();
+                for (id, through) in chosen {
+                    acknowledged.push(mutate(
+                        conn,
+                        &Request::new("ack", actor, json!({"id":id,"through":through})),
+                        now,
+                    )?);
+                }
+                return Ok(json!({"batch":batch,"acknowledged":acknowledged}));
+            }
             if let Some(receipts) = a.get("receipts") {
                 check_fields(a, &["receipts"])?;
                 let receipts = receipts
@@ -871,6 +922,74 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 |r| r.get(0),
             )?;
             Ok(json!({"id":id,"ack_seq":acked,"pending_seq":pending,"still_pending":acked<pending}))
+        }
+        "present" => {
+            // Records exactly what a CLI showed. Presentation is exposure, never ACK.
+            check_fields(a, &["source", "receipts"])?;
+            let source = string(a, "source")?;
+            if !["inbox", "wait", "attention", "thread"].contains(&source) {
+                return Err(Error::invalid("source: inbox|wait|attention|thread"));
+            }
+            let receipts = a["receipts"]
+                .as_array()
+                .filter(|r| !r.is_empty() && r.len() <= 100)
+                .ok_or_else(|| Error::invalid("receipts must be a nonempty array"))?;
+            let store_id: String =
+                conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                    r.get(0)
+                })?;
+            let mut items = Vec::new();
+            for receipt in receipts {
+                check_fields(receipt, &["store_id", "agent", "id", "through_seq"])?;
+                if string(receipt, "store_id")? != store_id || string(receipt, "agent")? != actor {
+                    return Err(Error::new(
+                        "receipt_mismatch",
+                        "receipt belongs to another store or agent",
+                    ));
+                }
+                let id = integer(receipt, "id")?;
+                let through = integer(receipt, "through_seq")?;
+                let pending: Option<i64> = conn
+                    .query_row(
+                        "SELECT pending_seq FROM deliveries WHERE agent=? AND card_id=?",
+                        params![actor, id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if !pending.is_some_and(|pending| through > 0 && through <= pending) {
+                    return Err(Error::invalid(
+                        "each receipt must name a delivered version of this agent's card",
+                    ));
+                }
+                if items.iter().any(|(card, _)| *card == id) {
+                    return Err(Error::invalid("a batch lists each card once"));
+                }
+                items.push((id, through));
+            }
+            let batch = random_key()?;
+            conn.execute(
+                "INSERT INTO presented_batches(batch,agent,session,source,created_ms) VALUES(?,?,NULL,?,?)",
+                params![batch, actor, source, now],
+            )?;
+            for (id, through) in &items {
+                conn.execute(
+                    "INSERT INTO presented_items(batch,card_id,through_seq) VALUES(?,?,?)",
+                    params![batch, id, through],
+                )?;
+            }
+            // Bounded retention: the newest 32 batches per agent, none older than a day.
+            let stale = "SELECT batch FROM presented_batches WHERE agent=?1 AND (created_ms<?2 OR batch NOT IN (SELECT batch FROM presented_batches WHERE agent=?1 ORDER BY created_ms DESC,rowid DESC LIMIT 32))";
+            conn.execute(
+                &format!("DELETE FROM presented_items WHERE batch IN ({stale})"),
+                params![actor, now - BATCH_TTL_MS],
+            )?;
+            conn.execute(
+                &format!("DELETE FROM presented_batches WHERE batch IN ({stale})"),
+                params![actor, now - BATCH_TTL_MS],
+            )?;
+            Ok(
+                json!({"batch":{"id":batch,"source":source,"items":items.iter().map(|(id,through)|json!({"id":id,"through_seq":through})).collect::<Vec<_>>()},"acknowledged":false}),
+            )
         }
         "expose" => {
             check_fields(a, &["receipts"])?;
@@ -931,7 +1050,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -946,9 +1065,76 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         }
         "query" => query(conn, a, actor, now),
         "show" => {
-            check_fields(a, &["id", "history", "after", "limit", "receipts"])?;
+            check_fields(
+                a,
+                &[
+                    "id", "history", "after", "limit", "receipts", "unread", "compact",
+                ],
+            )?;
+            let compact = boolean(a, "compact", false)?;
             let c = get_card(conn, integer(a, "id")?)?;
             let mut v = json!({"card":c,"cursor":highwater(conn)?});
+            open_follow_ups(conn, c.id, &mut v)?;
+            if boolean(a, "unread", false)? {
+                // Unread = this reader's delivered-but-unacknowledged range. The
+                // receipt never reaches past the events actually returned.
+                registered(conn, actor)?;
+                let limit = bounded(a, "limit", 20, 1, 100)?;
+                let delivery: Option<(i64, i64)> = conn
+                    .query_row(
+                        "SELECT pending_seq,ack_seq FROM deliveries WHERE agent=? AND card_id=?",
+                        params![actor, c.id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let (pending, ack) = delivery.unwrap_or((0, 0));
+                // Continue after a page without acknowledging it. ACK is cumulative,
+                // so a continuation receipt is honest only if the skipped prefix
+                // (ack, after] was actually presented to this reader.
+                let start = bounded(a, "after", ack, 0, i64::MAX)?.max(ack);
+                let prefix_presented = start == ack
+                    || conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM presented_batches b JOIN presented_items i ON i.batch=b.batch WHERE b.agent=? AND i.card_id=? AND i.through_seq>=?)",
+                        params![actor, c.id, start],
+                        |r| r.get::<_, bool>(0),
+                    )?;
+                let unread: Vec<Value> = events(conn, start, Some(c.id), limit + 1)?
+                    .into_iter()
+                    .filter(|e| e["seq"].as_i64().is_some_and(|seq| seq <= pending))
+                    .collect();
+                let more = unread.len() > limit as usize;
+                let unread: Vec<Value> = unread.into_iter().take(limit as usize).collect();
+                let through = if more {
+                    unread
+                        .last()
+                        .and_then(|e| e["seq"].as_i64())
+                        .unwrap_or(start)
+                } else {
+                    pending.max(start)
+                };
+                let store_id: String =
+                    conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                        r.get(0)
+                    })?;
+                v["unread"] = json!(compact_events(&unread));
+                v["ack_seq"] = json!(ack);
+                v["pending_seq"] = json!(pending);
+                v["more"] = json!(more);
+                v["next_after"] = json!(through);
+                v["after"] = json!(start);
+                v["read_is_not_ack"] = json!(true);
+                v["receipt"] = if through > ack && through <= pending && prefix_presented {
+                    json!({"store_id":store_id,"agent":actor,"id":c.id,"through_seq":through})
+                } else {
+                    Value::Null
+                };
+                if !prefix_presented && through > start {
+                    v["receipt_withheld"] = json!(format!(
+                        "events after @{ack} through @{start} were not presented to you; read from the start or present that page first"
+                    ));
+                }
+                return Ok(v);
+            }
             if boolean(a, "receipts", false)? {
                 let mut s=conn.prepare("SELECT d.agent,d.pending_seq,d.ack_seq,d.shown_seq,d.shown_at_ms,a.enabled FROM deliveries d JOIN agents a ON a.name=d.agent WHERE d.card_id=? AND d.pending_seq>0 ORDER BY d.agent LIMIT 101")?;
                 let rows=s.query_map([c.id],|r|Ok(json!({"agent":r.get::<_,String>(0)?,"pending_seq":r.get::<_,i64>(1)?,"ack_seq":r.get::<_,i64>(2)?,"exposed_seq":r.get::<_,i64>(3)?,"exposed_at_ms":r.get::<_,i64>(4)?,"enabled":r.get::<_,bool>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -962,7 +1148,11 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 v["more"] = json!(e.len() > limit as usize);
                 let e: Vec<_> = e.into_iter().take(limit as usize).collect();
                 v["next_after"] = json!(e.last().and_then(|v| v["seq"].as_i64()).unwrap_or(after));
-                v["history"] = json!(e);
+                v["history"] = if compact {
+                    json!(compact_events(&e))
+                } else {
+                    json!(e)
+                };
             }
             Ok(v)
         }
@@ -988,6 +1178,34 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 boolean(a, "fresh", false)?,
                 InboxSelection::parse(a)?,
                 now,
+            )
+        }
+        "batch" => {
+            // Fetch a presented batch. Validates ownership; never acknowledges.
+            check_fields(a, &["batch"])?;
+            registered(conn, actor)?;
+            let batch = string(a, "batch")?;
+            let items = batch_items(conn, actor, batch, now)?;
+            let (source, created): (String, i64) = conn.query_row(
+                "SELECT source,created_ms FROM presented_batches WHERE batch=?",
+                [batch],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let store_id: String =
+                conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                    r.get(0)
+                })?;
+            let mut out = Vec::new();
+            for (id, through) in items {
+                let (pending, ack): (i64, i64) = conn.query_row(
+                    "SELECT pending_seq,ack_seq FROM deliveries WHERE agent=? AND card_id=?",
+                    params![actor, id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                out.push(json!({"card":get_card(conn,id)?.compact(now),"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":through},"handled":ack>=through,"newer_pending":pending>through}));
+            }
+            Ok(
+                json!({"batch":{"id":batch,"source":source,"created_ms":created},"items":out,"read_is_not_ack":true}),
             )
         }
         "receipt_status" => {
@@ -1043,8 +1261,8 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "agents" => {
-            check_fields(a, &[])?;
-            roster(conn, now, 100)
+            check_fields(a, &["limit"])?;
+            roster(conn, now, bounded(a, "limit", 100, 1, 100)?)
         }
         _ => Err(Error::invalid(format!("unknown operation: {}", req.op))),
     }
@@ -1191,6 +1409,126 @@ fn query(conn: &Connection, a: &Value, actor: &str, now: i64) -> Result<Value> {
         now,
     )
 }
+const BATCH_TTL_MS: i64 = 86_400_000;
+
+/// The exact (card, through_seq) pairs one presented batch showed this actor.
+fn batch_items(conn: &Connection, actor: &str, batch: &str, now: i64) -> Result<Vec<(i64, i64)>> {
+    let owner: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT agent,created_ms FROM presented_batches WHERE batch=?",
+            [batch],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (agent, created) = owner.ok_or_else(|| {
+        Error::new(
+            "batch_unknown",
+            "unknown or expired batch; nothing was acknowledged",
+        )
+    })?;
+    if agent != actor {
+        return Err(Error::new(
+            "batch_foreign",
+            "batch was presented to another agent; nothing was acknowledged",
+        ));
+    }
+    if created < now - BATCH_TTL_MS {
+        return Err(Error::new(
+            "batch_unknown",
+            "unknown or expired batch; nothing was acknowledged",
+        ));
+    }
+    let mut s = conn.prepare(
+        "SELECT card_id,through_seq FROM presented_items WHERE batch=? ORDER BY card_id",
+    )?;
+    let items = s
+        .query_map([batch], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(items)
+}
+
+/// One event without the full card head each raw event repeats. Messages
+/// keep their complete body; state changes keep only the fields they changed.
+fn compact_event(e: &Value, previous: Option<&Value>) -> Value {
+    let detail = &e["payload"]["detail"];
+    let card = &e["payload"]["card"];
+    let mut out = json!({"seq":e["seq"],"ts_ms":e["ts_ms"],"actor":e["actor"],"op":e["op"]});
+    if let Some(kind) = detail["kind"].as_str() {
+        out["kind"] = json!(kind);
+    }
+    if let Some(body) = detail["body"].as_str() {
+        out["body"] = json!(body);
+    } else if e["op"] == "post" {
+        out["title"] = card["title"].clone();
+        out["body"] = card["summary"].clone();
+    }
+    for key in ["refs", "follow_up_id", "parent_card"] {
+        if !detail[key].is_null() && detail[key] != json!([]) {
+            out[key] = detail[key].clone();
+        }
+    }
+    if e["op"] != "annotate" && e["op"] != "post" {
+        let mut changed = serde_json::Map::new();
+        // Every conversation-state field a patch/claim/release can change.
+        for key in [
+            "kind",
+            "topic",
+            "title",
+            "summary",
+            "status",
+            "assignee",
+            "priority",
+            "pinned",
+            "lease_owner",
+            "tags",
+        ] {
+            if previous.is_none_or(|p| p[key] != card[key]) {
+                changed.insert(key.to_owned(), card[key].clone());
+            }
+        }
+        out["changed"] = Value::Object(changed);
+    }
+    out
+}
+
+fn compact_events(events: &[Value]) -> Vec<Value> {
+    let mut previous: Option<&Value> = None;
+    events
+        .iter()
+        .map(|e| {
+            let out = compact_event(e, previous);
+            previous = Some(&e["payload"]["card"]);
+            out
+        })
+        .collect()
+}
+
+const FOLLOW_UP_LIMIT: usize = 50;
+
+/// Open questions and objections raised against a card, via their parent tag.
+/// Never silently truncated: an omission is flagged with a continuation.
+fn open_follow_ups(conn: &Connection, card: i64, v: &mut Value) -> Result<()> {
+    let mut s = conn.prepare(&format!(
+        "SELECT c.id,c.title,c.status,c.assignee,c.author FROM cards c WHERE {ACTIVE} AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value=?) ORDER BY c.id LIMIT {}",
+        FOLLOW_UP_LIMIT + 1
+    ))?;
+    let mut rows = s
+        .query_map([format!("parent:{card}")], |r| {
+            Ok(json!({"id":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"author":r.get::<_,String>(4)?}))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let more = rows.len() > FOLLOW_UP_LIMIT;
+    rows.truncate(FOLLOW_UP_LIMIT);
+    v["follow_ups"] = json!(rows);
+    v["follow_ups_more"] = json!(more);
+    if more {
+        v["follow_ups_next"] = json!(format!(
+            "fray query --tag parent:{card} --sort id --offset {FOLLOW_UP_LIMIT}"
+        ));
+    }
+    Ok(())
+}
+
 fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Result<Vec<Value>> {
     let sql="SELECT seq,ts_ms,actor,op,card_id,payload FROM events WHERE seq>? AND (? IS NULL OR card_id=?) ORDER BY seq LIMIT ?";
     let mut s = conn.prepare(sql)?;

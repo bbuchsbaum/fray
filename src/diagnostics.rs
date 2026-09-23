@@ -19,14 +19,20 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
         add(&mut report, "protocol_mismatch", "error", "Client and daemon protocols differ; no operational request was sent. Coordinate an upgrade with the owner.");
         return Ok(finish(report));
     }
-    let missing: Vec<_> = ["attention_stream", "wait_indefinite", "attention_filters"]
-        .into_iter()
-        .filter(|wanted| {
-            !daemon["capabilities"]
-                .as_array()
-                .is_some_and(|caps| caps.iter().any(|c| c == wanted))
-        })
-        .collect();
+    let missing: Vec<_> = [
+        "attention_stream",
+        "wait_indefinite",
+        "attention_filters",
+        "listener_activation",
+        "read_batches",
+    ]
+    .into_iter()
+    .filter(|wanted| {
+        !daemon["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|c| c == wanted))
+    })
+    .collect();
     if !missing.is_empty() {
         report["missing_capabilities"] = json!(missing);
         add(&mut report, "upgrade_required", "warning", "Selected daemon lacks some attention features. Upgrade requires coordination; doctor never restarts it.");
@@ -47,11 +53,7 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
         );
         return Ok(finish(report));
     }
-    let roster = match client::rpc(
-        home,
-        &Request::new("agents", actor, json!({"limit":100})),
-        3,
-    ) {
+    let roster = match client::rpc(home, &Request::new("agents", actor, json!({})), 3) {
         Ok(value) => value,
         Err(error) => {
             report["roster_error"] = json!(error);
@@ -105,6 +107,11 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
             add(&mut report, "activation_expired", "warning", "Adapter's declared wake lifetime expired even though transport is connected. Rearm through the owning host.");
         } else if report["listening"]["activation"] == "unknown" {
             add(&mut report, "activation_unknown", "warning", "Transport is connected, but its host wake mechanism was not declared. Do not infer that an idle model will run.");
+        } else if matches!(
+            report["listening"]["activation"].as_str(),
+            Some("manual" | "boundary")
+        ) {
+            add(&mut report, "idle_wake_unavailable", "warning", "This adapter requires an explicit read or a host turn boundary. Its connected transport does not start an idle model turn.");
         }
     }
     Ok(finish(report))
@@ -116,8 +123,11 @@ pub fn listening(agent: &Value, now: i64) -> Value {
     if agent["enabled"] == true && controller["live"] == true {
         return json!({"live":true,"state":controller["state"],"transport":"managed-runner","activation":"managed","activation_source":"controller","activation_expired":false,"model_response_guaranteed":false});
     }
-    let mode = listener["activation"]["mode"].as_str().unwrap_or("unknown");
-    let expires = listener["activation"]["expires_ms"].as_i64();
+    let activation = listener
+        .get("activation")
+        .unwrap_or(&listener["selection"]["activation"]);
+    let mode = activation["mode"].as_str().unwrap_or("unknown");
+    let expires = activation["expires_ms"].as_i64();
     json!({"live":agent["enabled"] == true && listener["live"] == true,"state":listener["state"].as_str().unwrap_or("absent"),"transport":"listener","transport_expires_ms":listener["expires_ms"],"activation":mode,"activation_source":if mode == "unknown" {"none"} else {"adapter-declared"},"activation_expires_ms":expires,"activation_expired":expires.is_some_and(|end| now >= end),"model_response_guaranteed":false})
 }
 fn add(report: &mut Value, code: &str, severity: &str, message: &str) {

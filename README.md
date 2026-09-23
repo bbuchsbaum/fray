@@ -84,6 +84,11 @@ Use `fray thread ID --bodies` for ordered sequence, author, kind and complete
 message text, preserving line breaks. `--json` still returns the full structured
 history. The human view reports the next `--after` when a page is incomplete.
 
+Use `fray --json thread ID --compact` for one current head plus ordered events
+without repeating a whole head per message. `thread ID --unread` starts at your
+durable acknowledgment and includes open linked questions and objections. Both
+views paginate with `--after` and `--limit`; reading a next page requires no ACK.
+
 `send` and `reply` accept up to 8,000 UTF-8 bytes, inline, from stdin (`-`), or
 from a file:
 
@@ -107,6 +112,14 @@ Each inbox item also includes a store/agent-qualified `receipt` object. Save the
 packet, handle its messages, then pass the handled receipt array to
 `fray ack --receipts -` on stdin. The batch is atomic. Never use `card.last_seq`
 as a receipt: your own reply can advance the head without delivering to you.
+
+On capable daemons, `inbox`, `wait`, `thread --unread`, and attention streams also
+return an immutable batch token. Fetch it with `fray batch TOKEN`, then acknowledge
+only the cards considered with `fray ack --batch TOKEN --ids 3,4` (omit `--ids`
+only after considering the whole batch). Newer replies stay pending. Tokens survive
+daemon restart, belong to one store and agent, and expire after 24 hours or when
+superseded by 32 newer batches for that agent. There is no `ack --last` alias until
+session binding can prevent one reader from selecting another reader's batch.
 
 ## Shared context and managers
 
@@ -242,7 +255,7 @@ identical retries after an ambiguous connection failure. Reads never acknowledge
 `wait --timeout none` blocks until selected pending attention arrives. Omit
 `--after` to resume from durable per-agent acknowledgments; use the exact returned
 receipt with `ack --receipts` after handling. Wait exits 0 on attention, 3 on quiet
-timeout, 4 on daemon unavailability, and 1 on other runtime errors. Finite waits
+timeout, 4 on daemon unavailability or busy admission, and 1 on other runtime errors. Finite waits
 default to 300 seconds. `--kinds` and `--min-priority p0..p3` work identically for
 inbox, wait and attention watch; filtered-out receipts stay pending.
 
@@ -262,6 +275,16 @@ exclude answers to your outgoing questions, and unresolved-only excludes closure
 notifications. Hidden receipts stay pending. `agents` reports an expiring
 `listener` lease separately from the managed `controller`; armed means a transport
 consumer is connected, not that a model is working or will answer promptly.
+
+`fray --as reviewer doctor` checks the daemon, selected pending attention, listener,
+and adapter-declared activation without starting a daemon or acknowledging anything.
+A live socket and an unexpired host declaration do not guarantee a model response.
+Hosts with small notification displays can consume `watch --attention --notification`:
+each line is at most 768 bytes and points to an exact batch to fetch before handling.
+The daemon admits at most 112 long-lived waits/watches among 128 clients. It lowers
+those limits when the process has fewer file descriptors and reserves up to 16
+connection slots for short operations; `doctor` shows the actual limits. Cancelled
+finite and indefinite waits release their slots without the original deadline.
 
 Claude, Codex and other hosts share this protocol. The optional Claude plugin
 connects it to interactive notifications; generic `drive` remains available to

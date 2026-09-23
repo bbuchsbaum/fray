@@ -11,6 +11,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
@@ -22,13 +23,57 @@ use std::{
 pub const REQUEST_LIMIT: usize = 128 * 1024;
 pub const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const MAX_CLIENTS: usize = 128;
-const MAX_LONG_CLIENTS: usize = MAX_CLIENTS - 16;
+struct Limits {
+    clients: usize,
+    long: usize,
+    descriptors: u64,
+}
+impl Limits {
+    fn current() -> Result<Self> {
+        // Query the inherited soft limit once at startup. A fixed POSIX shell
+        // builtin keeps the core's five-dependency and no-unsafe contracts.
+        // No user content or startup environment is interpreted by the shell.
+        let result = Command::new("/bin/sh")
+            .args(["-c", "ulimit -n"])
+            .env_clear()
+            .output()?;
+        let reported = String::from_utf8_lossy(&result.stdout);
+        let descriptors = if result.status.success() && reported.trim() == "unlimited" {
+            u64::MAX
+        } else if result.status.success() {
+            reported.trim().parse::<u64>().map_err(|_| {
+                Error::new(
+                    "unavailable",
+                    "could not read inherited file descriptor limit from /bin/sh ulimit -n",
+                )
+            })?
+        } else {
+            return Err(Error::new(
+                "unavailable",
+                "could not read inherited file descriptor limit from /bin/sh ulimit -n",
+            ));
+        };
+        // Each connection can own a stream, buffered-reader clone and EOF clone.
+        // Leave headroom for SQLite, logs, the listener and admission rejections.
+        let clients = ((descriptors.saturating_sub(32) / 3).min(MAX_CLIENTS as u64)) as usize;
+        if clients < 2 {
+            return Err(Error::new("unavailable", "file descriptor limit too low; raise RLIMIT_NOFILE to at least 64 before starting Fray"));
+        }
+        let reserved = 16.min(clients / 2);
+        Ok(Self {
+            clients,
+            long: clients - reserved,
+            descriptors,
+        })
+    }
+}
 struct Shared {
     store: Mutex<Store>,
     changed: Condvar,
     stop: AtomicBool,
     clients: AtomicUsize,
     long_clients: AtomicUsize,
+    limits: Limits,
     socket: PathBuf,
 }
 
@@ -82,6 +127,7 @@ pub fn initialize(home: &Path) -> Result<PathBuf> {
     Ok(home)
 }
 pub fn serve(home: &Path, normal: bool) -> Result<()> {
+    let limits = Limits::current()?;
     let home = initialize(home)?;
     let lock = OpenOptions::new()
         .read(true)
@@ -114,6 +160,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         stop: AtomicBool::new(false),
         clients: AtomicUsize::new(0),
         long_clients: AtomicUsize::new(0),
+        limits,
         socket: socket.clone(),
     });
     eprintln!(
@@ -127,16 +174,29 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         }
     );
     for accepted in listener.incoming() {
-        let mut stream = accepted?;
         if shared.stop.load(Ordering::SeqCst) {
             break;
         }
-        if shared.clients.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
+        let mut stream = match accepted {
+            Ok(stream) => stream,
+            // Admission pressure and aborted connects must not kill the daemon.
+            // The listener remains owned here; retry with backoff, checking stop
+            // each time, instead of converting an OS accept failure into exit.
+            Err(error) => {
+                eprintln!("accept error: {error}; retrying");
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        if shared.clients.fetch_add(1, Ordering::SeqCst) >= shared.limits.clients {
             shared.clients.fetch_sub(1, Ordering::SeqCst);
             stream.set_write_timeout(Some(Duration::from_secs(1)))?;
             let _ = write_frame(
                 &mut stream,
-                &failure(Error::new("busy", "128 connected clients; retry later")),
+                &failure(Error::new(
+                    "busy",
+                    format!("{} connected clients; retry later", shared.limits.clients),
+                )),
             );
             continue;
         }
@@ -173,19 +233,38 @@ impl Drop for LongClient<'_> {
     }
 }
 fn reserve_long_client(shared: &Shared) -> Result<LongClient<'_>> {
-    if shared.long_clients.fetch_add(1, Ordering::SeqCst) >= MAX_LONG_CLIENTS {
+    if shared.long_clients.fetch_add(1, Ordering::SeqCst) >= shared.limits.long {
         shared.long_clients.fetch_sub(1, Ordering::SeqCst);
         return Err(Error::new(
             "busy",
-            "112 long-lived clients; 16 connection slots reserved for short RPCs; retry later",
+            format!(
+                "{} long-lived clients; {} connection slots reserved for short RPCs; retry later",
+                shared.limits.long,
+                shared.limits.clients - shared.limits.long
+            ),
         ));
     }
     Ok(LongClient(&shared.long_clients))
 }
+fn clone_for_client(stream: &UnixStream) -> Result<UnixStream> {
+    stream.try_clone().map_err(|error| {
+        Error::new(
+            "busy",
+            format!("cannot allocate a connection descriptor: {error}; retry later"),
+        )
+    })
+}
 fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let reader = match clone_for_client(&stream) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = write_frame(&mut stream, &failure(error));
+            return Ok(());
+        }
+    };
+    let mut reader = BufReader::new(reader);
     while let Some(line) = read_frame(&mut reader, REQUEST_LIMIT)? {
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
@@ -288,7 +367,11 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     match result {
                         Ok(mut v) => {
                             if req.op == "ping" {
-                                v["capacity"] = json!({"clients":shared.clients.load(Ordering::SeqCst),"long_lived":shared.long_clients.load(Ordering::SeqCst),"client_limit":MAX_CLIENTS,"long_limit":MAX_LONG_CLIENTS,"short_reserved":MAX_CLIENTS-MAX_LONG_CLIENTS});
+                                v["capabilities"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(json!("listener_activation"));
+                                v["capacity"] = json!({"clients":shared.clients.load(Ordering::SeqCst),"long_lived":shared.long_clients.load(Ordering::SeqCst),"client_limit":shared.limits.clients,"long_limit":shared.limits.long,"short_reserved":shared.limits.clients-shared.limits.long,"descriptor_limit":shared.limits.descriptors});
                             }
                             success(v)
                         }
@@ -308,7 +391,7 @@ fn wait_cancellable(
     req: &Request,
     indefinite: bool,
 ) -> Result<Value> {
-    let mut hangup = stream.try_clone()?;
+    let mut hangup = clone_for_client(stream)?;
     // Finite waits preserve sequential requests on the same connection. A bounded
     // socket read lets this EOF observer stop without shutting down that socket.
     // The store still waits only on commits/cancellation, never a polling timer.
@@ -438,7 +521,9 @@ fn wait(
 }
 
 fn watch_attention(stream: &mut UnixStream, shared: &Shared, req: &Request) -> Result<()> {
-    let options = crate::attention::Options::parse(&req.args)?;
+    let mut selection_args = req.args.clone();
+    let activation = crate::notification::take_activation(&mut selection_args)?;
+    let options = crate::attention::Options::parse(&selection_args)?;
     let run_id = string(&req.args, "run_id")?;
     let once = boolean(&req.args, "once", false)?;
     let deadline = req
@@ -450,13 +535,17 @@ fn watch_attention(stream: &mut UnixStream, shared: &Shared, req: &Request) -> R
         })
         .transpose()?;
     let connection_id = random_key()?;
-    let filters = json!({"selection":options.selection,"addressed_to_me":options.addressed_to_me,"unresolved":options.unresolved,"kinds":options.kinds,"min_priority":options.min_priority}).to_string();
+    let mut filters = json!({"selection":options.selection,"addressed_to_me":options.addressed_to_me,"unresolved":options.unresolved,"kinds":options.kinds,"min_priority":options.min_priority});
+    if let Some(activation) = activation {
+        filters["activation"] = activation;
+    }
+    let filters = filters.to_string();
     let store_id = {
         let store = shared.store.lock().map_err(|_| poisoned())?;
         store.listener_begin(&req.actor, run_id, &connection_id, &filters, now_ms())?;
         store.identity()?
     };
-    let mut hangup = stream.try_clone()?;
+    let mut hangup = clone_for_client(stream)?;
     hangup.set_read_timeout(None)?;
     let disconnected = AtomicBool::new(false);
     let unexpected_input = AtomicBool::new(false);

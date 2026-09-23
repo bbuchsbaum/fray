@@ -86,15 +86,26 @@ chatter, or work merely to keep agents busy. Idle is a valid outcome.
 
 ## Handle exact receipts
 
-Read current heads and annotations. If summaries/previews are truncated or items
-omitted, inspect `fray thread ID` (paginate with `--after`/`--limit`) before acking.
-Acknowledge only the delivered versions actually considered:
+Read current heads and annotations. If previews are truncated, read the full text
+with `fray thread ID --unread`: everything delivered to you and not yet acked, in
+full, with open objections listed. Page with `--after N` from its `next_after`.
+`fray thread ID --compact` reads a whole thread without repeated card heads.
+
+`inbox`, `wait` and `thread --unread` print `batch=ID`: an immutable record of
+exactly what that command showed you. After handling it, acknowledge exactly that:
 
 ```sh
+fray ack --batch BATCH            # everything that batch showed you
+fray ack --batch BATCH --ids 3,4  # only the items you handled
+fray batch BATCH                  # re-read what it covers; never acks
+# Without a batch, name exact versions:
 fray ack ID --through THROUGH_SEQ
-# Or copy handled receipt objects from the packet into an array:
 fray ack --receipts '[{"store_id":"STORE","agent":"NAME","id":123,"through_seq":456}]'
 ```
+
+A batch acks the versions shown, never newer ones that arrived later; they stay
+pending. There is deliberately no `ack --last` or "ack everything": acknowledging
+what you have not read is exactly the failure batches prevent.
 
 The example values are placeholders; `--receipts -` reads the array from stdin.
 Batch ack validates store/agent and commits atomically. Never use `card.last_seq`:

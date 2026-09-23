@@ -5,9 +5,11 @@ import json
 import os
 import pathlib
 import queue
+import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -39,12 +41,13 @@ class Attention(unittest.TestCase):
         self.fail('listener never armed')
 
     @contextlib.contextmanager
-    def watch(self, *args, adapter=False, actor='bob'):
-        env = {**os.environ, 'FRAY_HOME':self.home, 'FRAY_AGENT':actor, 'FRAY_BIN':str(BINARY)}
+    def watch(self, *args, adapter=False, actor='bob', home=None):
+        home = home or self.home
+        env = {**os.environ, 'FRAY_HOME':home, 'FRAY_AGENT':actor, 'FRAY_BIN':str(BINARY)}
         env.pop('FRAY_DRIVE', None)
         env.pop('FRAY_SELECTION', None)
         cmd = ([sys.executable, str(ADAPTER), 'monitor'] if adapter else
-               [str(BINARY), '--home', self.home, '--as', actor, 'watch', '--attention', *args])
+               [str(BINARY), '--home', home, '--as', actor, 'watch', '--attention', *args])
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         lines = queue.Queue()
         def reader():
@@ -196,7 +199,12 @@ class Attention(unittest.TestCase):
         with self.watch(adapter=True) as (_, lines):
             self.armed()
             self.send('Adapter input')
-            self.assertEqual(lines.get(timeout=3)['items'][0]['messages'][0]['body'],'Adapter input')
+            notice=lines.get(timeout=3)
+            self.assertEqual(notice['type'],'attention_notice')
+            batch=self.cli('bob','batch',notice['batch'])
+            self.assertEqual(batch['items'][0]['receipt']['agent'],'bob')
+            self.assertLessEqual(len(json.dumps(notice,separators=(',',':'),ensure_ascii=False).encode())+1,768)
+            self.assertEqual(self.listener()['selection']['activation']['mode'],'native-monitor')
 
     def test_adapter_rewake_exit_mapping_and_managed_child_suppression(self):
         self.send('One-shot wake')
@@ -326,6 +334,124 @@ class Attention(unittest.TestCase):
         with self.watch('--once',*filters) as (_,lines):
             packet=lines.get(timeout=3)
             self.assertEqual([item['receipt'] for item in packet['items']],[expected])
+
+    def test_compact_notification_retains_receipt_and_fetches_full_body(self):
+        body='Full context 🧠\n' * 200
+        sent=self.send(body,ask=True)
+        with self.watch('--notification','--once') as (_,lines):
+            notice=lines.get(timeout=3)
+            self.assertEqual(notice['type'],'attention_notice')
+            batch=self.cli('bob','batch',notice['batch'])
+            self.assertEqual(batch['items'][0]['receipt']['through_seq'],sent['event_seq'])
+            self.assertEqual(batch['items'][0]['receipt']['store_id'],sent['store_id'])
+            self.assertLessEqual(len(json.dumps(notice,separators=(',',':'),ensure_ascii=False).encode())+1,768)
+        thread=self.call('show','bob',{'id':sent['card']['id'],'history':True})
+        self.assertEqual(thread['history'][0]['payload']['detail']['body'],body)
+        self.assertEqual(self.call('inbox','bob')['total'],1)
+
+    def test_doctor_is_read_only_and_distinguishes_manual_and_expired_activation(self):
+        def snapshot():
+            with contextlib.closing(sqlite3.connect(str(pathlib.Path(self.home)/'state.db'))) as db:
+                return list(db.iterdump())
+        before=snapshot()
+        report=self.cli('bob','doctor')
+        self.assertFalse(report['model_response_guaranteed'])
+        self.assertIn('not_listening',[c['code'] for c in report['checks']])
+        self.assertEqual(snapshot(),before)
+        with self.watch('--activation','manual'):
+            self.armed()
+            report=self.cli('bob','doctor')
+            self.assertTrue(report['listening']['live'])
+            self.assertIn('idle_wake_unavailable',[c['code'] for c in report['checks']])
+        # Wait for EOF cleanup before rearming with a new run identity.
+        deadline=time.monotonic()+2
+        while self.listener()['live'] and time.monotonic()<deadline: time.sleep(.01)
+        with self.watch('--activation','native-monitor','--activation-expires-ms','1'):
+            self.armed()
+            report=self.cli('bob','doctor')
+            self.assertTrue(report['listening']['activation_expired'])
+            self.assertIn('activation_expired',[c['code'] for c in report['checks']])
+
+    def test_doctor_reports_unavailable_without_starting_daemon(self):
+        self.server.kill(); self.server.wait(timeout=3)
+        report=self.cli('bob','doctor')
+        self.assertFalse(report['daemon']['reachable'])
+        self.assertEqual(report['status'],'blocked')
+
+    def test_unread_cli_paginates_before_ack_and_keeps_later_reply_pending(self):
+        sent=self.send('Initial contract',ask=True)
+        card=sent['card']['id']
+        for body in ['Evidence one','Evidence two','Evidence three']:
+            self.call('annotate','alice',{'id':card,'body':body})
+        first=self.cli('bob','thread',str(card),'--unread','--limit','2')
+        second=self.cli('bob','thread',str(card),'--unread','--limit','2','--after',str(first['next_after']))
+        self.assertGreater(second['unread'][0]['seq'],first['next_after'])
+        self.assertEqual(second['ack_seq'],0)
+        self.assertFalse(second['more'])
+        self.assertIn('batch',second)
+        self.call('annotate','alice',{'id':card,'body':'A newer peer reply'})
+        ack=self.cli('bob','ack','--batch',second['batch'])
+        self.assertEqual(ack['acknowledged'][0]['ack_seq'],second['receipt']['through_seq'])
+        self.assertTrue(ack['acknowledged'][0]['still_pending'])
+        full=self.cli('bob','thread',str(card),'--compact')
+        self.assertEqual(full['history'][-1]['body'],'A newer peer reply')
+        self.assertIn('receipts',full)
+
+    def test_adapter_fallback_and_doctor_against_old_attention_protocol(self):
+        # This fixture models the published pre-batch protocol, including its
+        # rejection of activation fields; it does not impersonate a real host.
+        errors=[]
+        store='a'*32
+        receipt={'store_id':store,'agent':'bob','id':1,'through_seq':1}
+        packet={'type':'attention','store_id':store,'agent':'bob','more':False,
+                'items':[{'card':{'id':1,'title':'Old daemon','priority':2},'receipt':receipt}]}
+        with tempfile.TemporaryDirectory(prefix='fray-old-',dir='/tmp') as home, socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(pathlib.Path(home)/'bus.sock'));listener.listen();listener.settimeout(5)
+            def mock():
+                try:
+                    # doctor: ping, agents, inbox; then monitor and rewake.
+                    for _ in range(5):
+                        connection,_=listener.accept()
+                        with connection, connection.makefile('rwb',buffering=0) as wire:
+                            connection.settimeout(5)
+                            while line:=wire.readline():
+                                req=json.loads(line)
+                                op=req['op'];args=req.get('args',{})
+                                if op=='ping':
+                                    data={'protocol_version':2,'version':'0.2.1','capabilities':['attention_stream','attention_filters','wait_indefinite']}
+                                elif op=='agents':
+                                    data={'items':[{'name':'bob','enabled':True,'listener':None,'controller':None}],'more':False}
+                                elif op=='inbox': data={'items':[],'total':0}
+                                elif op=='watch_attention':
+                                    self.assertNotIn('activation',args)
+                                    self.assertNotIn('activation_expires_ms',args)
+                                    data=packet
+                                else: raise AssertionError(f'unsupported old operation {op}')
+                                wire.write((json.dumps({'ok':True,'data':{**data,'store_id':store}})+'\n').encode())
+                except Exception as error: errors.append(error)
+            server=threading.Thread(target=mock);server.start()
+            try:
+                result=subprocess.run([str(BINARY),'--home',home,'--as','bob','--json','doctor'],capture_output=True,text=True,timeout=3)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                report=json.loads(result.stdout)
+                self.assertEqual(set(report['missing_capabilities']),{'listener_activation','read_batches'})
+                self.assertIn('upgrade_required',[c['code'] for c in report['checks']])
+                with self.watch(adapter=True,home=home) as (process,lines):
+                    notice=lines.get(timeout=3)
+                    self.assertEqual(notice['receipt'],receipt)
+                    self.assertNotIn('batch',notice)
+                    process.terminate();process.wait(timeout=3)
+                    self.assertIn('unknown activation',process.stderr.read())
+                env={**os.environ,'FRAY_HOME':home,'FRAY_AGENT':'bob','FRAY_BIN':str(BINARY)}
+                env.pop('FRAY_DRIVE',None);env.pop('FRAY_SELECTION',None)
+                result=subprocess.run([sys.executable,str(ADAPTER),'rewake'],input='{"hook_event_name":"SessionStart"}',capture_output=True,text=True,env=env,timeout=3)
+                self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+                self.assertIn('unknown activation',result.stderr)
+                self.assertIn('"through_seq":1',result.stderr)
+            finally:
+                server.join(timeout=6)
+            self.assertFalse(server.is_alive())
+            self.assertEqual(errors,[])
 
 
 if __name__ == '__main__':

@@ -1,5 +1,87 @@
 # Validation
 
+## Cooperative improvements: final candidate (2026-09-23)
+
+Final source manifest:
+`36191df61576d7f21dbcc9c4c8af6b41b454584492684c07721e790ed77863c9`.
+Frozen binary:
+`053340d179d8c3d2a974a22aaed7f026364d5c9a18b3edcabbb932f1320c26bc`.
+
+Cargo format/check/Clippy/build and **113 Rust tests passed**. SQL validation
+prepared 64 static statements and passed 22 checks; plugin validation passed.
+All **63 IPC tests passed**: 32 existing integration, 24 attention/adapter, and 7
+reliability cases, with resource warnings treated as errors. Results are recorded
+in `accepted-*-ipc.log` under `/tmp/fray-cooperation-round2/`; the manifest covers
+code, tests, adapters and skills and remained unchanged throughout those runs.
+
+Peer review reproduced three additional defects: descriptor exhaustion could
+terminate the daemon at a 256-descriptor limit, doctor omitted two adapter
+capabilities, and activation metadata prevented old-daemon notification fallback.
+The final implementation derives admission from the inherited descriptor limit,
+retries accept failures with backoff, sends busy on socket-clone allocation
+failure, reports missing activation/batch capabilities and degrades optional
+activation metadata with an explicit warning. At limit 256, admission becomes 74
+clients, including at most 58 long-lived consumers and 16 reserved short slots.
+A regression saturates that configuration with finite waits and verifies busy
+exit 4, daemon survival, send/inbox/ACK availability and total-client cleanup.
+The descriptor probe is a fixed, environment-cleared `/bin/sh -c 'ulimit -n'`
+call at startup. No limit is raised; dependency count remains five and
+`forbid(unsafe_code)` remains intact.
+
+The final compact-thread comparison is **44,870 to 19,985 bytes (55.46% smaller)**
+for the same 23-event review conversation. The extra omission marker appears in
+both views; all bodies, references, receipts and checked context still match.
+Follow-up lists over 50 now expose a continuation, and passive batch registration
+does not refresh agent activity. Batch registration can precede failed stdout;
+it proves neither host exposure nor handling. ACK always remains explicit.
+
+The native Monitor receipt below is bound to the earlier frozen binary, whose
+notice format is unchanged by these review fixes. Automatic plugin loading,
+other interactive hosts and Linux execution remain unqualified locally. The
+shared daemon and global binary/plugin installation were left unchanged.
+
+## Cooperative reliability and reading checkpoint (2026-09-23)
+
+At source manifest `de60cf4004b63a7f10e0a152d7426b9a57caac3a8247d0ef6a1352a12064cfd9`,
+Cargo format/check/Clippy/build and 111 Rust tests passed. All IPC checks used a
+frozen binary (`5e0effe697421749c69c2674b3b91047af0eba8adb5f894084f83d5c37159103`)
+on temporary homes: 23 attention/adapter, 32 existing integration, and 6 connection
+reliability tests passed without resource warnings. SQL validation prepared 64
+static statements and passed 22 checks. Plugin manifest validation passed.
+
+The reliability tests cover 112 simultaneous long-lived waiters while short
+send/inbox/ACK operations remain available, transient admission exit 4, 140
+cancelled finite waiters, finite connection reuse, half-close cancellation and
+unexpected inbound bytes. Independent read-batch tests cover interleaved readers,
+restart persistence, wrong-store tokens with matching actor/card numbers,
+continuation before acknowledgment and compact summary/reference preservation.
+The pagination and summary tests failed before their respective peer fixes.
+
+A SQLite backup of our actual review thread (#2) was opened only on an isolated
+home. The ordinary JSON was 44,846 bytes; compact JSON was 19,961 bytes, a **55.49%**
+reduction using identical serialization. All 23 full message bodies, references,
+sequence/actor/operation/timestamp fields, current head, receipts and continuation
+metadata matched. This is a measured result for that conversation, not a promised
+ratio for every thread. The snapshot also exercised additive schema initialization
+against the old board database without upgrading the shared daemon.
+
+`doctor` was tested against both fixture and old shared daemons. The first
+old-daemon trial caught an unsupported roster argument; the corrected diagnostic
+uses the old bounded roster call. Database snapshots verify that diagnostic reads
+create neither acknowledgment nor presentation records. The existing Claude
+session then passed the native Monitor check for the compact notice: it reported
+an idle wake on a complete notice, fetched the immutable batch and full thread,
+and acknowledged exactly card 1 through sequence 1. We independently verified
+that ACK and the stopped listener, then shut down the owned fixture daemon.
+Evidence is `native-notice-acceptance.json`, with the peer report on thread #1 at
+sequence 81. This qualifies the notice on that host; automatic plugin loading
+and other interactive hosts remain outside this evidence.
+
+Raw logs, source hashes, frozen binary and comparison artifacts are retained in
+`/tmp/fray-cooperation-round2/`. This checkpoint precedes the final follow-up-list
+omission review. The shared daemon and global binary/plugin installation remain
+unchanged; these are local macOS results, not a hosted Linux CI run.
+
 ## Durable waits and host-neutral attention (2026-09-23)
 
 Local macOS gates for indefinite waits, precise exit status, shared kind/priority
@@ -63,7 +145,7 @@ The final manifest SHA-256 is
 `/tmp/fray-attention-checks/claude-monitor-acceptance.json`; Claude's report is also
 on shared thread #2 at sequence 33. Earlier failed host attempts were retained.
 No shared daemon was restarted and no global binary/plugin was installed. This
-source copy has no Git metadata; these results describe local source, not a
+source copy had no Git metadata at that checkpoint; these results describe local source, not a
 commit, published release or hosted CI run. Linux remains unqualified locally.
 
 ## Collaboration feedback follow-up (2026-09-22)

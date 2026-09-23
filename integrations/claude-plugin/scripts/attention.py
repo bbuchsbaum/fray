@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 
 def main():
@@ -28,13 +29,16 @@ def main():
                "watch", "--attention", "--selection",
                os.environ.get("FRAY_SELECTION", "involved"), "--reconnect"]
     if mode == "monitor":
+        command += ["--notification", "--activation", "native-monitor"]
         os.execvp(command[0], command)
     # This fallback is deliberately one-shot per SessionStart, not a Stop loop
     # that repeatedly wakes on an ignored receipt. Rearm explicitly as needed.
     payload = json.load(sys.stdin)
     if payload.get("hook_event_name") != "SessionStart":
         return 0
-    child = subprocess.Popen(command + ["--once", "--timeout", "3300"],
+    child = subprocess.Popen(command + ["--once", "--timeout", "3300",
+                             "--activation", "background-completion",
+                             "--activation-expires-ms", str(int(time.time() * 1000) + 3300000)],
                              stdout=subprocess.PIPE, text=True)
     def cancel(signum, _frame):
         raise SystemExit(128 + signum)

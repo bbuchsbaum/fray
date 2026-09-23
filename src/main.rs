@@ -158,6 +158,14 @@ enum Cmd {
         /// Print ordered author/sequence/kind and full bodies instead of raw history.
         #[arg(long)]
         bodies: bool,
+        /// Only what is delivered to you and not yet acknowledged, in full, with
+        /// open objections and a receipt that covers exactly the shown page.
+        #[arg(long, conflicts_with = "bodies")]
+        unread: bool,
+        /// History without the card head each raw event repeats: full message
+        /// bodies, and only the fields that state changes touched.
+        #[arg(long, conflicts_with_all = ["bodies", "unread"])]
+        compact: bool,
         #[arg(long, default_value_t = 0)]
         after: i64,
         #[arg(long, default_value_t = 20)]
@@ -258,13 +266,23 @@ enum Cmd {
     },
     /// Mark only the delivery version you actually handled; this does not close work.
     Ack {
-        #[arg(required_unless_present = "receipts", conflicts_with = "receipts")]
+        #[arg(required_unless_present_any = ["receipts", "batch"], conflicts_with_all = ["receipts", "batch"])]
         id: Option<i64>,
-        #[arg(long, requires = "id", required_unless_present = "receipts")]
+        #[arg(long, requires = "id", required_unless_present_any = ["receipts", "batch"])]
         through: Option<i64>,
         /// JSON receipt array, or '-' for stdin. Copy receipts from the packet you handled.
-        #[arg(long, conflicts_with_all = ["id", "through"])]
+        #[arg(long, conflicts_with_all = ["id", "through", "batch"])]
         receipts: Option<String>,
+        /// Acknowledge exactly what an inbox/wait/thread batch showed you.
+        #[arg(long, conflicts_with_all = ["id", "through"])]
+        batch: Option<String>,
+        /// With --batch: only these card IDs from that batch.
+        #[arg(long, requires = "batch", value_delimiter = ',')]
+        ids: Vec<i64>,
+    },
+    /// Show the exact receipts a presented batch covers. Never acknowledges.
+    Batch {
+        batch: String,
     },
     /// Follow future conversation updates without acknowledging pending messages.
     Follow {
@@ -292,6 +310,9 @@ enum Cmd {
         fence: i64,
     },
     Agents,
+    /// Read-only listening diagnosis: daemon capabilities, listener state and
+    /// pending attention. Never acknowledges or records a presentation.
+    Doctor,
     /// Block on new attention without polling. Returns immediately for pending items.
     Wait {
         #[command(flatten)]
@@ -370,6 +391,15 @@ struct WakeArgs {
     /// Optional overall deadline in seconds; absent means listen until cancelled.
     #[arg(long, requires = "attention")]
     timeout: Option<u64>,
+    /// Emit one small host notification per exact receipt instead of full packets.
+    #[arg(long, requires = "attention")]
+    notification: bool,
+    /// How this listener wakes its host, declared by the adapter for diagnostics.
+    #[arg(long, requires = "attention", value_parser = ["manual", "boundary", "managed", "native-monitor", "background-completion"])]
+    activation: Option<String>,
+    /// When the declared activation stops (Unix ms), e.g. a Monitor's expiry.
+    #[arg(long, requires = "activation")]
+    activation_expires_ms: Option<u64>,
 }
 impl WakeArgs {
     fn value(self) -> Value {
@@ -380,10 +410,17 @@ impl WakeArgs {
             ("limit", self.limit.map(|v| v as u64)),
             ("settle_ms", self.settle_ms),
             ("timeout", self.timeout),
+            ("activation_expires_ms", self.activation_expires_ms),
         ] {
             if let Some(value) = value {
                 args[key] = json!(value);
             }
+        }
+        if self.notification {
+            args["notification"] = json!(true);
+        }
+        if let Some(activation) = self.activation {
+            args["activation"] = json!(activation);
         }
         args
     }
@@ -483,6 +520,7 @@ fn send(
             | "renew"
             | "release"
             | "ack"
+            | "present"
             | "follow"
             | "unfollow"
     );
@@ -637,9 +675,42 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Thread {
             id,
             bodies,
+            unread,
+            compact,
             after,
             limit,
         } => {
+            if compact {
+                return Ok(Some(send(
+                    &home,
+                    &actor,
+                    "show",
+                    json!({"id":id,"history":true,"compact":true,"receipts":true,"after":after,"limit":limit}),
+                    key,
+                    timeout,
+                )?));
+            }
+            if unread {
+                let mut value = send(
+                    &home,
+                    &actor,
+                    "show",
+                    json!({"id":id,"unread":true,"limit":limit,"after":after}),
+                    key,
+                    timeout,
+                )?;
+                if value["receipt"].is_object() {
+                    let receipts = vec![value["receipt"].clone()];
+                    present(&home, &actor, "thread", &receipts, &mut value);
+                }
+                if cli.json {
+                    return Ok(Some(value));
+                }
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(unread_text(&value).as_bytes())?;
+                stdout.flush()?;
+                return Ok(None);
+            }
             let args = json!({"id":id,"history":true,"receipts":true,"after":after,"limit":limit});
             if bodies && !cli.json {
                 let value = send(&home, &actor, "show", args, key, timeout)?;
@@ -782,20 +853,30 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             id,
             through,
             receipts,
+            batch,
+            ids,
         } => {
-            let args = if let Some(receipts) = receipts {
+            let args = if let Some(batch) = batch {
+                let mut args = json!({"batch":batch});
+                if !ids.is_empty() {
+                    args["ids"] = json!(ids);
+                }
+                args
+            } else if let Some(receipts) = receipts {
                 json!({"receipts":serde_json::from_str::<Value>(&input_text(receipts,server::REQUEST_LIMIT)?)?})
             } else {
                 json!({"id":id,"through":through})
             };
             ("ack", args)
         }
+        Cmd::Batch { batch } => ("batch", json!({"batch":batch})),
         Cmd::Follow { id } => ("follow", json!({"id":id})),
         Cmd::Unfollow { id } => ("unfollow", json!({"id":id})),
         Cmd::Claim { id, ttl } => ("claim", json!({"id":id,"ttl":ttl})),
         Cmd::Renew { id, fence, ttl } => ("renew", json!({"id":id,"fence":fence,"ttl":ttl})),
         Cmd::Release { id, fence } => ("release", json!({"id":id,"fence":fence})),
         Cmd::Agents => ("agents", json!({})),
+        Cmd::Doctor => return Ok(Some(fray::diagnostics::inspect(&home, &actor)?)),
         Cmd::Wait {
             filters,
             after,
@@ -887,12 +968,121 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(Some(client::rpc(&home, &r, secs)?));
         }
     };
-    Ok(Some(send(&home, &actor, op, args, key, timeout)?))
+    let mut value = send(&home, &actor, op, args, key, timeout)?;
+    if matches!(op, "inbox" | "wait") {
+        let receipts: Vec<Value> = value["items"]
+            .as_array()
+            .map(|items| items.iter().map(|item| item["receipt"].clone()).collect())
+            .unwrap_or_default();
+        if !receipts.is_empty() {
+            present(&home, &actor, op, &receipts, &mut value);
+        }
+    }
+    Ok(Some(value))
+}
+/// Record exactly what this command is about to show, so `ack --batch` can
+/// acknowledge it later. Presentation is exposure, never acknowledgment. An
+/// older daemon without batches still gets its ordinary read.
+fn present(home: &Path, actor: &str, source: &str, receipts: &[Value], value: &mut Value) {
+    match send(
+        home,
+        actor,
+        "present",
+        json!({"source":source,"receipts":receipts}),
+        None,
+        10,
+    ) {
+        Ok(result) => value["batch"] = result["batch"]["id"].clone(),
+        Err(e) => value["batch_unavailable"] = json!(e.code),
+    }
+}
+/// Full text of what is delivered and unacknowledged, for `thread --unread`.
+fn unread_text(v: &Value) -> String {
+    let card = &v["card"];
+    let mut out = format!(
+        "#{} {} [{}]  unread after @{} through @{}\n",
+        card["id"],
+        clean(card["title"].as_str().unwrap_or("")),
+        clean(card["status"].as_str().unwrap_or("")),
+        v["ack_seq"],
+        v["next_after"]
+    );
+    out.push_str(&follow_ups_text(v));
+    let events = v["unread"].as_array().cloned().unwrap_or_default();
+    if events.is_empty() {
+        out.push_str("(nothing unread)\n");
+    }
+    for event in &events {
+        let kind = event["kind"]
+            .as_str()
+            .unwrap_or(event["op"].as_str().unwrap_or(""));
+        out.push_str(&format!(
+            "\n@{} {} {}\n",
+            event["seq"],
+            clean(event["actor"].as_str().unwrap_or("")),
+            clean(kind)
+        ));
+        let body = match event["body"].as_str() {
+            Some(body) => body.to_owned(),
+            None => format!("changed {}", event["changed"]),
+        };
+        out.extend(body.chars().map(|c| {
+            if c.is_control() && !matches!(c, '\n' | '\t') {
+                '�'
+            } else {
+                c
+            }
+        }));
+        out.push('\n');
+        if let Some(id) = event["follow_up_id"].as_i64() {
+            out.push_str(&format!("Linked question: #{id}\n"));
+        }
+    }
+    if v["more"] == true {
+        out.push_str(&format!(
+            "\nMore unread; this receipt covers through @{} only.\n",
+            v["next_after"]
+        ));
+    }
+    match v["batch"].as_str() {
+        Some(batch) => out.push_str(&format!(
+            "batch={batch}  after handling: fray ack --batch {batch}\n"
+        )),
+        None if v["receipt"].is_object() => out.push_str(&format!(
+            "receipt through_seq={}\n",
+            v["receipt"]["through_seq"]
+        )),
+        None => {}
+    }
+    out
 }
 fn clean(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+/// Open questions/objections against a thread, with an explicit omission marker.
+fn follow_ups_text(v: &Value) -> String {
+    let mut out = String::new();
+    if let Some(follow_ups) = v["follow_ups"].as_array().filter(|f| !f.is_empty()) {
+        out.push_str("OPEN FOLLOW-UPS\n");
+        for f in follow_ups {
+            out.push_str(&format!(
+                "  #{} {} -> {}: {}\n",
+                f["id"],
+                clean(f["status"].as_str().unwrap_or("")),
+                clean(f["assignee"].as_str().unwrap_or("—")),
+                clean(f["title"].as_str().unwrap_or(""))
+            ));
+        }
+        if v["follow_ups_more"] == true {
+            out.push_str(&format!(
+                "  More open follow-ups; continue with: {}\n",
+                clean(v["follow_ups_next"].as_str().unwrap_or(""))
+            ));
+        }
+    }
+    out
 }
 fn thread_bodies(v: &Value) -> String {
     let mut out = format!(
@@ -901,6 +1091,7 @@ fn thread_bodies(v: &Value) -> String {
         clean(v["card"]["title"].as_str().unwrap_or("")),
         clean(v["card"]["status"].as_str().unwrap_or(""))
     );
+    out.push_str(&follow_ups_text(v));
     if let Some(events) = v["history"].as_array() {
         for event in events {
             let detail = &event["payload"]["detail"];
@@ -1048,6 +1239,11 @@ fn human(v: &Value, out: &mut String) {
         }
         if let Some(cursor) = v.get("cursor") {
             out.push_str(&format!("cursor={cursor}\n"));
+        }
+        if let Some(batch) = v["batch"].as_str() {
+            out.push_str(&format!(
+                "batch={batch}  after handling: fray ack --batch {batch} [--ids N,M]\n"
+            ));
         }
         if v.get("selected_home").is_some() {
             out.push_str("Select a board with --home PATH or FRAY_HOME. Discovery does not change routing.\n");
