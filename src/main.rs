@@ -355,6 +355,25 @@ enum Cmd {
         #[arg(short = 'p', long, default_value_t = 1)]
         priority: i64,
     },
+    /// Declare, release or list lanes: which paths each agent is working on.
+    /// Advisory, never a lock.
+    Lane {
+        #[command(subcommand)]
+        action: LaneCmd,
+    },
+    /// Set your one current status line (empty clears it).
+    Status {
+        text: String,
+    },
+    /// Before editing or committing: who else declared or is actually
+    /// editing these paths (declared lanes plus every worktree's git status).
+    Preflight {
+        /// Paths to check; default: your worktree's modified files.
+        paths: Vec<String>,
+        /// Check the files staged for commit.
+        #[arg(long, conflicts_with = "paths")]
+        staged: bool,
+    },
     /// Read-only listening diagnosis: daemon capabilities, listener state and
     /// pending attention. Never acknowledges or records a presentation.
     Doctor,
@@ -410,6 +429,33 @@ enum Cmd {
     Rpc {
         request: String,
     },
+}
+
+#[derive(Subcommand)]
+enum LaneCmd {
+    /// Take a lane on paths (a trailing / means a whole directory).
+    Take {
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(long)]
+        purpose: String,
+        /// The card this work belongs to.
+        #[arg(long = "for")]
+        card: Option<i64>,
+        /// If held by someone else, queue to be notified when it frees.
+        #[arg(long)]
+        queue: bool,
+    },
+    /// Release a lane, or hand it to another agent.
+    Release {
+        id: i64,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// List live lanes (stale ones are marked).
+    List,
 }
 
 #[derive(Subcommand)]
@@ -540,6 +586,211 @@ impl std::str::FromStr for WaitTimeout {
             .ok_or_else(|| "timeout must be none or 0..86400 seconds".into())
     }
 }
+fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
+    Process::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Paths git reports as changed in a worktree, from `status --porcelain -z`
+/// (so quoted names are exact): tracked changes, both sides of a rename, and
+/// untracked files, which may be new work too.
+fn changed_paths(dir: &Path) -> Vec<String> {
+    let out = Process::new("git")
+        .current_dir(dir)
+        .args(["status", "--porcelain", "-z", "--untracked-files=normal"])
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        paths.push(entry[3..].to_owned());
+        // A rename or copy is followed by its original path.
+        if matches!(&entry[..1], "R" | "C") {
+            if let Some(from) = fields.next() {
+                paths.push(from.to_owned());
+            }
+        }
+    }
+    paths
+}
+
+/// Staged paths, NUL-separated so names are never quoted, with both sides
+/// of a staged rename or copy.
+fn staged_paths(dir: &Path) -> Vec<String> {
+    let out = Process::new("git")
+        .current_dir(dir)
+        .args(["diff", "--cached", "--name-status", "-z", "-M"])
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let mut paths = Vec::new();
+    while let Some(status) = fields.next() {
+        let n = if matches!(&status[..1], "R" | "C") {
+            2
+        } else {
+            1
+        };
+        paths.extend(fields.by_ref().take(n).map(str::to_owned));
+    }
+    paths
+}
+
+/// Resolve a path the user typed (relative to where they are, or absolute)
+/// to a repo-relative path. Symlinks are resolved through the longest
+/// existing ancestor (the file itself may not exist yet). A path outside the
+/// repository is an error, never silently "clear".
+fn repo_relative(top: &Path, prefix: &str, typed: &str) -> Result<String> {
+    let joined = if Path::new(typed).is_absolute() {
+        PathBuf::from(typed)
+    } else {
+        top.join(prefix).join(typed)
+    };
+    // Lexically normalize . and .. first.
+    let mut lexical = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                lexical.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => lexical.push(other.as_os_str()),
+        }
+    }
+    // Canonicalize the longest existing ancestor, then re-append the rest.
+    let mut existing = lexical.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let resolved = loop {
+        if let Ok(real) = std::fs::canonicalize(&existing) {
+            break rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (
+            existing.file_name().map(|n| n.to_owned()),
+            existing.parent(),
+        ) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => break lexical.clone(),
+        }
+    };
+    let root = std::fs::canonicalize(top).unwrap_or_else(|_| top.to_path_buf());
+    match resolved.strip_prefix(&root) {
+        Ok(rel) if rel.as_os_str().is_empty() => Ok(".".to_owned()),
+        Ok(rel) => Ok(rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")),
+        Err(_) => Err(Error::invalid(format!(
+            "{typed:?} is outside this repository ({})",
+            root.display()
+        ))),
+    }
+}
+
+/// Declared lanes plus observed edits in every other worktree of this repo.
+fn preflight(home: &Path, actor: &str, typed: Vec<String>, staged: bool) -> Result<Value> {
+    let here = std::env::current_dir()?;
+    let Some(top) = git_lines(&here, &["rev-parse", "--show-toplevel"])
+        .pop()
+        .map(PathBuf::from)
+    else {
+        return Err(Error::invalid(
+            "preflight needs a git repository (run it inside the project)",
+        ));
+    };
+    let prefix = git_lines(&here, &["rev-parse", "--show-prefix"])
+        .pop()
+        .unwrap_or_default();
+    let paths: Vec<String> = if staged {
+        staged_paths(&top)
+    } else if typed.is_empty() {
+        changed_paths(&top)
+    } else {
+        typed
+            .iter()
+            .map(|p| repo_relative(&top, &prefix, p))
+            .collect::<Result<_>>()?
+    };
+    if paths.is_empty() {
+        return Ok(
+            json!({"paths":[],"declared":[],"observed":[],"clear":true,"nothing_checked":true,
+            "note":"nothing to check: no paths given and no changed or staged files"}),
+        );
+    }
+    let overlaps = |theirs: &str| {
+        paths
+            .iter()
+            .any(|mine| fray::store::paths_overlap(theirs, mine))
+    };
+    let declared: Vec<Value> = send(home, actor, "lanes", json!({"paths":paths}), None, 10)?
+        ["lanes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l["agent"] != actor)
+        .collect();
+    // Observed: what other worktrees have actually changed, declared or not.
+    let mut observed = Vec::new();
+    let mut worktree: Option<PathBuf> = None;
+    let mut branch = String::new();
+    let mut entries = git_lines(&top, &["worktree", "list", "--porcelain"]);
+    entries.push(String::new());
+    for line in entries {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            worktree = Some(PathBuf::from(path));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            branch = b.trim_start_matches("refs/heads/").to_owned();
+        } else if line.is_empty() {
+            if let Some(wt) = worktree.take() {
+                if !fs_same(&wt, &top) {
+                    let touched: Vec<String> = changed_paths(&wt)
+                        .into_iter()
+                        .filter(|p| overlaps(p))
+                        .collect();
+                    if !touched.is_empty() {
+                        observed.push(json!({"worktree":wt,"branch":branch,"paths":touched}));
+                    }
+                }
+            }
+            branch.clear();
+        }
+    }
+    let clear = declared.is_empty() && observed.is_empty();
+    Ok(
+        json!({"paths":paths,"declared":declared,"observed":observed,"clear":clear,"nothing_checked":false}),
+    )
+}
+
+fn fs_same(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Owner commands need a person at an interactive terminal. Agent tool shells
 /// are not terminals, so ordinary tool calls cannot act as the owner. This
 /// prevents accidents and injected instructions; it is not authentication.
@@ -716,6 +967,9 @@ fn send(
             | "present"
             | "owner_decide"
             | "owner_answer"
+            | "lane_take"
+            | "lane_release"
+            | "set_status"
             | "follow"
             | "unfollow"
             | "mute"
@@ -737,7 +991,9 @@ fn send(
             Ok(v)
         }
         Err(e) => {
-            if mutation {
+            // Only a transport failure is worth retrying with the same key;
+            // a refusal will be refused again.
+            if mutation && matches!(e.code.as_str(), "io" | "unavailable" | "protocol") {
                 eprintln!("Mutation request key: {}. For an ambiguous transport failure, retry the identical command with --key {}.",req.key.as_deref().unwrap_or(""),req.key.as_deref().unwrap_or(""));
             }
             Err(e)
@@ -1122,6 +1378,35 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 "send",
                 json!({"to":fray::store::OWNER,"body":message_body(body,body_file)?,"ask":true,"pending":true,"priority":priority,"refs":refs}),
             )
+        }
+        Cmd::Lane { action } => match action {
+            LaneCmd::Take {
+                paths,
+                purpose,
+                card,
+                queue,
+            } => {
+                let mut args = json!({"paths":paths,"purpose":purpose,"queue":queue});
+                if let Some(card) = card {
+                    args["card"] = json!(card);
+                }
+                ("lane_take", args)
+            }
+            LaneCmd::Release { id, to, reason } => {
+                let mut args = json!({"id":id});
+                if let Some(to) = to {
+                    args["to"] = json!(to);
+                }
+                if let Some(reason) = reason {
+                    args["reason"] = json!(reason);
+                }
+                ("lane_release", args)
+            }
+            LaneCmd::List => ("lanes", json!({})),
+        },
+        Cmd::Status { text } => ("set_status", json!({"text":text})),
+        Cmd::Preflight { paths, staged } => {
+            return Ok(Some(preflight(&home, &actor, paths, staged)?));
         }
         Cmd::Owner { action } => {
             owner_terminal()?;

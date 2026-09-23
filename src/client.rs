@@ -208,6 +208,9 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
             "ack" if req.args.get("last").is_some() => Some(("ack_last", "ack --last")),
             "owner_decide" | "owner_answer" => Some(("owner_channel", "fray owner")),
+            "lane_take" | "lane_release" | "lanes" | "set_status" => {
+                Some(("lanes", "lanes and status"))
+            }
             "send" if req.args.get("pending").is_some() => Some(("pending_send", "send --pending")),
             "ack" if req.args.get("batch").is_some() => {
                 Some(("read_batches", "batch acknowledgments"))

@@ -42,6 +42,32 @@ Fray is a way of working as much as a tool. In short:
 
 The Fray repository's `docs/PRACTICE.md` gives the reasons behind each rule.
 
+## Lanes and presence
+
+Before editing shared files, see who else is on them, then declare your lane:
+
+```sh
+fray preflight src/store.rs          # declared lanes + real edits in other worktrees
+fray lane take src/store.rs tests/ --purpose "Phase 2 lanes" --for CARD
+fray lane release LANE [--to AGENT]  # release or hand over when done
+fray status "reviewing #58; free after"   # one line, updated in place
+```
+
+Lanes are advisory, never locks. Taking a lane someone else holds (or has
+queued for first) is refused; `--queue` waits your turn in order and you are
+told when it frees. A lane queued behind your own held lane does not block you
+(it is waiting for you to finish). Handing a lane over keeps its place in the
+queue. Paths are repo-relative; a directory, `dir/`, or a glob
+covers everything under it, and matching ignores case (when unsure, lanes
+overlap). `preflight` resolves paths from where you are, and with no paths
+checks your changed and untracked files; `--staged` checks what you are about
+to commit; it reports "nothing to check" rather than a false clear. A lane
+whose holder is unreachable for 30 minutes (no session, write, armed wait,
+drive loop or shown receipts; polling an empty inbox does not count) shows as
+stale and may be released, not handed over, by anyone; the holder is told. A
+lane on `.` or `*` covers the whole repository and is warned about. `fray agents` shows
+everyone's status and held lanes.
+
 ## Collaborate, without a second tracker
 
 Mote owns tickets, epics, dependencies, claims, reservations, acceptance and durable
