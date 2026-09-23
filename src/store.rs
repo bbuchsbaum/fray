@@ -13,7 +13,7 @@ const RELEVANT:&str="(c.pinned=1 OR c.topic='*' OR c.author=? OR c.assignee=? OR
 // One predicate for selected inboxes, blocking waits, runner packets and progress checks.
 const INVOLVED: &str = "(c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM agents a,json_each(a.topics) t WHERE a.name=?1 AND t.value<>'*' AND t.value=c.topic))";
 // An old mute must not hide a question subsequently assigned to this actor.
-const UNMUTED: &str = "(NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) OR (c.kind='question' AND c.assignee=?1 AND c.status NOT IN ('resolved','superseded','withdrawn')))";
+const UNMUTED: &str = "(NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) OR (c.kind='question' AND c.assignee=?1))";
 
 pub fn selection(args: &Value) -> Result<&str> {
     let value = args
@@ -560,7 +560,8 @@ fn emit(
     )?;
     if notify {
         // Fan-out and head update commit together. Leave suppresses every route.
-        // Mute suppresses a card unless it is an open request assigned to the recipient.
+        // Mute suppresses a card unless it is a request assigned to the recipient,
+        // open or closed: its final outcome must reach them (#19 FU-A).
         conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq)
           SELECT a.name,?1,?2 FROM agents a WHERE a.name<>?3 AND a.enabled=1
             AND (NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=a.name AND m.card_id=?1)
@@ -570,7 +571,7 @@ fn emit(
             ?4=1 OR ?5='*' OR ?9=1 OR a.role='steward' OR
               EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=?5 OR (t.value='*' AND substr(?5,1,1)<>'@')))
           ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=excluded.pending_seq",
-          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none(),card.kind=="question" && !card.terminal()])?;
+          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none(),card.kind=="question"])?;
         conn.execute(
             "INSERT OR IGNORE INTO participants(agent,card_id) VALUES(?,?)",
             params![actor, id],
@@ -667,8 +668,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     // Unmute restores eligible routing; it is not an implicit
                     // follow. Retain missed peer updates even if the actor wrote
                     // the latest event, without manufacturing an own-event receipt.
-                    let sql = format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR {RELEVANT}) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
-                    conn.execute(&sql, params![actor, id, actor, actor, actor, actor])?;
+                    // Only for cards already routed to the actor or that directly
+                    // involve it: topic relevance alone never creates a receipt
+                    // (#19 FU-B).
+                    let sql = "INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id)) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)";
+                    conn.execute(sql, params![actor, id])?;
                 }
             }
             Ok(json!({"id":id,"muted":req.op=="mute","read_is_not_ack":true}))
