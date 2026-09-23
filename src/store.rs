@@ -9,6 +9,16 @@ use std::{path::Path, time::Duration};
 const COLS:&str="id,rev,kind,topic,title,summary,status,priority,pinned,tags,author,assignee,lease_owner,lease_until_ms,fence,created_ms,updated_ms,last_seq";
 /// The reserved identity for the project owner (see owner-authority design).
 pub const OWNER: &str = "owner";
+
+/// Names a reader could mistake for the owner (OWNER, 0wner, owner_ …).
+fn owner_lookalike(name: &str) -> bool {
+    let folded: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c == '0' { 'o' } else { c })
+        .collect();
+    folded.trim_matches(|c: char| !c.is_ascii_alphanumeric()) == OWNER
+}
 const ACTIVE: &str = "c.status NOT IN ('resolved','superseded','withdrawn')";
 // Topic scope is an attention filter, not a visibility/security boundary.
 const RELEVANT:&str="(c.pinned=1 OR c.topic='*' OR c.author=? OR c.assignee=? OR c.lease_owner=? OR EXISTS(SELECT 1 FROM agents a WHERE a.name=? AND (a.role='steward' OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=c.id) OR (c.kind IN ('task','question') AND c.assignee IS NULL) OR EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=c.topic OR (t.value='*' AND substr(c.topic,1,1)<>'@')))))";
@@ -270,6 +280,12 @@ impl Store {
         // operations only as the owner. Collision prevention against accidents
         // and injected text, not authentication (docs/design/owner-authority.md).
         let owner_op = req.op.starts_with("owner_");
+        if req.actor != OWNER && req.op == "join" && owner_lookalike(&req.actor) {
+            return Err(Error::new(
+                "reserved_owner",
+                "that name could be mistaken for the owner; choose another",
+            ));
+        }
         if (req.actor == OWNER) != owner_op {
             return Err(Error::new(
                 "reserved_owner",
@@ -785,6 +801,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // Explicitly leave mail for an agent that has not joined yet: it
             // is registered disabled and receives the message when it joins.
             // Only on request, so a typo still fails with suggestions.
+            if boolean(a, "pending", false)? && target != OWNER && owner_lookalike(target) {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "that name could be mistaken for the owner; choose another",
+                ));
+            }
             if boolean(a, "pending", false)? {
                 conn.execute(
                     "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
@@ -855,6 +877,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 return Err(Error::new(
                     "conflict",
                     format!("card {} is revision {}; read before retrying", c.id, c.rev),
+                ));
+            }
+            // Authority follows the author, so only the owner may change an
+            // owner card; others can reply to it, never rewrite it.
+            if c.author == OWNER && actor != OWNER {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "owner cards can only be changed by the owner; reply to it instead",
                 ));
             }
             if c.lease_owner.is_some() {
@@ -1191,12 +1221,21 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )?;
             let card = get_card(conn, id)?;
             if verdict != "answer" && !card.terminal() {
+                // An agent's lease on the request never blocks the owner's
+                // decision: clear it (and advance the fence) first.
+                if card.lease_owner.is_some() {
+                    conn.execute(
+                        "UPDATE cards SET lease_owner=NULL,lease_until_ms=0,fence=fence+1 WHERE id=?",
+                        [id],
+                    )?;
+                }
+                let card = get_card(conn, id)?;
                 result = mutate(
                     conn,
                     &Request::new(
                         "patch",
                         OWNER,
-                        json!({"id":id,"expect":card.rev,"status":"resolved","over_objection":"The owner decided this request."}),
+                        json!({"id":id,"expect":card.rev,"status":if verdict == "approve" {"resolved"} else {"withdrawn"},"over_objection":"The owner decided this request."}),
                     ),
                     now,
                 )?;
@@ -1355,6 +1394,9 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let compact = boolean(a, "compact", false)?;
             let c = get_card(conn, integer(a, "id")?)?;
             let mut v = json!({"card":c,"cursor":highwater(conn)?});
+            if c.author == OWNER {
+                v["card"]["authority"] = json!("owner (unsigned)");
+            }
             open_follow_ups(conn, c.id, &mut v)?;
             if boolean(a, "unread", false)? {
                 // Unread = this reader's delivered-but-unacknowledged range. The
@@ -1871,6 +1913,9 @@ fn compact_event(e: &Value, previous: Option<&Value>) -> Value {
     let detail = &e["payload"]["detail"];
     let card = &e["payload"]["card"];
     let mut out = json!({"seq":e["seq"],"ts_ms":e["ts_ms"],"actor":e["actor"],"op":e["op"]});
+    if e["actor"] == OWNER {
+        out["authority"] = json!("owner (unsigned)");
+    }
     if let Some(kind) = detail["kind"].as_str() {
         out["kind"] = json!(kind);
     }
@@ -2130,7 +2175,8 @@ fn inbox(
             } else {
                 clip(&body, 200)
             };
-            annotations.push(json!({"seq":seq,"actor":who,"kind":kind,"excerpt":excerpt,"excerpt_truncated":!whole && body.chars().count()>200,"full":whole,"follow_up_id":follow_up}));
+            let authority = (who == OWNER).then_some("owner (unsigned)");
+            annotations.push(json!({"seq":seq,"actor":who,"authority":authority,"kind":kind,"excerpt":excerpt,"excerpt_truncated":!whole && body.chars().count()>200,"full":whole,"follow_up_id":follow_up}));
         }
         items.push(json!({"card":compact,"addressed":addressed,"full_text":full,"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
     }

@@ -639,14 +639,18 @@ fn owner(home: &Path, action: OwnerCmd, as_json: bool) -> Result<Option<Value>> 
                     eprintln!("A reply needs text; skipped.");
                     continue;
                 }
-                answered.push(send(
+                match send(
                     home,
                     who,
                     "owner_answer",
                     json!({"id":id,"verdict":verdict,"body":body}),
                     None,
                     10,
-                )?);
+                ) {
+                    Ok(done) => answered.push(done),
+                    // One failed item never ends the review.
+                    Err(e) => eprintln!("#{id} not answered: {e}"),
+                }
             }
             if as_json {
                 return Ok(Some(json!({"answered":answered})));
@@ -1200,6 +1204,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 serde_json::from_str(&input_text(request, server::REQUEST_LIMIT)?)?;
             if r.actor.is_empty() {
                 r.actor = actor;
+            }
+            // Owner operations exist only behind `fray owner` (a person at an
+            // interactive terminal); the raw RPC command must not bypass that.
+            if r.op.starts_with("owner_") || r.actor == fray::store::OWNER {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "owner operations are only available through `fray owner` in an interactive terminal",
+                ));
             }
             if r.key.is_none() {
                 r.key = key;
