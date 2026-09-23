@@ -1,0 +1,1354 @@
+use crate::model::*;
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
+    TransactionBehavior,
+};
+use serde_json::{json, Value};
+use std::{path::Path, time::Duration};
+
+const COLS:&str="id,rev,kind,topic,title,summary,status,priority,pinned,tags,author,assignee,lease_owner,lease_until_ms,fence,created_ms,updated_ms,last_seq";
+const ACTIVE: &str = "c.status NOT IN ('resolved','superseded','withdrawn')";
+// Topic scope is an attention filter, not a visibility/security boundary.
+const RELEVANT:&str="(c.pinned=1 OR c.topic='*' OR c.author=? OR c.assignee=? OR c.lease_owner=? OR EXISTS(SELECT 1 FROM agents a WHERE a.name=? AND (a.role='steward' OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=c.id) OR (c.kind IN ('task','question') AND c.assignee IS NULL) OR EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=c.topic OR (t.value='*' AND substr(c.topic,1,1)<>'@')))))";
+// One predicate for selected inboxes, blocking waits, runner packets and progress checks.
+const INVOLVED: &str = "(c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM agents a,json_each(a.topics) t WHERE a.name=?1 AND t.value<>'*' AND t.value=c.topic))";
+
+pub fn selection(args: &Value) -> Result<&str> {
+    let value = args
+        .get("selection")
+        .map(|_| string(args, "selection"))
+        .transpose()?
+        .unwrap_or("all");
+    if !["all", "involved"].contains(&value) {
+        return Err(Error::invalid("selection: all|involved"));
+    }
+    Ok(value)
+}
+
+pub struct InboxSelection<'a> {
+    pub mode: &'a str,
+    pub addressed_to_me: bool,
+    pub unresolved: bool,
+    pub kinds: Vec<String>,
+    pub min_priority: Option<i64>,
+}
+impl<'a> InboxSelection<'a> {
+    pub fn parse(args: &'a Value) -> Result<Self> {
+        Ok(Self {
+            mode: selection(args)?,
+            addressed_to_me: boolean(args, "addressed_to_me", false)?,
+            unresolved: boolean(args, "unresolved", false)?,
+            kinds: attention_kinds(args)?,
+            min_priority: args
+                .get("min_priority")
+                .map(|_| bounded(args, "min_priority", 3, 0, 3))
+                .transpose()?,
+        })
+    }
+    pub(crate) fn condition(&self) -> String {
+        let mut condition = if self.mode == "involved" {
+            INVOLVED
+        } else {
+            "1"
+        }
+        .to_owned();
+        if self.addressed_to_me {
+            condition.push_str(" AND c.assignee=?1");
+        }
+        if self.unresolved {
+            condition.push_str(" AND ");
+            condition.push_str(ACTIVE);
+        }
+        if !self.kinds.is_empty() {
+            // Only enum values validated by attention_kinds enter this SQL.
+            let kinds = self
+                .kinds
+                .iter()
+                .map(|kind| format!("'{kind}'"))
+                .collect::<Vec<_>>()
+                .join(",");
+            condition.push_str(&format!(" AND (c.kind IN ({kinds}) OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.op='annotate' AND e.actor<>d.agent AND e.seq>d.ack_seq AND e.seq<=d.pending_seq AND json_extract(e.payload,'$.detail.kind') IN ({kinds})) OR EXISTS(SELECT 1 FROM events child JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE child.card_id=c.id AND child.op='post' AND parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind') IN ({kinds})))"));
+        }
+        if let Some(priority) = self.min_priority {
+            condition.push_str(&format!(" AND c.priority<={priority}"));
+        }
+        condition
+    }
+}
+impl<'a> From<&'a str> for InboxSelection<'a> {
+    fn from(mode: &'a str) -> Self {
+        Self {
+            mode,
+            addressed_to_me: false,
+            unresolved: false,
+            kinds: Vec::new(),
+            min_priority: None,
+        }
+    }
+}
+
+pub(crate) fn attention_kinds(args: &Value) -> Result<Vec<String>> {
+    let Some(value) = args.get("kinds") else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| Error::invalid("kinds must be a nonempty array"))?;
+    if values.is_empty() || values.len() > 8 {
+        return Err(Error::invalid(
+            "kinds must contain 1..8 card or annotation kinds",
+        ));
+    }
+    values
+        .iter()
+        .map(|value| {
+            let kind = value
+                .as_str()
+                .ok_or_else(|| Error::invalid("kinds must contain strings"))?;
+            if ![
+                "goal",
+                "task",
+                "question",
+                "decision",
+                "note",
+                "evidence",
+                "objection",
+                "answer",
+            ]
+            .contains(&kind)
+            {
+                return Err(Error::invalid("unknown attention kind"));
+            }
+            Ok(kind.to_owned())
+        })
+        .collect()
+}
+
+pub struct Store {
+    pub conn: Connection,
+}
+impl Store {
+    pub fn open(path: &Path, normal: bool) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        Self::configure(&conn, normal)?;
+        Ok(Self { conn })
+    }
+    pub fn memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        Self::configure(&conn, false)?;
+        Ok(Self { conn })
+    }
+    fn configure(conn: &Connection, normal: bool) -> Result<()> {
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 2 {
+            return Err(Error::new(
+                "schema_version",
+                "database was created by a newer Fray",
+            ));
+        }
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA cache_size=-16384;",
+        )?;
+        conn.execute_batch(if normal {
+            "PRAGMA synchronous=NORMAL;"
+        } else {
+            "PRAGMA synchronous=FULL;"
+        })?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch(include_str!("schema.sql"))?;
+        if version == 1 {
+            // Preserve every receipt. Reconstruct deliberate participation, not old fan-out.
+            conn.execute_batch("INSERT OR IGNORE INTO participants(agent,card_id) SELECT DISTINCT e.actor,e.card_id FROM events e JOIN agents a ON a.name=e.actor;")?;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('store_id',?)",
+            [random_key()?],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+    pub fn highwater(&self) -> Result<i64> {
+        highwater(&self.conn)
+    }
+    pub fn identity(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                r.get(0)
+            })?)
+    }
+    pub fn execute(&mut self, req: &Request) -> Result<Value> {
+        self.execute_at(req, now_ms())
+    }
+    pub fn execute_at(&mut self, req: &Request, now: i64) -> Result<Value> {
+        if !req.args.is_object() {
+            return Err(Error::invalid("args must be an object"));
+        }
+        let write = matches!(
+            req.op.as_str(),
+            "join"
+                | "leave"
+                | "heartbeat"
+                | "post"
+                | "send"
+                | "patch"
+                | "annotate"
+                | "claim"
+                | "renew"
+                | "release"
+                | "ack"
+                | "expose"
+                | "follow"
+                | "unfollow"
+                | "controller"
+        );
+        if !write {
+            let mut v = read(&self.conn, req, now)?;
+            v["store_id"] = json!(self.identity()?);
+            return Ok(v);
+        }
+        if !valid_name(&req.actor) {
+            return Err(Error::invalid(
+                "set --as/FRAY_AGENT to a unique terminal identity (1-80 name characters)",
+            ));
+        }
+        if let Some(key) = &req.key {
+            text(key, "key", 128, false)?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut signature = req.clone();
+        signature.key = None;
+        let signature = serde_json::to_string(&signature)?;
+        if let Some(key) = &req.key {
+            let prior: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT request,response FROM requests WHERE actor=? AND key=?",
+                    params![req.actor, key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((original, response)) = prior {
+                if original != signature {
+                    return Err(Error::new(
+                        "idempotency_conflict",
+                        "key already used for a different request",
+                    ));
+                }
+                return Ok(serde_json::from_str(&response)?);
+            }
+        }
+        if req.op != "join" {
+            registered(&tx, &req.actor)?;
+        }
+        let mut result = mutate(&tx, req, now)?;
+        tx.execute(
+            "UPDATE agents SET last_seen_ms=? WHERE name=?",
+            params![now, req.actor],
+        )?;
+        let identity: String =
+            tx.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                r.get(0)
+            })?;
+        result["store_id"] = json!(identity);
+        if let Some(key) = &req.key {
+            tx.execute(
+                "INSERT INTO requests(actor,key,request,response) VALUES(?,?,?,?)",
+                params![req.actor, key, signature, serde_json::to_string(&result)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+    pub fn events(&self, after: i64, limit: i64) -> Result<Vec<Value>> {
+        events(&self.conn, after, None, limit)
+    }
+    pub fn attention(
+        &self,
+        actor: &str,
+        after: i64,
+        limit: i64,
+        fresh: bool,
+        now: i64,
+    ) -> Result<Value> {
+        inbox(&self.conn, actor, after, limit, fresh, "all".into(), now)
+    }
+    pub fn selected_attention(
+        &self,
+        actor: &str,
+        after: i64,
+        limit: i64,
+        selection: &str,
+        now: i64,
+    ) -> Result<Value> {
+        inbox(
+            &self.conn,
+            actor,
+            after,
+            limit,
+            false,
+            selection.into(),
+            now,
+        )
+    }
+    pub fn filtered_attention(
+        &self,
+        actor: &str,
+        after: i64,
+        limit: i64,
+        selection: InboxSelection<'_>,
+        now: i64,
+    ) -> Result<Value> {
+        inbox(&self.conn, actor, after, limit, false, selection, now)
+    }
+}
+fn highwater(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT coalesce(max(seq),0) FROM events", [], |r| r.get(0))?)
+}
+pub(crate) fn registered(conn: &Connection, actor: &str) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE name=? AND enabled=1)",
+        [actor],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err(Error::new(
+            "not_joined",
+            format!("{actor:?} has not joined; run fray --as NAME join"),
+        ));
+    }
+    Ok(())
+}
+fn assignee_known(conn: &Connection, who: &Option<String>) -> Result<()> {
+    if let Some(who) = who {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
+            [who],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(Error::invalid(format!(
+                "unknown assignee {who}; join that identity first"
+            )));
+        }
+    }
+    Ok(())
+}
+fn row_card(r: &Row<'_>) -> rusqlite::Result<Card> {
+    let raw: String = r.get(9)?;
+    let tags = serde_json::from_str(&raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(Card {
+        id: r.get(0)?,
+        rev: r.get(1)?,
+        kind: r.get(2)?,
+        topic: r.get(3)?,
+        title: r.get(4)?,
+        summary: r.get(5)?,
+        status: r.get(6)?,
+        priority: r.get(7)?,
+        pinned: r.get(8)?,
+        tags,
+        author: r.get(10)?,
+        assignee: r.get(11)?,
+        lease_owner: r.get(12)?,
+        lease_until_ms: r.get(13)?,
+        fence: r.get(14)?,
+        created_ms: r.get(15)?,
+        updated_ms: r.get(16)?,
+        last_seq: r.get(17)?,
+    })
+}
+pub(crate) fn get_card(conn: &Connection, id: i64) -> Result<Card> {
+    conn.query_row(
+        &format!("SELECT {COLS} FROM cards WHERE id=?"),
+        [id],
+        row_card,
+    )
+    .optional()?
+    .ok_or_else(|| Error::new("not_found", format!("card {id}")))
+}
+fn validate_card(c: &Card) -> Result<()> {
+    if !["goal", "task", "question", "decision", "note"].contains(&c.kind.as_str()) {
+        return Err(Error::invalid("kind: goal|task|question|decision|note"));
+    }
+    if ![
+        "open",
+        "active",
+        "blocked",
+        "resolved",
+        "superseded",
+        "withdrawn",
+    ]
+    .contains(&c.status.as_str())
+    {
+        return Err(Error::invalid(
+            "status: open|active|blocked|resolved|superseded|withdrawn",
+        ));
+    }
+    if !valid_topic(&c.topic) {
+        return Err(Error::invalid("invalid topic"));
+    }
+    text(&c.title, "title", 160, false)?;
+    text(&c.summary, "summary", 2000, false)?;
+    if !(0..=3).contains(&c.priority) {
+        return Err(Error::invalid("priority is 0 (urgent) through 3 (FYI)"));
+    }
+    tags(&json!(c.tags))?;
+    Ok(())
+}
+fn check_lease(c: &Card, actor: &str, fence: i64, now: i64, allow_expired: bool) -> Result<()> {
+    if c.lease_owner.as_deref() != Some(actor)
+        || c.fence != fence
+        || (!allow_expired && c.lease_until_ms <= now)
+    {
+        return Err(Error::new("lease_lost",format!("card {} requires the current owner's live fencing token; read and reclaim if expired",c.id)));
+    }
+    Ok(())
+}
+fn emit(
+    conn: &Connection,
+    actor: &str,
+    op: &str,
+    id: i64,
+    extra: Value,
+    now: i64,
+    notify: bool,
+) -> Result<Value> {
+    conn.execute(
+        "INSERT INTO events(ts_ms,actor,op,card_id,payload) VALUES(?,?,?,?, '{}')",
+        params![now, actor, op, id],
+    )?;
+    let seq = conn.last_insert_rowid();
+    conn.execute("UPDATE cards SET last_seq=? WHERE id=?", params![seq, id])?;
+    let card = get_card(conn, id)?;
+    let payload = json!({"card":card,"detail":extra});
+    let serialized = serde_json::to_string(&payload)?;
+    conn.execute(
+        "UPDATE events SET payload=? WHERE seq=?",
+        params![serialized, seq],
+    )?;
+    conn.execute(
+        "INSERT INTO event_fts(rowid,text) VALUES(?,?)",
+        params![seq, serialized],
+    )?;
+    if notify {
+        // Fan-out and head update commit together. Existing participants keep receiving updates.
+        conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq)
+          SELECT a.name,?1,?2 FROM agents a WHERE a.name<>?3 AND (
+            a.name=?6 OR a.name=?7 OR a.name=?8 OR
+            EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=?1) OR
+            (a.enabled=1 AND (?4=1 OR ?5='*' OR ?9=1 OR a.role='steward' OR
+              EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=?5 OR (t.value='*' AND substr(?5,1,1)<>'@')))))
+          ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=excluded.pending_seq",
+          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none()])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO participants(agent,card_id) VALUES(?,?)",
+            params![actor, id],
+        )?;
+        // Participation neither sends the actor their own event nor acknowledges
+        // unseen updates. Existing receipts (including legacy zero rows) stay intact.
+    }
+    Ok(json!({"card":card,"event_seq":seq}))
+}
+fn create_card(
+    conn: &Connection,
+    actor: &str,
+    args: &Value,
+    detail: Value,
+    now: i64,
+) -> Result<Value> {
+    let mut card: Card = serde_json::from_value(
+        json!({"id":0,"rev":1,"kind":"note","topic":"general","title":"","summary":"","status":"open","priority":2,"pinned":false,"tags":[],"author":actor,"assignee":null,"lease_owner":null,"lease_until_ms":0,"fence":0,"created_ms":now,"updated_ms":now,"last_seq":0}),
+    )?;
+    apply_fields(&mut card, args)?;
+    validate_card(&card)?;
+    assignee_known(conn, &card.assignee)?;
+    conn.execute("INSERT INTO cards(kind,topic,title,summary,status,priority,pinned,tags,author,assignee,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![card.kind,card.topic,card.title,card.summary,card.status,card.priority,card.pinned,serde_json::to_string(&card.tags)?,actor,card.assignee,now,now])?;
+    emit(
+        conn,
+        actor,
+        "post",
+        conn.last_insert_rowid(),
+        detail,
+        now,
+        true,
+    )
+}
+fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    let a = &req.args;
+    let actor = req.actor.as_str();
+    match req.op.as_str() {
+        "join" => {
+            check_fields(a, &["role", "topics"])?;
+            let existing: Option<(String, String, bool)> = conn
+                .query_row(
+                    "SELECT role,topics,enabled FROM agents WHERE name=?",
+                    [actor],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let role = a
+                .get("role")
+                .map(|_| string(a, "role"))
+                .transpose()?
+                .unwrap_or(existing.as_ref().map(|e| e.0.as_str()).unwrap_or("worker"));
+            if !["worker", "steward", "reviewer"].contains(&role) {
+                return Err(Error::invalid("role: worker|steward|reviewer"));
+            }
+            let topics = if let Some(v) = a.get("topics") {
+                serde_json::to_string(&tags(v)?)?
+            } else {
+                existing
+                    .as_ref()
+                    .map(|e| e.1.clone())
+                    .unwrap_or("[\"*\"]".into())
+            };
+            conn.execute("INSERT INTO agents(name,role,topics,joined_ms,last_seen_ms) VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,topics=excluded.topics,enabled=1,last_seen_ms=excluded.last_seen_ms",params![actor,role,topics,now,now])?;
+            // Seed from live heads, never from the historical event stream. On resume,
+            // refresh the pending head without changing any explicit acknowledgment.
+            let sql=format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?,c.id,c.last_seq FROM cards c WHERE {ACTIVE} AND {RELEVANT} AND NOT EXISTS(SELECT 1 FROM events e WHERE e.seq=c.last_seq AND e.actor=?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
+            conn.execute(&sql, params![actor, actor, actor, actor, actor, actor])?;
+            let mut result = brief(conn, actor, 12000, now)?;
+            let retained: i64 = conn.query_row(&format!("SELECT count(*) FROM deliveries d JOIN cards c ON c.id=d.card_id WHERE d.agent=? AND d.pending_seq>d.ack_seq AND NOT coalesce({RELEVANT},0)"), params![actor,actor,actor,actor,actor], |r| r.get(0))?;
+            result["subscriptions"] = json!({"topics":serde_json::from_str::<Value>(&topics)?,"retained_pending_outside_scope":retained,"note":"Existing receipts are retained, not acknowledged. Incidental receipt does not follow a conversation. Steward still receives all traffic; drive defaults to involved selection."});
+            Ok(result)
+        }
+        "leave" | "heartbeat" => {
+            check_fields(a, &[])?;
+            conn.execute(
+                "UPDATE agents SET enabled=?,last_seen_ms=? WHERE name=?",
+                params![req.op != "leave", now, actor],
+            )?;
+            if req.op == "leave" {
+                conn.execute("UPDATE controllers SET state='stopped',updated_ms=?,reason='left' WHERE agent=?", params![now,actor])?;
+                conn.execute("UPDATE listeners SET connected=0 WHERE agent=?", [actor])?;
+            }
+            Ok(json!({"agent":actor,"enabled":req.op!="leave"}))
+        }
+        "controller" => {
+            check_fields(a, &["run_id", "state", "begin", "reason"])?;
+            let run_id = string(a, "run_id")?;
+            text(run_id, "run_id", 128, false)?;
+            let state = string(a, "state")?;
+            if !["waiting", "running", "failed", "stopped"].contains(&state) {
+                return Err(Error::invalid(
+                    "controller state: waiting|running|failed|stopped",
+                ));
+            }
+            let reason = a.get("reason").map(|_| string(a, "reason")).transpose()?;
+            if let Some(reason) = reason {
+                text(reason, "reason", 160, true)?;
+            }
+            if boolean(a, "begin", false)? {
+                if state != "waiting" {
+                    return Err(Error::invalid("controller begins waiting"));
+                }
+                let occupied: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM controllers WHERE agent=?1 AND state IN ('waiting','running') AND updated_ms>?2) OR EXISTS(SELECT 1 FROM listeners WHERE agent=?1 AND connected=1 AND updated_ms>?3)",params![actor,now-120000,now-crate::attention::LISTENER_TTL_MS],|r|r.get(0))?;
+                if occupied {
+                    return Err(Error::new(
+                        "controller_busy",
+                        "a live controller already owns this identity; use a different --as name",
+                    ));
+                }
+                conn.execute("INSERT INTO controllers(agent,run_id,state,updated_ms,reason) VALUES(?,?,?,?,NULL) ON CONFLICT(agent) DO UPDATE SET run_id=excluded.run_id,state=excluded.state,updated_ms=excluded.updated_ms,reason=NULL",params![actor,run_id,state,now])?;
+            } else {
+                let updated = conn.execute("UPDATE controllers SET state=?,updated_ms=?,reason=? WHERE agent=? AND run_id=? AND state IN ('waiting','running') AND updated_ms>?",params![state,now,reason,actor,run_id,now-120000])?;
+                if updated == 0 {
+                    return Err(Error::new(
+                        "controller_lost",
+                        "controller lease expired, stopped, or belongs to another run",
+                    ));
+                }
+            }
+            Ok(json!({"run_id":run_id,"state":state,"updated_ms":now}))
+        }
+        "follow" | "unfollow" => {
+            check_fields(a, &["id"])?;
+            let id = integer(a, "id")?;
+            let card = get_card(conn, id)?;
+            if req.op == "follow" {
+                conn.execute(
+                    "INSERT OR IGNORE INTO participants(agent,card_id) VALUES(?,?)",
+                    params![actor, id],
+                )?;
+                let other: bool = conn.query_row(
+                    "SELECT actor<>? FROM events WHERE seq=?",
+                    params![actor, card.last_seq],
+                    |r| r.get(0),
+                )?;
+                if other {
+                    conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq) VALUES(?,?,?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)",params![actor,id,card.last_seq])?;
+                }
+            } else {
+                conn.execute(
+                    "DELETE FROM participants WHERE agent=? AND card_id=?",
+                    params![actor, id],
+                )?;
+            }
+            Ok(
+                json!({"id":id,"following":req.op=="follow","note":"Receipts are retained. Author, assignee, owner and current subscriptions still route updates; contributing follows again."}),
+            )
+        }
+        "send" => {
+            check_fields(a, &["to", "body", "title", "ask", "priority", "refs"])?;
+            let target = string(a, "to")?;
+            if !valid_name(target) {
+                return Err(Error::invalid("to must be a registered agent name"));
+            }
+            let body = string(a, "body")?;
+            text(body, "body", 8000, false)?;
+            let title = a
+                .get("title")
+                .map(|_| string(a, "title").map(str::to_owned))
+                .transpose()?
+                .unwrap_or_else(|| clip(body.trim().lines().next().unwrap_or(body), 36));
+            let refs = a.get("refs").map(tags).transpose()?.unwrap_or_default();
+            // Keep current heads bounded; the immutable creation event holds full text.
+            let summary = if body.len() <= 2000 {
+                body.to_owned()
+            } else {
+                format!(
+                    "{}\n[Full message: fray thread ID --bodies]",
+                    clip(body, 400)
+                )
+            };
+            create_card(
+                conn,
+                actor,
+                &json!({
+                    "kind":if boolean(a,"ask",false)? {"question"} else {"note"},
+                    "topic":format!("@{target}"),"title":title,"summary":summary,
+                    "assignee":target,"priority":bounded(a,"priority",2,0,3)?,"tags":refs
+                }),
+                json!({"body":body}),
+                now,
+            )
+        }
+        "post" => {
+            check_fields(
+                a,
+                &[
+                    "kind", "topic", "title", "summary", "status", "priority", "pinned", "tags",
+                    "assignee",
+                ],
+            )?;
+            create_card(conn, actor, a, Value::Null, now)
+        }
+        "patch" => {
+            check_fields(
+                a,
+                &[
+                    "id", "expect", "fence", "kind", "topic", "title", "summary", "status",
+                    "priority", "pinned", "tags", "assignee",
+                ],
+            )?;
+            let mut c = get_card(conn, integer(a, "id")?)?;
+            if c.rev != integer(a, "expect")? {
+                return Err(Error::new(
+                    "conflict",
+                    format!("card {} is revision {}; read before retrying", c.id, c.rev),
+                ));
+            }
+            if c.lease_owner.is_some() {
+                check_lease(&c, actor, integer(a, "fence")?, now, false)?;
+            }
+            if a.as_object().map_or(0, |x| {
+                x.keys()
+                    .filter(|k| !["id", "expect", "fence"].contains(&k.as_str()))
+                    .count()
+            }) == 0
+            {
+                return Err(Error::invalid("patch has no fields"));
+            }
+            apply_fields(&mut c, a)?;
+            validate_card(&c)?;
+            assignee_known(conn, &c.assignee)?;
+            if c.terminal() {
+                c.lease_owner = None;
+                c.lease_until_ms = 0;
+                c.fence += 1;
+            }
+            conn.execute("UPDATE cards SET rev=rev+1,kind=?,topic=?,title=?,summary=?,status=?,priority=?,pinned=?,tags=?,assignee=?,lease_owner=?,lease_until_ms=?,fence=?,updated_ms=? WHERE id=?",params![c.kind,c.topic,c.title,c.summary,c.status,c.priority,c.pinned,serde_json::to_string(&c.tags)?,c.assignee,c.lease_owner,c.lease_until_ms,c.fence,now,c.id])?;
+            emit(conn, actor, "patch", c.id, Value::Null, now, true)
+        }
+        "annotate" => {
+            check_fields(a, &["id", "kind", "body", "refs"])?;
+            let c = get_card(conn, integer(a, "id")?)?;
+            let body = string(a, "body")?;
+            text(body, "body", 8000, false)?;
+            let kind = a
+                .get("kind")
+                .map(|_| string(a, "kind"))
+                .transpose()?
+                .unwrap_or("note");
+            if !["note", "evidence", "objection", "question", "answer"].contains(&kind) {
+                return Err(Error::invalid(
+                    "annotation kind: note|evidence|objection|question|answer",
+                ));
+            }
+            let refs = a.get("refs").map(tags).transpose()?.unwrap_or_default();
+            let mut merged = c.tags.clone();
+            merged.extend(refs.iter().cloned());
+            merged.sort();
+            merged.dedup();
+            let merged = tags(&json!(merged))?;
+            if merged != c.tags {
+                conn.execute(
+                    "UPDATE cards SET tags=?,rev=rev+1,updated_ms=? WHERE id=?",
+                    params![serde_json::to_string(&merged)?, now, c.id],
+                )?;
+            }
+            // An actionable annotation becomes a durable question, not a buried reply.
+            let follow_up = if matches!(kind, "question" | "objection") {
+                // Route to whoever must respond: the first responsible party who
+                // is not the one raising it. An assignee objecting to its own
+                // card reaches the author, not itself.
+                let lease_owner = if c.lease_until_ms > now {
+                    c.lease_owner.clone()
+                } else {
+                    None
+                };
+                let target = [lease_owner, c.assignee.clone(), Some(c.author.clone())]
+                    .into_iter()
+                    .flatten()
+                    .find(|who| who != actor)
+                    .unwrap_or_else(|| actor.to_string());
+                // Name the concern, not the parent: nested parent titles are unreadable.
+                let first_line = body
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("");
+                let title = format!(
+                    "{} on #{}: {}",
+                    if kind == "objection" {
+                        "Objection"
+                    } else {
+                        "Question"
+                    },
+                    c.id,
+                    clip(first_line, 60)
+                );
+                let summary=format!("{}\nFull context: annotation on card #{}. Resolve this question explicitly after addressing it.",clip(body,400),c.id);
+                let priority = if kind == "objection" {
+                    c.priority.min(1)
+                } else {
+                    c.priority
+                };
+                let mut follow_up_tags = refs.clone();
+                follow_up_tags.push(format!("parent:{}", c.id));
+                follow_up_tags.sort();
+                follow_up_tags.dedup();
+                let follow_up_tags = tags(&json!(follow_up_tags))?;
+                conn.execute("INSERT INTO cards(kind,topic,title,summary,status,priority,tags,author,assignee,created_ms,updated_ms) VALUES('question',?,?,?,'open',?,?,?,?,?,?)",params![c.topic,title,summary,priority,serde_json::to_string(&follow_up_tags)?,actor,target,now,now])?;
+                Some(conn.last_insert_rowid())
+            } else {
+                None
+            };
+            let mut result = emit(
+                conn,
+                actor,
+                "annotate",
+                c.id,
+                json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs}),
+                now,
+                true,
+            )?;
+            if let Some(id) = follow_up {
+                let child = emit(
+                    conn,
+                    actor,
+                    "post",
+                    id,
+                    json!({"parent_card":c.id,"annotation_seq":result["event_seq"]}),
+                    now,
+                    true,
+                )?;
+                result["follow_up"] = child["card"].clone();
+                result["cursor"] = child["event_seq"].clone();
+            }
+            Ok(result)
+        }
+        "claim" | "renew" | "release" => {
+            check_fields(a, &["id", "fence", "ttl"])?;
+            let c = get_card(conn, integer(a, "id")?)?;
+            let ttl = bounded(a, "ttl", 900, 1, 86400)?;
+            match req.op.as_str() {
+                "claim" => {
+                    if c.terminal() {
+                        return Err(Error::new("closed", "cannot claim a terminal card"));
+                    }
+                    if c.lease_owner.is_some() && c.lease_until_ms > now {
+                        return Err(Error::new(
+                            "claimed",
+                            format!(
+                                "card {} claimed by {:?} until {}; use renew for your live claim",
+                                c.id, c.lease_owner, c.lease_until_ms
+                            ),
+                        ));
+                    }
+                    conn.execute("UPDATE cards SET lease_owner=?,lease_until_ms=?,fence=fence+1,rev=rev+1,status=CASE WHEN status='open' AND kind='task' THEN 'active' ELSE status END WHERE id=?",params![actor,now+ttl*1000,c.id])?;
+                }
+                "renew" => {
+                    check_lease(&c, actor, integer(a, "fence")?, now, false)?;
+                    // Heartbeats extend a lease without invalidating content revisions.
+                    conn.execute(
+                        "UPDATE cards SET lease_until_ms=? WHERE id=?",
+                        params![now + ttl * 1000, c.id],
+                    )?;
+                }
+                _ => {
+                    check_lease(&c, actor, integer(a, "fence")?, now, true)?;
+                    conn.execute("UPDATE cards SET lease_owner=NULL,lease_until_ms=0,fence=fence+1,rev=rev+1 WHERE id=?",[c.id])?;
+                }
+            }
+            emit(
+                conn,
+                actor,
+                &req.op,
+                c.id,
+                Value::Null,
+                now,
+                req.op != "renew",
+            )
+        }
+        "ack" => {
+            if let Some(receipts) = a.get("receipts") {
+                check_fields(a, &["receipts"])?;
+                let receipts = receipts
+                    .as_array()
+                    .ok_or_else(|| Error::invalid("receipts must be an array"))?;
+                if receipts.len() > 100 {
+                    return Err(Error::invalid("too many receipts"));
+                }
+                let store_id: String =
+                    conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                        r.get(0)
+                    })?;
+                let mut acknowledged = Vec::new();
+                for receipt in receipts {
+                    check_fields(receipt, &["store_id", "agent", "id", "through_seq"])?;
+                    if string(receipt, "store_id")? != store_id
+                        || string(receipt, "agent")? != actor
+                    {
+                        return Err(Error::new(
+                            "receipt_mismatch",
+                            "receipt belongs to another store or agent",
+                        ));
+                    }
+                    acknowledged.push(mutate(conn,&Request::new("ack",actor,json!({"id":integer(receipt,"id")?,"through":integer(receipt,"through_seq")?})),now)?);
+                }
+                return Ok(json!({"acknowledged":acknowledged}));
+            }
+            check_fields(a, &["id", "through"])?;
+            let id = integer(a, "id")?;
+            let through = integer(a, "through")?;
+            let pending: Option<i64> = conn
+                .query_row(
+                    "SELECT pending_seq FROM deliveries WHERE agent=? AND card_id=?",
+                    params![actor, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let pending = pending
+                .ok_or_else(|| Error::new("not_found", "no delivery for this agent/card"))?;
+            if through < 0 || through > pending {
+                return Err(Error::invalid(
+                    "through must not exceed the card's pending delivery sequence",
+                ));
+            }
+            conn.execute(
+                "UPDATE deliveries SET ack_seq=max(ack_seq,?) WHERE agent=? AND card_id=?",
+                params![through, actor, id],
+            )?;
+            let acked: i64 = conn.query_row(
+                "SELECT ack_seq FROM deliveries WHERE agent=? AND card_id=?",
+                params![actor, id],
+                |r| r.get(0),
+            )?;
+            Ok(json!({"id":id,"ack_seq":acked,"pending_seq":pending,"still_pending":acked<pending}))
+        }
+        "expose" => {
+            check_fields(a, &["receipts"])?;
+            let receipts = a["receipts"]
+                .as_array()
+                .ok_or_else(|| Error::invalid("receipts must be an array"))?;
+            if receipts.len() > 100 {
+                return Err(Error::invalid("too many receipts"));
+            }
+            for r in receipts {
+                check_fields(r, &["id", "through"])?;
+                let through = integer(r, "through")?;
+                if through < 0 {
+                    return Err(Error::invalid("through must be nonnegative"));
+                }
+                conn.execute("UPDATE deliveries SET shown_seq=max(shown_seq,?),shown_at_ms=? WHERE agent=? AND card_id=? AND pending_seq>=?",params![through,now,actor,integer(r,"id")?,through])?;
+            }
+            Ok(json!({"exposed":receipts.len(),"acknowledged":false}))
+        }
+        _ => Err(Error::invalid("unknown mutation")),
+    }
+}
+fn apply_fields(c: &mut Card, a: &Value) -> Result<()> {
+    for k in ["kind", "topic", "title", "summary", "status"] {
+        if a.get(k).is_some() {
+            let s = string(a, k)?.to_string();
+            match k {
+                "kind" => c.kind = s,
+                "topic" => c.topic = s,
+                "title" => c.title = s,
+                "summary" => c.summary = s,
+                _ => c.status = s,
+            }
+        }
+    }
+    if a.get("priority").is_some() {
+        c.priority = integer(a, "priority")?;
+    }
+    if a.get("pinned").is_some() {
+        c.pinned = boolean(a, "pinned", false)?;
+    }
+    if let Some(v) = a.get("tags") {
+        c.tags = tags(v)?;
+    }
+    if let Some(v) = a.get("assignee") {
+        c.assignee = if v.is_null() {
+            None
+        } else {
+            Some(string(a, "assignee")?.into())
+        };
+    }
+    Ok(())
+}
+fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    let a = &req.args;
+    let actor = &req.actor;
+    match req.op.as_str() {
+        "ping" => {
+            check_fields(a, &[])?;
+            Ok(
+                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite"],"cursor":highwater(conn)?,"time_ms":now}),
+            )
+        }
+        "brief" => {
+            check_fields(a, &["budget"])?;
+            registered(conn, actor)?;
+            brief(
+                conn,
+                actor,
+                bounded(a, "budget", 12000, 2000, 64000)? as usize,
+                now,
+            )
+        }
+        "query" => query(conn, a, actor, now),
+        "show" => {
+            check_fields(a, &["id", "history", "after", "limit", "receipts"])?;
+            let c = get_card(conn, integer(a, "id")?)?;
+            let mut v = json!({"card":c,"cursor":highwater(conn)?});
+            if boolean(a, "receipts", false)? {
+                let mut s=conn.prepare("SELECT d.agent,d.pending_seq,d.ack_seq,d.shown_seq,d.shown_at_ms,a.enabled FROM deliveries d JOIN agents a ON a.name=d.agent WHERE d.card_id=? AND d.pending_seq>0 ORDER BY d.agent LIMIT 101")?;
+                let rows=s.query_map([c.id],|r|Ok(json!({"agent":r.get::<_,String>(0)?,"pending_seq":r.get::<_,i64>(1)?,"ack_seq":r.get::<_,i64>(2)?,"exposed_seq":r.get::<_,i64>(3)?,"exposed_at_ms":r.get::<_,i64>(4)?,"enabled":r.get::<_,bool>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                v["receipts_more"] = json!(rows.len() > 100);
+                v["receipts"] = json!(rows.into_iter().take(100).collect::<Vec<_>>());
+            }
+            if boolean(a, "history", false)? {
+                let limit = bounded(a, "limit", 20, 1, 100)?;
+                let after = bounded(a, "after", 0, 0, i64::MAX)?;
+                let e = events(conn, after, Some(c.id), limit + 1)?;
+                v["more"] = json!(e.len() > limit as usize);
+                let e: Vec<_> = e.into_iter().take(limit as usize).collect();
+                v["next_after"] = json!(e.last().and_then(|v| v["seq"].as_i64()).unwrap_or(after));
+                v["history"] = json!(e);
+            }
+            Ok(v)
+        }
+        "inbox" => {
+            check_fields(
+                a,
+                &[
+                    "after",
+                    "limit",
+                    "fresh",
+                    "selection",
+                    "addressed_to_me",
+                    "unresolved",
+                    "kinds",
+                    "min_priority",
+                ],
+            )?;
+            inbox(
+                conn,
+                actor,
+                bounded(a, "after", 0, 0, i64::MAX)?,
+                bounded(a, "limit", 20, 1, 100)?,
+                boolean(a, "fresh", false)?,
+                InboxSelection::parse(a)?,
+                now,
+            )
+        }
+        "receipt_status" => {
+            check_fields(a, &["receipts"])?;
+            registered(conn, actor)?;
+            let receipts = a["receipts"]
+                .as_array()
+                .ok_or_else(|| Error::invalid("receipts must be an array"))?;
+            if receipts.len() > 100 {
+                return Err(Error::invalid("too many receipts"));
+            }
+            let identity: String =
+                conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+                    r.get(0)
+                })?;
+            let mut handled = 0;
+            for r in receipts {
+                check_fields(r, &["store_id", "agent", "id", "through_seq"])?;
+                if string(r, "store_id")? != identity || string(r, "agent")? != actor {
+                    return Err(Error::new(
+                        "receipt_mismatch",
+                        "receipt belongs to another store or agent",
+                    ));
+                }
+                let through = integer(r, "through_seq")?;
+                if through <= 0 {
+                    return Err(Error::invalid("through_seq must be positive"));
+                }
+                let ack: Option<i64> = conn
+                    .query_row(
+                        "SELECT ack_seq FROM deliveries WHERE agent=? AND card_id=?",
+                        params![actor, integer(r, "id")?],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if ack.is_some_and(|ack| ack >= through) {
+                    handled += 1;
+                }
+            }
+            Ok(json!({"handled":handled,"total":receipts.len()}))
+        }
+        "search_history" => {
+            check_fields(a, &["q", "limit", "offset"])?;
+            let q = string(a, "q")?;
+            text(q, "q", 1000, false)?;
+            let limit = bounded(a, "limit", 20, 1, 100)?;
+            let offset = bounded(a, "offset", 0, 0, 1000000)?;
+            let mut s=conn.prepare("SELECT e.seq,e.ts_ms,e.actor,e.op,e.card_id,snippet(event_fts,0,'[',']','…',24) FROM event_fts JOIN events e ON e.seq=event_fts.rowid WHERE event_fts MATCH ? ORDER BY e.seq DESC LIMIT ? OFFSET ?")?;
+            let items=s.query_map(params![q,limit+1,offset],|r|Ok(json!({"seq":r.get::<_,i64>(0)?,"ts_ms":r.get::<_,i64>(1)?,"actor":r.get::<_,String>(2)?,"op":r.get::<_,String>(3)?,"card_id":r.get::<_,i64>(4)?,"historical":true,"excerpt":r.get::<_,String>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let more = items.len() > limit as usize;
+            Ok(
+                json!({"items":items.into_iter().take(limit as usize).collect::<Vec<_>>(),"more":more,"next_offset":offset+limit,"cursor":highwater(conn)?,"warning":"Historical text may be superseded. Use show for the current head."}),
+            )
+        }
+        "agents" => {
+            check_fields(a, &[])?;
+            roster(conn, now, 100)
+        }
+        _ => Err(Error::invalid(format!("unknown operation: {}", req.op))),
+    }
+}
+fn prefix_cols() -> String {
+    COLS.split(',')
+        .map(|x| format!("c.{x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+fn select_page(
+    conn: &Connection,
+    condition: &str,
+    values: Vec<SqlValue>,
+    order: &str,
+    limit: i64,
+    offset: i64,
+    now: i64,
+) -> Result<Value> {
+    let total: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM cards c WHERE {condition}"),
+        params_from_iter(values.iter()),
+        |r| r.get(0),
+    )?;
+    let sql = format!(
+        "SELECT {} FROM cards c WHERE {condition} ORDER BY {order} LIMIT ? OFFSET ?",
+        prefix_cols()
+    );
+    let mut values = values;
+    values.push(limit.into());
+    values.push(offset.into());
+    let mut s = conn.prepare(&sql)?;
+    let cards = s
+        .query_map(params_from_iter(values.iter()), row_card)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(
+        json!({"items":cards.iter().map(|c|c.compact(now)).collect::<Vec<_>>(),"total":total,"more":offset+(cards.len() as i64)<total,"next_offset":offset+cards.len() as i64,"cursor":highwater(conn)?}),
+    )
+}
+fn query(conn: &Connection, a: &Value, actor: &str, now: i64) -> Result<Value> {
+    check_fields(
+        a,
+        &[
+            "q",
+            "topic",
+            "kind",
+            "status",
+            "tag",
+            "assignee",
+            "owner",
+            "unowned",
+            "all",
+            "sort",
+            "limit",
+            "offset",
+            "stale_secs",
+            "scope",
+        ],
+    )?;
+    for (field, allowed) in [
+        (
+            "kind",
+            &["goal", "task", "question", "decision", "note"][..],
+        ),
+        (
+            "status",
+            &[
+                "open",
+                "active",
+                "blocked",
+                "resolved",
+                "superseded",
+                "withdrawn",
+            ][..],
+        ),
+    ] {
+        if a.get(field).is_some() && !allowed.contains(&string(a, field)?) {
+            return Err(Error::invalid(format!("invalid {field} filter")));
+        }
+    }
+    let mut where_parts = vec!["1=1".to_string()];
+    let mut p: Vec<SqlValue> = Vec::new();
+    if !boolean(a, "all", false)? && a.get("status").is_none() {
+        where_parts.push(ACTIVE.into());
+    }
+    for key in ["topic", "kind", "status", "assignee"] {
+        if a.get(key).is_some() {
+            where_parts.push(format!("c.{key}=?"));
+            p.push(string(a, key)?.to_string().into());
+        }
+    }
+    if a.get("owner").is_some() {
+        where_parts.push("c.lease_owner=? AND c.lease_until_ms>?".into());
+        p.push(string(a, "owner")?.to_string().into());
+        p.push(now.into());
+    }
+    if let Some(v) = a.get("q") {
+        let q = v
+            .as_str()
+            .ok_or_else(|| Error::invalid("q must be a string"))?;
+        text(q, "q", 1000, false)?;
+        where_parts.push("c.id IN (SELECT rowid FROM card_fts WHERE card_fts MATCH ?)".into());
+        p.push(q.to_string().into());
+    }
+    if a.get("tag").is_some() {
+        where_parts.push("EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value=?)".into());
+        p.push(string(a, "tag")?.to_string().into());
+    }
+    if boolean(a, "unowned", false)? {
+        where_parts.push("(c.lease_owner IS NULL OR c.lease_until_ms<=?)".into());
+        p.push(now.into());
+    }
+    if a.get("stale_secs").is_some() {
+        let secs = bounded(a, "stale_secs", 0, 0, 86400 * 365)?;
+        where_parts.push("c.updated_ms<=?".into());
+        p.push((now - secs * 1000).into());
+    }
+    if boolean(a, "scope", false)? {
+        registered(conn, actor)?;
+        where_parts.push(RELEVANT.into());
+        for _ in 0..4 {
+            p.push(actor.to_string().into());
+        }
+    }
+    let sort = a
+        .get("sort")
+        .map(|_| string(a, "sort"))
+        .transpose()?
+        .unwrap_or("priority");
+    let order = match sort {
+        "priority" => "c.pinned DESC,c.priority ASC,c.created_ms ASC,c.id ASC",
+        "recent" => "c.last_seq DESC,c.id DESC",
+        "oldest" => "c.created_ms ASC,c.id ASC",
+        "id" => "c.id ASC",
+        _ => return Err(Error::invalid("sort: priority|recent|oldest|id")),
+    };
+    select_page(
+        conn,
+        &where_parts.join(" AND "),
+        p,
+        order,
+        bounded(a, "limit", 20, 1, 100)?,
+        bounded(a, "offset", 0, 0, 1000000)?,
+        now,
+    )
+}
+fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Result<Vec<Value>> {
+    let sql="SELECT seq,ts_ms,actor,op,card_id,payload FROM events WHERE seq>? AND (? IS NULL OR card_id=?) ORDER BY seq LIMIT ?";
+    let mut s = conn.prepare(sql)?;
+    let raw = s
+        .query_map(params![after, card, card, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    raw.into_iter().map(|(seq,ts,actor,op,id,payload)|Ok(json!({"seq":seq,"ts_ms":ts,"actor":actor,"op":op,"card_id":id,"payload":serde_json::from_str::<Value>(&payload)?}))).collect()
+}
+fn inbox(
+    conn: &Connection,
+    actor: &str,
+    after: i64,
+    limit: i64,
+    fresh: bool,
+    selection: InboxSelection<'_>,
+    now: i64,
+) -> Result<Value> {
+    registered(conn, actor)?;
+    let condition=format!("d.agent=?1 AND d.pending_seq>d.ack_seq AND d.pending_seq>?2 AND (?3=0 OR d.pending_seq>d.shown_seq OR d.shown_at_ms<=?4) AND {}",selection.condition());
+    let total: i64 = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM deliveries d JOIN cards c ON c.id=d.card_id WHERE {condition}"
+        ),
+        params![actor, after, fresh, now - 60000],
+        |r| r.get(0),
+    )?;
+    let mut s=conn.prepare(&format!("SELECT d.card_id,d.pending_seq,d.ack_seq FROM deliveries d JOIN cards c ON c.id=d.card_id WHERE {condition} ORDER BY c.priority ASC,(c.assignee=?1) DESC,d.pending_seq ASC LIMIT ?5"))?;
+    let rows = s
+        .query_map(params![actor, after, fresh, now - 60000, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items = Vec::new();
+    let store_id: String =
+        conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+            r.get(0)
+        })?;
+    for (id, pending, ack) in rows {
+        let card = get_card(conn, id)?;
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=?",
+            params![id, ack, pending],
+            |r| r.get(0),
+        )?;
+        let mut s=conn.prepare("SELECT seq,actor,json_extract(payload,'$.detail.kind'),json_extract(payload,'$.detail.body'),json_extract(payload,'$.detail.follow_up_id') FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=? ORDER BY seq DESC LIMIT 2")?;
+        let annotations=s.query_map(params![id,ack,pending],|r|{
+            let body:String=r.get(3)?;
+            Ok(json!({"seq":r.get::<_,i64>(0)?,"actor":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"excerpt":clip(&body,200),"excerpt_truncated":body.chars().count()>200,"follow_up_id":r.get::<_,Option<i64>>(4)?}))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        items.push(json!({"card":card.compact(now),"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
+    }
+    Ok(
+        json!({"agent":actor,"selection":selection.mode,"addressed_to_me":selection.addressed_to_me,"unresolved":selection.unresolved,"kinds":selection.kinds,"min_priority":selection.min_priority,"cursor":highwater(conn)?,"items":items,"total":total,"more":(items.len() as i64)<total,"read_is_not_ack":true}),
+    )
+}
+fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
+    let mut s=conn.prepare("SELECT name,role,topics,enabled,last_seen_ms FROM agents ORDER BY enabled DESC,last_seen_ms DESC,name LIMIT ?")?;
+    let raw = s
+        .query_map([limit + 1], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let more = raw.len() > limit as usize;
+    let mut items = Vec::new();
+    for (name, role, topics, enabled, last) in raw.into_iter().take(limit as usize) {
+        let controller = conn.query_row("SELECT run_id,state,updated_ms,reason FROM controllers WHERE agent=?",[&name],|r|{
+            let state:String=r.get(1)?;
+            let updated:i64=r.get(2)?;
+            let active=matches!(state.as_str(),"waiting"|"running");
+            Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
+        }).optional()?;
+        let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"last_seen_ms":last,"controller":controller,"listener":listener}));
+    }
+    Ok(json!({"items":items,"more":more}))
+}
+fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Value> {
+    let p = || vec![SqlValue::Text(actor.into()); 4];
+    let context = select_page(
+        conn,
+        &format!("{ACTIVE} AND (c.pinned=1 OR c.kind IN ('goal','decision')) AND {RELEVANT}"),
+        p(),
+        "c.pinned DESC,c.priority,c.id",
+        6,
+        0,
+        now,
+    )?;
+    let mut work_p = p();
+    work_p.push(now.into());
+    work_p.push(actor.to_string().into());
+    let work=select_page(conn,&format!("{ACTIVE} AND {RELEVANT} AND c.kind IN ('task','question') AND c.status IN ('open','active') AND (c.lease_owner IS NULL OR c.lease_until_ms<=?) AND (c.assignee IS NULL OR c.assignee=?)"),work_p,"c.priority,c.created_ms,c.id",6,0,now)?;
+    let blockers = select_page(
+        conn,
+        &format!("c.status='blocked' AND {RELEVANT}"),
+        p(),
+        "c.priority,c.created_ms,c.id",
+        4,
+        0,
+        now,
+    )?;
+    let claimed = select_page(
+        conn,
+        &format!("{ACTIVE} AND c.lease_owner=? AND c.lease_until_ms>?"),
+        vec![actor.to_string().into(), now.into()],
+        "c.priority,c.id",
+        6,
+        0,
+        now,
+    )?;
+    let store_id: String =
+        conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+            r.get(0)
+        })?;
+    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
+    // The byte budget is hard, not a promise based on an estimated token count.
+    while serde_json::to_vec(&out)?.len() > budget {
+        let mut removed = false;
+        for key in [
+            "agents",
+            "available",
+            "claimed",
+            "context",
+            "blockers",
+            "attention",
+        ] {
+            if let Some(items) = out[key]["items"].as_array_mut() {
+                if items.pop().is_some() {
+                    out[key]["more"] = json!(true);
+                    out[key]["next_offset"] =
+                        json!(out[key]["items"].as_array().map_or(0, Vec::len));
+                    removed = true;
+                    break;
+                }
+            }
+        }
+        out["budget_truncated"] = json!(true);
+        if !removed {
+            break;
+        }
+    }
+    Ok(out)
+}

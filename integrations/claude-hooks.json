@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "fray hook", "timeout": 20 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "fray hook", "timeout": 20 }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "fray hook", "timeout": 20 }] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "fray hook", "timeout": 20 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "fray hook", "timeout": 20 }] }
+    ]
+  }
+}

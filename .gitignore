@@ -1,0 +1,7 @@
+/target/
+/.fray/
+__pycache__/
+*.pyc
+/.worktrees/
+.fray-agent
+*.zip

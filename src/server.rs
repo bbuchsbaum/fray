@@ -1,0 +1,628 @@
+use crate::{model::*, store::Store};
+use fs2::FileExt;
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    fs::{self, OpenOptions},
+    io::{self, BufRead, BufReader, Read, Write},
+    net::Shutdown,
+    os::unix::{
+        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+        net::{UnixListener, UnixStream},
+    },
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+pub const REQUEST_LIMIT: usize = 128 * 1024;
+pub const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
+const MAX_CLIENTS: usize = 128;
+const MAX_LONG_CLIENTS: usize = MAX_CLIENTS - 16;
+struct Shared {
+    store: Mutex<Store>,
+    changed: Condvar,
+    stop: AtomicBool,
+    clients: AtomicUsize,
+    long_clients: AtomicUsize,
+    socket: PathBuf,
+}
+
+pub fn read_frame<R: BufRead>(r: &mut R, limit: usize) -> io::Result<Option<String>> {
+    let mut out = Vec::new();
+    loop {
+        let bytes = r.fill_buf()?;
+        if bytes.is_empty() {
+            return if out.is_empty() {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unterminated JSON frame",
+                ))
+            };
+        }
+        let end = bytes.iter().position(|b| *b == b'\n');
+        let n = end.map(|i| i + 1).unwrap_or(bytes.len());
+        if out.len() + n > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "JSON frame exceeds size limit",
+            ));
+        }
+        out.extend_from_slice(&bytes[..n]);
+        r.consume(n);
+        if end.is_some() {
+            break;
+        }
+    }
+    String::from_utf8(out)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+pub fn write_frame<W: Write>(w: &mut W, v: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *w, v)?;
+    w.write_all(b"\n")?;
+    w.flush()?;
+    Ok(())
+}
+pub fn initialize(home: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(home)?;
+    fs::set_permissions(home, fs::Permissions::from_mode(0o700))?;
+    let home = fs::canonicalize(home)?;
+    if home.join("bus.sock").as_os_str().len() > 100 {
+        return Err(Error::invalid(
+            "Unix socket path too long; use a shorter absolute FRAY_HOME on local disk",
+        ));
+    }
+    Ok(home)
+}
+pub fn serve(home: &Path, normal: bool) -> Result<()> {
+    let home = initialize(home)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(home.join("daemon.lock"))?;
+    FileExt::try_lock_exclusive(&lock)
+        .map_err(|_| Error::new("already_running", "another daemon holds this project lock"))?;
+    let socket = home.join("bus.sock");
+    // Only the lock owner may remove a stale socket. Never unlink the lock file.
+    if let Ok(meta) = fs::symlink_metadata(&socket) {
+        if !meta.file_type().is_socket() {
+            return Err(Error::invalid(
+                "bus.sock exists but is not a socket; refusing to remove it",
+            ));
+        }
+        fs::remove_file(&socket)?;
+    }
+    let store = Store::open(&home.join("state.db"), normal)?;
+    // The daemon lock proves old socket-owned listeners cannot still be attached.
+    store.conn.execute("UPDATE listeners SET connected=0", [])?;
+    fs::set_permissions(home.join("state.db"), fs::Permissions::from_mode(0o600))?;
+    let listener = UnixListener::bind(&socket)?;
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+    let shared = Arc::new(Shared {
+        store: Mutex::new(store),
+        changed: Condvar::new(),
+        stop: AtomicBool::new(false),
+        clients: AtomicUsize::new(0),
+        long_clients: AtomicUsize::new(0),
+        socket: socket.clone(),
+    });
+    eprintln!(
+        "fray {} listening on {} (synchronous={})",
+        env!("CARGO_PKG_VERSION"),
+        socket.display(),
+        if normal {
+            "NORMAL: recent commits may be lost on power failure"
+        } else {
+            "FULL"
+        }
+    );
+    for accepted in listener.incoming() {
+        let mut stream = accepted?;
+        if shared.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        if shared.clients.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
+            shared.clients.fetch_sub(1, Ordering::SeqCst);
+            stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+            let _ = write_frame(
+                &mut stream,
+                &failure(Error::new("busy", "128 connected clients; retry later")),
+            );
+            continue;
+        }
+        let shared = shared.clone();
+        thread::spawn(move || {
+            struct Count(Arc<Shared>);
+            impl Drop for Count {
+                fn drop(&mut self) {
+                    self.0.clients.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _count = Count(shared.clone());
+            if let Err(e) = connection(stream, &shared) {
+                if !matches!(e.code.as_str(), "io") {
+                    eprintln!("client error: {e}");
+                }
+            }
+        });
+    }
+    let _ = fs::remove_file(socket);
+    drop(lock);
+    Ok(())
+}
+fn poisoned() -> Error {
+    Error::new(
+        "internal",
+        "store mutex poisoned; restart daemon and inspect state",
+    )
+}
+struct LongClient<'a>(&'a AtomicUsize);
+impl Drop for LongClient<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+fn reserve_long_client(shared: &Shared) -> Result<LongClient<'_>> {
+    if shared.long_clients.fetch_add(1, Ordering::SeqCst) >= MAX_LONG_CLIENTS {
+        shared.long_clients.fetch_sub(1, Ordering::SeqCst);
+        return Err(Error::new(
+            "busy",
+            "112 long-lived clients; 16 connection slots reserved for short RPCs; retry later",
+        ));
+    }
+    Ok(LongClient(&shared.long_clients))
+}
+fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    while let Some(line) = read_frame(&mut reader, REQUEST_LIMIT)? {
+        let req: Request = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                write_frame(&mut stream, &failure(e.into()))?;
+                continue;
+            }
+        };
+        if shared.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let _long_client = if matches!(req.op.as_str(), "watch" | "watch_attention")
+            || (req.op == "wait" && req.args["timeout"] != 0)
+        {
+            match reserve_long_client(shared) {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    write_frame(&mut stream, &failure(error))?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        match req.op.as_str() {
+            "watch_attention" => {
+                if !reader.buffer().is_empty() {
+                    write_frame(
+                        &mut stream,
+                        &failure(Error::new(
+                            "protocol",
+                            "attention subscription cannot be pipelined with further requests",
+                        )),
+                    )?;
+                    return Ok(());
+                }
+                if let Err(e) = watch_attention(&mut stream, shared, &req) {
+                    let _ = write_frame(&mut stream, &failure(e));
+                }
+                return Ok(());
+            }
+            "watch" => {
+                if let Err(e) = watch(&mut stream, shared, &req) {
+                    let _ = write_frame(&mut stream, &failure(e));
+                }
+                return Ok(());
+            }
+            "wait" => {
+                let indefinite = req.args.get("timeout") == Some(&Value::Null);
+                let result = if !reader.buffer().is_empty() {
+                    Err(Error::new(
+                        "protocol",
+                        "wait cannot be pipelined with further requests",
+                    ))
+                } else if req.args["timeout"] == 0 {
+                    wait(shared, &req, None, None)
+                } else {
+                    wait_cancellable(&stream, shared, &req, indefinite)
+                };
+                let terminal = indefinite
+                    || result
+                        .as_ref()
+                        .is_err_and(|e| matches!(e.code.as_str(), "protocol" | "unavailable"));
+                write_frame(
+                    &mut stream,
+                    &match result {
+                        Ok(v) => success(v),
+                        Err(e) => failure(e),
+                    },
+                )?;
+                if terminal {
+                    return Ok(());
+                }
+            }
+            "shutdown" => {
+                if let Err(error) = check_fields(&req.args, &[]) {
+                    write_frame(&mut stream, &failure(error))?;
+                    continue;
+                }
+                {
+                    let _guard = shared.store.lock().map_err(|_| poisoned())?;
+                    shared.stop.store(true, Ordering::SeqCst);
+                    shared.changed.notify_all();
+                }
+                let result = write_frame(&mut stream, &success(json!({"stopping":true})));
+                let _ = UnixStream::connect(&shared.socket); // Wake the blocking accept().
+                return result;
+            }
+            _ => {
+                let response = {
+                    let mut store = shared.store.lock().map_err(|_| poisoned())?;
+                    let before = store.highwater()?;
+                    let result = store.execute(&req);
+                    if result.is_ok()
+                        && (store.highwater()? > before
+                            || matches!(req.op.as_str(), "join" | "leave" | "follow" | "unfollow"))
+                    {
+                        shared.changed.notify_all();
+                    }
+                    match result {
+                        Ok(mut v) => {
+                            if req.op == "ping" {
+                                v["capacity"] = json!({"clients":shared.clients.load(Ordering::SeqCst),"long_lived":shared.long_clients.load(Ordering::SeqCst),"client_limit":MAX_CLIENTS,"long_limit":MAX_LONG_CLIENTS,"short_reserved":MAX_CLIENTS-MAX_LONG_CLIENTS});
+                            }
+                            success(v)
+                        }
+                        Err(e) => failure(e),
+                    }
+                };
+                // A slow consumer never holds the database lock while writing.
+                write_frame(&mut stream, &response)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn wait_cancellable(
+    stream: &UnixStream,
+    shared: &Shared,
+    req: &Request,
+    indefinite: bool,
+) -> Result<Value> {
+    let mut hangup = stream.try_clone()?;
+    // Finite waits preserve sequential requests on the same connection. A bounded
+    // socket read lets this EOF observer stop without shutting down that socket.
+    // The store still waits only on commits/cancellation, never a polling timer.
+    hangup.set_read_timeout(if indefinite {
+        None
+    } else {
+        Some(Duration::from_millis(100))
+    })?;
+    let cancelled = AtomicBool::new(false);
+    let unexpected_input = AtomicBool::new(false);
+    let finished = AtomicBool::new(false);
+    let result = thread::scope(|scope| {
+        scope.spawn(|| {
+            while !finished.load(Ordering::SeqCst) {
+                match hangup.read(&mut [0u8; 1]) {
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock
+                                | io::ErrorKind::TimedOut
+                                | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue
+                    }
+                    input => {
+                        let _guard = shared.store.lock();
+                        unexpected_input.store(matches!(input, Ok(n) if n > 0), Ordering::SeqCst);
+                        cancelled.store(true, Ordering::SeqCst);
+                        shared.changed.notify_all();
+                        return;
+                    }
+                }
+            }
+        });
+        let result = wait(shared, req, Some(&cancelled), Some(&unexpected_input));
+        finished.store(true, Ordering::SeqCst);
+        if indefinite {
+            let _ = stream.shutdown(Shutdown::Read);
+        }
+        result
+    });
+    if !indefinite {
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    }
+    if unexpected_input.load(Ordering::SeqCst) {
+        return Err(Error::new(
+            "protocol",
+            "wait is receive-only until its response; use a separate connection for other requests",
+        ));
+    }
+    result
+}
+fn wait(
+    shared: &Shared,
+    req: &Request,
+    cancelled: Option<&AtomicBool>,
+    unexpected_input: Option<&AtomicBool>,
+) -> Result<Value> {
+    check_fields(
+        &req.args,
+        &[
+            "after",
+            "timeout",
+            "limit",
+            "selection",
+            "addressed_to_me",
+            "unresolved",
+            "kinds",
+            "min_priority",
+        ],
+    )?;
+    let after = bounded(&req.args, "after", 0, 0, i64::MAX)?;
+    let deadline = if req.args.get("timeout") == Some(&Value::Null) {
+        None
+    } else {
+        Some(
+            Instant::now()
+                + Duration::from_secs(bounded(&req.args, "timeout", 300, 0, 86400)? as u64),
+        )
+    };
+    let limit = bounded(&req.args, "limit", 12, 1, 100)?;
+    let mut store = shared.store.lock().map_err(|_| poisoned())?;
+    if after > store.highwater()? {
+        return Err(Error::new(
+            "cursor_ahead",
+            "cursor exceeds this store; rejoin rather than skip data",
+        ));
+    }
+    loop {
+        if unexpected_input.is_some_and(|input| input.load(Ordering::SeqCst)) {
+            return Err(Error::new("protocol", "unexpected input while waiting"));
+        }
+        if shared.stop.load(Ordering::SeqCst) || cancelled.is_some_and(|c| c.load(Ordering::SeqCst))
+        {
+            return Err(Error::new(
+                "unavailable",
+                "wait cancelled or daemon stopped",
+            ));
+        }
+        let mut page = store.filtered_attention(
+            &req.actor,
+            after,
+            limit,
+            crate::store::InboxSelection::parse(&req.args)?,
+            now_ms(),
+        )?;
+        let has_items = page["total"].as_i64().unwrap_or(0) > 0;
+        let remaining = deadline.map(|end| end.saturating_duration_since(Instant::now()));
+        let expired = remaining.is_some_and(|r| r.is_zero());
+        if has_items || expired {
+            page["store_id"] = json!(store.identity()?);
+            page["timed_out"] = json!(expired && !has_items);
+            return Ok(page);
+        }
+        // The condition check and wait use the SAME mutex as commits: no lost wake-up.
+        store = if let Some(remaining) = remaining {
+            shared
+                .changed
+                .wait_timeout(store, remaining)
+                .map_err(|_| poisoned())?
+                .0
+        } else {
+            shared.changed.wait(store).map_err(|_| poisoned())?
+        };
+    }
+}
+
+fn watch_attention(stream: &mut UnixStream, shared: &Shared, req: &Request) -> Result<()> {
+    let options = crate::attention::Options::parse(&req.args)?;
+    let run_id = string(&req.args, "run_id")?;
+    let once = boolean(&req.args, "once", false)?;
+    let deadline = req
+        .args
+        .get("timeout")
+        .map(|_| {
+            bounded(&req.args, "timeout", 300, 1, 86400)
+                .map(|secs| Instant::now() + Duration::from_secs(secs as u64))
+        })
+        .transpose()?;
+    let connection_id = random_key()?;
+    let filters = json!({"selection":options.selection,"addressed_to_me":options.addressed_to_me,"unresolved":options.unresolved,"kinds":options.kinds,"min_priority":options.min_priority}).to_string();
+    let store_id = {
+        let store = shared.store.lock().map_err(|_| poisoned())?;
+        store.listener_begin(&req.actor, run_id, &connection_id, &filters, now_ms())?;
+        store.identity()?
+    };
+    let mut hangup = stream.try_clone()?;
+    hangup.set_read_timeout(None)?;
+    let disconnected = AtomicBool::new(false);
+    let unexpected_input = AtomicBool::new(false);
+    let result = thread::scope(|scope| {
+        // The stream is server-to-client only after subscription. A blocking EOF
+        // reader notices cancellation immediately without polling the database.
+        // Shutdown(Read) below releases it on every normal/error return path.
+        scope.spawn(|| {
+            let input = hangup.read(&mut [0u8; 1]);
+            let _guard = shared.store.lock();
+            unexpected_input.store(matches!(input, Ok(n) if n > 0), Ordering::SeqCst);
+            disconnected.store(true, Ordering::SeqCst);
+            shared.changed.notify_all();
+        });
+        let result = (|| {
+            write_frame(
+                stream,
+                &success(json!({"type":"ready","store_id":store_id})),
+            )?;
+            let mut emitted = HashMap::new();
+            let mut batch_deadline = None;
+            let mut heartbeat = Instant::now() + Duration::from_secs(15);
+            loop {
+                let frame = {
+                    let mut store = shared.store.lock().map_err(|_| poisoned())?;
+                    loop {
+                        if unexpected_input.load(Ordering::SeqCst) {
+                            return Err(Error::new("protocol", "attention streams are receive-only; use a separate RPC connection for acknowledgments"));
+                        }
+                        if shared.stop.load(Ordering::SeqCst) || disconnected.load(Ordering::SeqCst)
+                        {
+                            return Ok(());
+                        }
+                        let now = Instant::now();
+                        if deadline.is_some_and(|end| now >= end) {
+                            break json!({"type":"timeout","store_id":store_id});
+                        }
+                        let packet = store.wake_packet(&req.actor, &options, &emitted, now_ms())?;
+                        if !packet["items"].as_array().unwrap().is_empty() {
+                            // Fixed window from first pending attention, never sliding under traffic.
+                            let end = *batch_deadline
+                                .get_or_insert(now + Duration::from_millis(options.settle_ms));
+                            let urgent =
+                                packet["items"][0]["card"]["priority"].as_i64().unwrap_or(3) <= 1;
+                            if now >= end || urgent {
+                                store.listener_refresh(&req.actor, &connection_id, now_ms())?;
+                                break packet;
+                            }
+                        } else {
+                            batch_deadline = None;
+                        }
+                        if now >= heartbeat {
+                            store.listener_refresh(&req.actor, &connection_id, now_ms())?;
+                            break json!({"type":"heartbeat","store_id":store_id});
+                        }
+                        let mut wake = heartbeat;
+                        if let Some(end) = batch_deadline {
+                            wake = wake.min(end);
+                        }
+                        if let Some(end) = deadline {
+                            wake = wake.min(end);
+                        }
+                        // Commit and selection changes use this same lock: no startup/check-wait gap.
+                        let (next, _) = shared
+                            .changed
+                            .wait_timeout(store, wake.saturating_duration_since(Instant::now()))
+                            .map_err(|_| poisoned())?;
+                        store = next;
+                    }
+                };
+                // No database lock held during a potentially slow socket write.
+                write_frame(stream, &success(frame.clone()))?;
+                match frame["type"].as_str() {
+                    Some("attention") => {
+                        for item in frame["items"].as_array().unwrap() {
+                            emitted.insert(
+                                item["receipt"]["id"].as_i64().unwrap(),
+                                item["receipt"]["through_seq"].as_i64().unwrap(),
+                            );
+                        }
+                        if once {
+                            return Ok(());
+                        }
+                        batch_deadline = None;
+                    }
+                    Some("timeout") => return Ok(()),
+                    _ => {}
+                }
+                heartbeat = Instant::now() + Duration::from_secs(15);
+            }
+        })();
+        // Keep the write half available for the caller's terminal error frame.
+        let _ = stream.shutdown(Shutdown::Read);
+        result
+    });
+    let cleanup = shared
+        .store
+        .lock()
+        .map_err(|_| poisoned())?
+        .listener_end(&req.actor, &connection_id);
+    result.and(cleanup)
+}
+fn watch(stream: &mut UnixStream, shared: &Shared, req: &Request) -> Result<()> {
+    check_fields(&req.args, &["after", "topic"])?;
+    let topic = req
+        .args
+        .get("topic")
+        .map(|_| string(&req.args, "topic").map(str::to_owned))
+        .transpose()?;
+    let (mut cursor, store_id) = {
+        let store = shared.store.lock().map_err(|_| poisoned())?;
+        let head = store.highwater()?;
+        let cursor = bounded(&req.args, "after", head, 0, i64::MAX)?;
+        if cursor > head {
+            return Err(Error::new(
+                "cursor_ahead",
+                "cursor exceeds this store; rejoin",
+            ));
+        }
+        (cursor, store.identity()?)
+    };
+    write_frame(
+        stream,
+        &success(json!({"type":"ready","cursor":cursor,"store_id":store_id})),
+    )?;
+    loop {
+        let batch = {
+            let mut store = shared.store.lock().map_err(|_| poisoned())?;
+            loop {
+                if shared.stop.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                let batch = store.events(cursor, 64)?;
+                if !batch.is_empty() {
+                    break batch;
+                }
+                let (next, timed) = shared
+                    .changed
+                    .wait_timeout(store, Duration::from_secs(15))
+                    .map_err(|_| poisoned())?;
+                store = next;
+                if timed.timed_out() {
+                    break Vec::new();
+                }
+            }
+        };
+        for event in batch {
+            cursor = event["seq"]
+                .as_i64()
+                .ok_or_else(|| Error::new("internal", "missing event seq"))?;
+            let t = event["payload"]["card"]["topic"].as_str().unwrap_or("");
+            if topic
+                .as_ref()
+                .is_none_or(|wanted| wanted == "*" || wanted == t || t == "*")
+            {
+                write_frame(
+                    stream,
+                    &success(
+                        json!({"type":"event","event":event,"cursor":cursor,"store_id":store_id}),
+                    ),
+                )?;
+            }
+        }
+        write_frame(
+            stream,
+            &success(json!({"type":"checkpoint","cursor":cursor,"store_id":store_id})),
+        )?;
+    }
+}

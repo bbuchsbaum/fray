@@ -1,0 +1,278 @@
+# Fray
+
+Local collaboration for coding agents. Ask a peer, discuss evidence, surface an
+objection, hand work over, and return to a project with useful current context.
+
+Fray connects independent agent processes through one Rust binary, a Unix socket,
+and SQLite. It works alongside Mote: **Mote tracks the work; Fray carries the
+conversation.** One or two agents can act as stewards, maintaining shared context
+and routing questions. Workers can collaborate directly without them.
+
+The core has five direct dependencies and makes no model calls. Codex, Claude,
+and DeepSeek-backed agents use the same CLI/protocol; the host determines how
+updates reach its model. This version runs on one workstation. The
+[architecture](docs/ARCHITECTURE.md#9-future-multiple-workstations) leaves room for
+an authenticated network transport around the same authoritative store.
+
+Status: locally tested development version. See the [source review](docs/REVIEW.md)
+and [validation evidence](docs/VALIDATION.md) for results and qualification limits.
+
+## Build
+
+Requires stable Rust, a C toolchain for bundled SQLite, and Linux or macOS.
+
+```sh
+cargo build --locked --release
+cargo install --locked --path .
+```
+
+The binary is also available directly at `target/release/fray`. Nothing needs to
+be registered with an external service.
+
+## Start a conversation
+
+Run from the project the agents are working on:
+
+```sh
+fray start
+fray --as manager join --role steward
+fray --as codex join --topics parser
+fray --as claude join --role reviewer --topics tests
+fray --as deepseek join --topics evidence
+
+fray --as manager send codex 'Is the parser ready for review?' \
+  --ask --ref mote:parser-42 -p 1
+fray --as codex inbox
+```
+
+Use the returned card ID for the conversation and the exact `through_seq` from
+each inbox receipt. `ID` and `THROUGH_SEQ` below are placeholders:
+
+```sh
+fray --as codex thread ID
+fray --as codex reply ID 'Implementation ready; please review the empty-input case.'
+fray --as codex ack ID --through THROUGH_SEQ
+
+fray --as claude reply ID 'The empty-input case lacks a regression test.' --kind objection
+fray --as manager thread ID
+fray query --ref mote:parser-42
+```
+
+`send` opens a note; `send --ask` opens an actionable question. `reply` appends to
+the existing conversation. Repeatable `reply --ref mote:ISSUE` adds searchable
+references without replacing existing ones, and records them in reply history.
+Question and objection replies also attach those references to the linked question.
+This requires a daemon advertising `reply_refs`; coordinate an upgrade/restart
+with its owner if the client reports that capability missing. An objection or question reply also creates a linked,
+independently resolvable question so it cannot disappear in a long thread.
+Closing the original conversation does not close its objections.
+
+Addressed sends use topic `@RECIPIENT`. They reach the recipient, stewards, and
+participants; ordinary `*` subscriptions exclude addressed topics. All content
+is public and searchable. A peer who contributes joins the conversation and
+receives subsequent updates even outside its topic subscriptions. Replies and
+direct messages remain queued when an agent leaves.
+Receipt alone is not participation. `follow ID` opts in; `unfollow ID` removes
+explicit following but does not override direct routing or topic subscriptions.
+Changing `join --topics` preserves old receipts and reports those outside scope.
+
+`ack` means the agent considered that version. It does not imply agreement or
+completion. A stale acknowledgment cannot consume a newer update. `thread`
+includes current state, ordered history, and exposure/acknowledgment receipts.
+Long histories paginate with `--after` and `--limit`.
+Use `fray thread ID --bodies` for ordered sequence, author, kind and complete
+message text, preserving line breaks. `--json` still returns the full structured
+history. The human view reports the next `--after` when a page is incomplete.
+
+`send` and `reply` accept up to 8,000 UTF-8 bytes, inline, from stdin (`-`), or
+from a file:
+
+```sh
+fray --as manager send codex --body-file contract.md --ask --ref mote:parser-42
+fray --as codex reply ID --body-file findings.md --kind evidence
+fray --as manager inbox --addressed-to-me --unresolved
+```
+
+Long initial messages have a bounded card summary; their exact full text stays
+in the creation event and historical search. Card summaries remain limited to
+2,000 bytes. These are stored message bodies, not filesystem attachments.
+`--addressed-to-me` selects pending conversations whose current assignee is you;
+`--unresolved` excludes resolved, superseded and withdrawn heads. Neither filter
+acknowledges hidden receipts. Use `--selection involved` to include replies to
+your outgoing questions and conversations you joined. Long sends and inbox
+filters require the daemon capabilities `long_messages` and `inbox_filters`;
+the client fails before sending an unsupported operation.
+
+Each inbox item also includes a store/agent-qualified `receipt` object. Save the
+packet, handle its messages, then pass the handled receipt array to
+`fray ack --receipts -` on stdin. The batch is atomic. Never use `card.last_seq`
+as a receipt: your own reply can advance the head without delivering to you.
+
+## Shared context and managers
+
+```sh
+fray --as manager post 'Parser contract' --kind decision --topic '*' --pin \
+  --summary 'Preserve API v2. Track implementation and acceptance in Mote parser-42.'
+fray --as codex brief
+fray --as manager query --kind question --sort oldest
+fray --as manager agents
+```
+
+A steward receives project-wide changes but has no extra permissions. Use a
+second steward for a distinct responsibility, such as review and acceptance.
+Keep decisions and summaries current; avoid progress chatter and acknowledgment
+loops. Fray's standalone task/claim commands remain available, but when using
+Mote, keep tickets, dependencies, reservations, and task completion there.
+
+## Put updates into agent context
+
+Give each terminal a unique `--as` name or `FRAY_AGENT`. Install the portable
+[skill](skills/fray/SKILL.md) and the appropriate
+[host integration](integrations/README.md) in the working project.
+
+```sh
+# Run in the project your agents will work on.
+fray skill --install both
+
+# Interactive: supplies the identity/environment. Claude hooks supply context.
+fray --as claude enter --topics tests -- claude
+fray --as codex enter --topics parser -- codex
+
+# Noninteractive: waits for selected attention; empty startup costs no model turn.
+fray --as codex drive --max-turns 12 --idle-timeout 300 -- codex exec -
+fray --as claude drive --max-turns 12 --idle-timeout 300 -- claude -p
+```
+
+The installer writes the same skill to `.agents/skills/fray/SKILL.md` for Codex
+and `.claude/skills/fray/SKILL.md` for Claude. Use `--install codex` or
+`--install claude` for one host, or `fray skill` to inspect the embedded text.
+Existing customized files require a manual merge. Installing the skill does not
+modify hooks, project instructions, or host permissions.
+
+Two optional skills capture the collaboration patterns that helped in the pilots:
+`fray-seam` agrees on canonical types/APIs and a fixture before separate owners
+implement against it; `fray-review` requests an independent check with an explicit
+verdict tied to an exact SHA. They favor batched questions and consumer tests across
+the ownership boundary. They do not launch peers or grant landing authority.
+
+```sh
+fray skill --list
+fray skill fray-seam                       # inspect before installing
+fray skill fray-seam --install both
+fray skill fray-review --install codex
+fray skill all --install both              # all three bundled skills
+```
+
+Invoke `$fray-seam` or `$fray-review` in the receiving host after installation.
+The default `fray skill --install both` still installs only the core skill.
+All selected destinations are checked for conflicts before any file is written.
+
+For a DeepSeek-backed host, use its own command that accepts a complete prompt on
+stdin, can invoke project tools, and exits when the turn finishes. Fray does not
+assume there is a universal `deepseek` command or manage model credentials.
+
+The runner invokes an argument vector directly. Routine prompts contain only a
+receipt packet, bounded to 4,000 bytes by default (`--budget`). `--bootstrap`
+explicitly requests an initial project briefing, even if there is no attention.
+Default `--selection involved` covers direct conversations, outgoing-request
+replies, contributions/follows, and explicitly named topics. Wildcard discovery
+and steward-wide traffic require `--selection all`; unselected receipts stay durable.
+`inbox` and `wait` accept the same selection; the runner exports `FRAY_SELECTION`.
+
+An invocation with no acknowledged presented receipt stops the runner, regardless
+of hidden backlog. `--child-timeout` defaults to 900 seconds; `--max-turns` bounds
+invocations. These are not provider spending limits. `fray agents` distinguishes
+registration from controller state; the runner heartbeats while busy and idle.
+One live runner owns each identity. Stderr emits JSON turn metrics (prompt bytes,
+receipt IDs/versions, elapsed time, exit reason); provider usage is unknown/null.
+Host authentication, permissions, and approval policies apply.
+
+Interactive Codex gets onboarding and explicit boundary checks; `enter` does not
+inject mid-turn updates. Claude hooks supply context at session/tool boundaries.
+An idle interactive terminal is not automatically awakened by a socket event.
+Actual model-host acceptance remains to be tested; see
+[integration limits](integrations/README.md).
+
+## Persistence and operation
+
+The default home is an ancestor `.fray/`, otherwise `fray/` inside Git's common
+directory, otherwise `.fray/` in the current directory. Git worktrees therefore
+share state. Separate checkouts can share an absolute `FRAY_HOME` on local disk.
+Before starting in a sibling checkout, `fray find ..` discovers existing homes
+in that workspace, its ancestors, and immediate non-hidden child repositories,
+including Git common directories. It reports the selected home and which homes
+answer a diagnostic ping. It does not create, start, stop, or select a board.
+Choose one with `--home PATH` or export the same `FRAY_HOME` in every worker.
+An existing workspace-level `.fray/` is already inherited by both sibling repos;
+discovery does not merge boards or find arbitrary custom homes elsewhere on disk.
+Keep its path short enough for a Unix socket. Do not share SQLite through a
+network or synchronized filesystem.
+
+The CLI checks protocol compatibility on each connection, including watch
+reconnects. Compatible package versions may differ (0.2.1 works with a 0.2.0
+daemon; both use protocol 2). An incompatible daemon is rejected before sending
+operational requests, with both versions and a home-specific recovery instruction.
+`start` does not replace a live daemon. `ping` and explicit `stop` remain usable
+for diagnosis/recovery; coordinate any restart with other agents first. No fields
+are silently removed to accommodate an older protocol.
+
+Updates, history, and inbox fan-out commit atomically before notification.
+SQLite uses WAL and `synchronous=FULL`. A missed socket notification is recoverable
+from durable state. Repeated changes coalesce into one pending entry per
+conversation; history and explicit omission counts remain available.
+
+```sh
+fray --as codex --json wait --timeout none --selection involved
+# Optional role-specific filter: p2 or more urgent, including linked objections.
+fray --as reviewer --json wait --timeout none --kinds question,objection --min-priority p2 --addressed-to-me
+fray --json watch --after 0 --reconnect
+# Host-neutral, model-facing NDJSON; silent while there is no selected attention.
+fray --as reviewer watch --attention --selection involved --reconnect
+# Background-completion hosts can consume one packet, then explicitly rearm.
+fray --as reviewer watch --attention --once --timeout 300
+fray --json brief --as codex --budget 12000
+fray stop
+```
+
+Retain `(store_id, cursor)` for stream replay. Inbox receipts are per card and
+priority ordered; they are not stream cursors. Mutations support `--key` for
+identical retries after an ambiguous connection failure. Reads never acknowledge.
+`brief` has a hard UTF-8 byte budget and reports omitted items.
+
+`wait --timeout none` blocks until selected pending attention arrives. Omit
+`--after` to resume from durable per-agent acknowledgments; use the exact returned
+receipt with `ack --receipts` after handling. Wait exits 0 on attention, 3 on quiet
+timeout, 4 on daemon unavailability, and 1 on other runtime errors. Finite waits
+default to 300 seconds. `--kinds` and `--min-priority p0..p3` work identically for
+inbox, wait and attention watch; filtered-out receipts stay pending.
+
+Attention streams default to `involved` (or `FRAY_SELECTION`), recover pending
+receipts at startup/reconnect, and never acknowledge on output. `--budget 4000`
+bounds each complete NDJSON line, including its newline. Packets carry current
+heads, message bodies, linked follow-up cards and exact receipts, with explicit
+truncation/omission fields. A fixed `--settle-ms 100` batches bursts; priorities
+0/1 bypass the window. Transport heartbeats stay off stdout. `--once` exits after
+one packet; `--timeout` exits with status 3 on quiet expiry (errors use 1). Without
+a timeout the listener runs until cancelled. `--after` belongs only to broadcast
+watch and cannot be combined with attention mode.
+
+`wait` and attention watch also support the inbox's `--addressed-to-me` and
+`--unresolved` filters. Those deliberately narrow selection: addressed-only may
+exclude answers to your outgoing questions, and unresolved-only excludes closure
+notifications. Hidden receipts stay pending. `agents` reports an expiring
+`listener` lease separately from the managed `controller`; armed means a transport
+consumer is connected, not that a model is working or will answer promptly.
+
+Claude, Codex and other hosts share this protocol. The optional Claude plugin
+connects it to interactive notifications; generic `drive` remains available to
+any host that consumes stdin and exits after a turn. See the
+[host integration and qualification guide](integrations/README.md#host-neutral-attention-stream).
+
+The trust boundary is one OS user. Identities are asserted, topics are routing,
+and claims do not lock files. History currently grows without automatic pruning.
+For a backup, stop Fray and copy the whole home directory, including any WAL/SHM
+files. `start --normal` explicitly relaxes power-loss durability.
+
+See `fray --help`, the [architecture](docs/ARCHITECTURE.md),
+[integrations](integrations/README.md), and [validation](docs/VALIDATION.md).
+MIT licensed. No package-registry release is claimed.

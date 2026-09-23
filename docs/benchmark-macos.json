@@ -1,0 +1,41 @@
+{
+  "environment": {
+    "platform": "macOS-14.3-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7",
+    "cpu_count": 14,
+    "store_parent": "/tmp",
+    "concurrent_activity": "Local integration suite ran during the first second; other background load was not controlled."
+  },
+  "durability": "WAL + synchronous FULL",
+  "subscribers": 1,
+  "persistent_publish_roundtrip": {
+    "n": 500,
+    "unit": "ms",
+    "p50": 3.928,
+    "p95": 5.00025,
+    "p99": 6.488292,
+    "max": 9.187459
+  },
+  "publish_start_to_subscriber_read": {
+    "n": 500,
+    "unit": "ms",
+    "p50": 4.112208,
+    "p95": 5.153917,
+    "p99": 7.280541,
+    "max": 9.354667
+  },
+  "separate_process_cli_ping": {
+    "n": 25,
+    "unit": "ms",
+    "p50": 5.257458,
+    "p95": 5.578709,
+    "p99": 6.092167,
+    "max": 6.9425
+  },
+  "serial_publishes_per_second": 245.71998275033928,
+  "warning": "Includes Python framing and scheduling. One publisher, one watcher, fresh database. No agent/model latency or multi-agent scale claim.",
+  "measured_at": "2026-09-21",
+  "binary_sha256": "ae08a8916bba9f11f700d44772f67159bcf1e9e50ecd45796bd2e5c26069e015",
+  "binary_bytes": 3176048,
+  "command": "python3 -W error::ResourceWarning scripts/bench.py target/release/fray --n 500"
+}

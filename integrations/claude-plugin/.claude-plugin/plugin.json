@@ -1,0 +1,17 @@
+{
+  "name": "fray-attention",
+  "version": "0.1.0",
+  "description": "Selected Fray attention for an explicitly joined interactive session.",
+  "experimental": {
+    "monitors": [
+      {
+        "name": "fray-attention",
+        "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/attention.py\" monitor",
+        "description": "Fray conversation receipts requiring attention"
+      }
+    ]
+  },
+  "author": {
+    "name": "Fray contributors"
+  }
+}

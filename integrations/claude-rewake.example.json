@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /ABSOLUTE/PATH/TO/fray/integrations/claude-plugin/scripts/attention.py rewake",
+            "asyncRewake": true,
+            "timeout": 3600
+          }
+        ]
+      }
+    ]
+  }
+}
