@@ -2000,21 +2000,30 @@ fn inbox(
         let mut full = false;
         if addressed {
             // A long send keeps only a bounded head on the card; the whole
-            // message lives in its creation event. Use it only while the card
-            // still shows that original head: after a patch, the current
-            // summary is the truth, never the superseded original.
-            let original: Option<(Option<String>, Option<String>)> = conn
+            // message lives in its creation event, or, for a linked
+            // question/objection card, in the annotation that raised it. Use
+            // it only while the card still shows that original head: after a
+            // patch, the current summary is the truth, never the superseded
+            // original.
+            let original: Option<(Option<String>, Option<String>, bool)> = conn
                 .query_row(
-                    "SELECT json_extract(payload,'$.detail.body'),json_extract(payload,'$.card.summary') FROM events WHERE card_id=? AND op='post' ORDER BY seq LIMIT 1",
+                    "SELECT coalesce(json_extract(e.payload,'$.detail.body'),(SELECT json_extract(a.payload,'$.detail.body') FROM events a WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate')),json_extract(e.payload,'$.card.summary'),json_extract(e.payload,'$.detail.annotation_seq') IS NOT NULL FROM events e WHERE e.card_id=? AND e.op='post' ORDER BY e.seq LIMIT 1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
+            // The original is the full truth exactly when the card still shows
+            // its creation head and that head is not the original itself
+            // (it was clipped, or had a pointer line added). No length test.
             let text = match original {
-                Some((Some(body), Some(head)))
-                    if head == card.summary && body.len() > card.summary.len() =>
-                {
-                    body
+                Some((Some(body), Some(head), linked)) if head == card.summary && body != head => {
+                    match head.lines().last().filter(|_| linked) {
+                        // Keep a linked card's pointer and "resolve" instruction.
+                        Some(pointer) if pointer.starts_with("Full context:") => {
+                            format!("{body}\n{pointer}")
+                        }
+                        _ => body,
+                    }
                 }
                 _ => card.summary.clone(),
             };
@@ -2024,7 +2033,7 @@ fn inbox(
                 compact["summary"] = json!(text);
                 compact["summary_truncated"] = json!(false);
                 full = true;
-            } else if text.len() > card.summary.len() {
+            } else if text != card.summary {
                 // The preview is of a head that itself omits the full message.
                 compact["summary_truncated"] = json!(true);
             }
