@@ -966,9 +966,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     actor,
                     "post",
                     id,
-                    // The whole objection travels with its card, so addressed readers
-                    // get full text instead of the 400-character head.
-                    json!({"parent_card":c.id,"annotation_seq":result["event_seq"],"body":body}),
+                    json!({"parent_card":c.id,"annotation_seq":result["event_seq"]}),
                     now,
                     true,
                 )?;
@@ -2002,12 +2000,14 @@ fn inbox(
         let mut full = false;
         if addressed {
             // A long send keeps only a bounded head on the card; the whole
-            // message lives in its creation event. Use it only while the card
-            // still shows that original head: after a patch, the current
-            // summary is the truth, never the superseded original.
+            // message lives in its creation event, or, for a linked
+            // question/objection card, in the annotation that raised it. Use
+            // it only while the card still shows that original head: after a
+            // patch, the current summary is the truth, never the superseded
+            // original.
             let original: Option<(Option<String>, Option<String>)> = conn
                 .query_row(
-                    "SELECT json_extract(payload,'$.detail.body'),json_extract(payload,'$.card.summary') FROM events WHERE card_id=? AND op='post' ORDER BY seq LIMIT 1",
+                    "SELECT coalesce(json_extract(e.payload,'$.detail.body'),(SELECT json_extract(a.payload,'$.detail.body') FROM events a WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate')),json_extract(e.payload,'$.card.summary') FROM events e WHERE e.card_id=? AND e.op='post' ORDER BY e.seq LIMIT 1",
                     [id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
