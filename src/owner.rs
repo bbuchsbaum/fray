@@ -1,60 +1,82 @@
 //! The owner's review screen. The decision binds to the current head of the
 //! request (its revision is sent as `expect`), so the request is printed
-//! LAST, directly above the prompt, between unquoted banners that only this
-//! renderer writes. Every agent-written line, in the history and in the
-//! request itself, is quoted with a margin; history bodies are folded, so no
-//! agent text can scroll the request away or pass for a banner.
+//! LAST, directly above the prompt, between banners that only this renderer
+//! writes. Every row the renderer emits obeys one rule: agent-derived text
+//! appears only after the quote margin, in printable ASCII, and every row
+//! fits 80 columns. Rows are built only through `quote_rows`, so no agent
+//! text can soft-wrap onto a row of its own, scroll the request away, or pass
+//! for a banner.
 use serde_json::Value;
 
 /// Newest history events shown; older ones are counted, not printed.
 pub const HISTORY_EVENTS: usize = 20;
-/// Lines shown per history body before folding.
-const BODY_LINES: usize = 12;
-/// Characters per screen row of agent text. The margin plus this stays under
-/// 80 columns, and with ASCII-only output one character is one column, so no
-/// agent text can soft-wrap onto a row of its own.
-const LINE_CHARS: usize = 72;
+/// Rows shown per history body before folding.
+const BODY_ROWS: usize = 12;
+/// Columns of agent text per row; with the 6-column margin, 78 in total.
+const WIDTH: usize = 72;
 const QUOTE: &str = "    | ";
-/// Request text taller than this gets a scroll warning in the end banner.
-const TALL: usize = 30;
+/// Request blocks taller than this say so in the end banner (a 24-row
+/// terminal minus the banners and the prompt).
+const TALL: usize = 18;
+/// Actor names are shown clipped so a header row stays within 80 columns.
+const ACTOR: usize = 40;
 
-/// Terminal-safe text by allowlist: printable ASCII passes; every other
-/// character (invisible tags and variation selectors, bidi controls, wide or
-/// combining characters, all controls) is shown as a visible `\u{...}`
-/// escape, so nothing can be hidden, reordered or misaligned on screen.
+/// Terminal-safe tokens by allowlist: each printable ASCII character is one
+/// token of one column; every other character, and the backslash itself, is
+/// one visible `\u{XXXX}` token. Escaping the backslash makes the escape text
+/// unambiguous: an agent's literal `\u{00E9}` renders differently from é.
+fn tokens(s: &str) -> Vec<String> {
+    s.chars()
+        .map(|c| match c {
+            '\\' => "\\u{005C}".to_owned(),
+            ' '..='~' => c.to_string(),
+            '\t' => " ".to_owned(),
+            _ => format!("\\u{{{:04X}}}", c as u32),
+        })
+        .collect()
+}
+
+/// Terminal-safe text (see `tokens`), for tests and other callers.
 pub fn clean(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        match c {
-            ' '..='~' => out.push(c),
-            '\t' => out.push(' '),
-            _ => out.push_str(&format!("\\u{{{:04X}}}", c as u32)),
+    tokens(s).concat()
+}
+
+/// Wrap one logical line into rows of at most WIDTH columns without ever
+/// splitting an escape.
+fn wrap(s: &str) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    for token in tokens(s) {
+        if rows.last().is_some_and(|r| r.len() + token.len() > WIDTH) {
+            rows.push(String::new());
         }
+        rows.last_mut().unwrap().push_str(&token);
+    }
+    rows
+}
+
+/// Quote text: every logical line wrapped, every row behind the margin.
+/// Blank runs collapse to one. Returns the rows (not yet joined).
+fn quote_rows(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut blank = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !blank {
+                out.push(QUOTE.trim_end().to_owned());
+            }
+            blank = true;
+            continue;
+        }
+        blank = false;
+        out.extend(wrap(line).into_iter().map(|row| format!("{QUOTE}{row}")));
     }
     out
 }
 
-fn line(s: &str) -> String {
-    let cleaned = clean(s);
-    if cleaned.len() > LINE_CHARS {
-        format!("{}...", &cleaned[..LINE_CHARS - 3])
-    } else {
-        cleaned
-    }
-}
-
-fn quoted(out: &mut String, text: &str) {
-    let lines: Vec<&str> = text.lines().collect();
-    for l in lines.iter().take(BODY_LINES) {
-        out.push_str(QUOTE);
-        out.push_str(&line(l));
+fn push_rows(out: &mut String, rows: &[String]) {
+    for row in rows {
+        out.push_str(row);
         out.push('\n');
-    }
-    if lines.len() > BODY_LINES {
-        out.push_str(&format!(
-            "{QUOTE}... {} more lines (fray thread ID --bodies)\n",
-            lines.len() - BODY_LINES
-        ));
     }
 }
 
@@ -62,100 +84,87 @@ fn quoted(out: &mut String, text: &str) {
 /// order (all pages); `truncated` says whether history is incomplete.
 pub fn render_request(thread: &Value, truncated: bool) -> String {
     let head = &thread["card"];
+    let id = head["id"].as_i64().unwrap_or(0);
+    let rev = head["rev"].as_i64().unwrap_or(0);
     let events: Vec<&Value> = thread["history"].as_array().into_iter().flatten().collect();
     let skip = events.len().saturating_sub(HISTORY_EVENTS);
     let mut out = String::from("\n  HISTORY (agent-written text is quoted with |):\n");
     if skip > 0 {
         out.push_str(&format!(
-            "  ({skip} earlier event(s) not shown; read them with fray thread {} --bodies)\n",
-            head["id"]
+            "  ({skip} earlier event(s) not shown: fray thread {id} --bodies)\n"
         ));
     }
     if truncated {
-        out.push_str(
-            "  (history is longer than review reads; the NEWEST events may be missing here)\n",
-        );
+        out.push_str("  (history longer than review reads: NEWEST events may be missing)\n");
     }
     for event in &events[skip..] {
+        // Header: seq (number), actor ([A-Za-z0-9-_.:/] names, clipped),
+        // kind/op (fixed vocabularies). No free text, within 80 columns.
+        let actor: String = clean(event["actor"].as_str().unwrap_or(""))
+            .chars()
+            .take(ACTOR)
+            .collect();
+        let kind = event["kind"]
+            .as_str()
+            .or(event["op"].as_str())
+            .unwrap_or("");
         out.push_str(&format!(
             "  @{} {} {}\n",
             event["seq"],
-            line(event["actor"].as_str().unwrap_or("")),
-            line(
-                event["kind"]
-                    .as_str()
-                    .or(event["op"].as_str())
-                    .unwrap_or("")
-            )
+            actor,
+            clean(kind).chars().take(16).collect::<String>()
         ));
         if let Some(body) = event["body"].as_str() {
-            quoted(&mut out, body);
-        }
-        if let Some(changed) = event["changed"].as_object().filter(|c| !c.is_empty()) {
-            for (field, value) in changed {
+            let rows = quote_rows(body);
+            push_rows(&mut out, &rows[..rows.len().min(BODY_ROWS)]);
+            if rows.len() > BODY_ROWS {
                 out.push_str(&format!(
-                    "{QUOTE}changed {field} -> {}\n",
-                    line(&value.to_string())
+                    "{QUOTE}... {} more rows: fray thread {id} --bodies\n",
+                    rows.len() - BODY_ROWS
                 ));
             }
         }
+        if let Some(changed) = event["changed"].as_object().filter(|c| !c.is_empty()) {
+            for (field, value) in changed {
+                // The whole line goes through the quoting path; the head
+                // block below shows current values in full anyway.
+                let rows = quote_rows(&format!("changed {field} -> {value}"));
+                push_rows(&mut out, &rows[..rows.len().min(2)]);
+                if rows.len() > 2 {
+                    out.push_str(&format!("{QUOTE}... (see the request below)\n"));
+                }
+            }
+        }
     }
-    // The decided text: quoted like everything agent-written, wrapped (never
-    // truncated: this is what is being approved), blank runs collapsed.
+    // The decided text: title and text are both what is being approved, so
+    // they are wrapped, never cut.
     let text = thread["full_text"]
         .as_str()
         .or(head["summary"].as_str())
         .unwrap_or("");
-
+    let status = clean(head["status"].as_str().unwrap_or(""));
+    let author: String = clean(head["author"].as_str().unwrap_or(""))
+        .chars()
+        .take(ACTOR)
+        .collect();
     out.push_str(&format!(
-        "\n==== DECIDING ON REQUEST #{} (revision {}, {}, from {}) ====\n",
-        head["id"],
-        head["rev"],
-        line(head["status"].as_str().unwrap_or("")),
-        line(head["author"].as_str().unwrap_or(""))
+        "\n==== DECIDING ON REQUEST #{id} (revision {rev}, {status}) ====\nFROM: {author}\nTITLE:\n"
     ));
-    // Title and text are both what is being approved: wrapped, never cut.
-    out.push_str("TITLE:\n");
-    for chunk in clean(head["title"].as_str().unwrap_or(""))
-        .as_bytes()
-        .chunks(LINE_CHARS)
-    {
-        out.push_str(QUOTE);
-        out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-        out.push('\n');
-    }
+    let title = quote_rows(head["title"].as_str().unwrap_or(""));
+    let body = quote_rows(text);
+    push_rows(&mut out, &title);
     out.push_str("TEXT:\n");
-    let mut rows = 0;
-    let mut blank = false;
-    for l in text.lines() {
-        let cleaned = clean(l);
-        if cleaned.trim().is_empty() {
-            if !blank {
-                out.push_str(QUOTE.trim_end());
-                out.push('\n');
-                rows += 1;
-            }
-            blank = true;
-            continue;
-        }
-        blank = false;
-        for chunk in cleaned.as_bytes().chunks(LINE_CHARS) {
-            out.push_str(QUOTE);
-            out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-            out.push('\n');
-            rows += 1;
-        }
-    }
-    // The banner never repeats agent text; it says how tall the text is so
-    // a request that scrolled its own start away is noticed.
+    push_rows(&mut out, &body);
+    // The banner never repeats agent text; it says how tall the request is so
+    // one that scrolled its own start away is noticed.
+    let rows = title.len() + body.len();
     let scroll = if rows > TALL {
-        format!(", {rows} lines: scroll up to read it all")
+        format!(", {rows} rows: scroll up to read it all")
     } else {
         String::new()
     };
     out.push_str(&format!(
-        "==== end of request #{} revision {}{scroll} ====\n",
-        head["id"], head["rev"]
+        "==== end of request #{id} revision {rev}{scroll} ====\n"
     ));
     out
 }

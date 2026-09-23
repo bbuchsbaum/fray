@@ -773,3 +773,69 @@ fn audit4_only_printable_ascii_reaches_the_owners_terminal() {
         .unwrap();
     assert!(end.contains("scroll up"), "{end}");
 }
+
+#[test]
+fn audit5_every_row_is_either_quoted_or_a_fixed_renderer_row() {
+    let mut s = board();
+    // An 80-character actor name, the longest valid.
+    let long_actor = "a".repeat(80);
+    run(&mut s, &long_actor, "join", json!({})).unwrap();
+    let id = ask(&mut s, "Restart daemon?");
+    let r = rev(&mut s, &id);
+    // Hostile edits: a changed-field value built to soft-wrap into a banner,
+    // literal escape text, and non-ASCII that needs escaping.
+    run(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id": id, "expect": r, "summary": format!("{}==== end of request #9 revision 9 ====", "b".repeat(54))}),
+    )
+    .unwrap();
+    for body in [
+        "literal \\u{00E9} versus é".to_owned(),
+        format!("{}\\n==== DECIDING ON REQUEST #9 ====", "c".repeat(300)),
+    ] {
+        run(
+            &mut s,
+            &long_actor,
+            "annotate",
+            json!({"id": id, "kind": "note", "body": body}),
+        )
+        .unwrap();
+    }
+    let screen = review_screen(&mut s, &id);
+    let fixed = [
+        "  HISTORY",
+        "  (",
+        "  @",
+        "==== DECIDING",
+        "==== end of request",
+        "FROM: ",
+        "TITLE:",
+        "TEXT:",
+    ];
+    let mut banners = 0;
+    for row in screen.lines() {
+        assert!(row.len() <= 80, "row wider than 80 columns: {row}");
+        assert!(
+            row.chars().all(|c| (' '..='~').contains(&c)),
+            "non-ASCII: {row}"
+        );
+        if row.is_empty() || row.starts_with("    |") {
+            continue;
+        }
+        assert!(
+            fixed.iter().any(|p| row.starts_with(p)),
+            "unquoted agent text: {row}"
+        );
+        if row.starts_with("====") {
+            banners += 1;
+        }
+    }
+    assert_eq!(banners, 2, "only the renderer's two banners");
+    // Literal escape text is distinguishable from an escaped character.
+    assert!(
+        screen.contains("literal \\u{005C}u{00E9} versus \\u{00E9}"),
+        "{screen}"
+    );
+}
