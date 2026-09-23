@@ -167,12 +167,20 @@ pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
 }
 fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     let mut reader = connect(home, timeout.min(5))?;
+    let mut wire_request = req.clone();
+    wire_request.session = None;
     // Ping is diagnostic; shutdown is the deliberate recovery escape hatch.
     // All other requests are checked on the SAME connection, with no cached
     // compatibility decision that could survive a daemon replacement.
     if !matches!(req.op.as_str(), "ping" | "shutdown") {
         let daemon = handshake(&mut reader, home)?;
+        wire_request = session_request(req, &daemon)?;
         let capability = match req.op.as_str() {
+            "join" if req.args.get("takeover").is_some() => Some(("sessions", "join --takeover")),
+            "patch" if req.args.get("over_objection").is_some() => {
+                Some(("objection_gate", "patch --over-objection"))
+            }
+            "mute" | "unmute" => Some(("mute", "thread muting")),
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
             "ack" if req.args.get("batch").is_some() => {
                 Some(("read_batches", "batch acknowledgments"))
@@ -222,7 +230,23 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     } else {
         Some(Duration::from_secs(timeout.max(1)))
     })?;
-    exchange(&mut reader, req)
+    exchange(&mut reader, &wire_request)
+}
+
+fn session_request(req: &Request, daemon: &Value) -> Result<Request> {
+    let mut wire = req.clone();
+    wire.session = if daemon["capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|c| c == "sessions"))
+    {
+        match &req.session {
+            Some(session) => crate::session::resolve(Some(session), None, None)?,
+            None => crate::session::current()?,
+        }
+    } else {
+        None
+    };
+    Ok(wire)
 }
 
 fn require_capability(daemon: &Value, capability: &str, feature: &str) -> Result<()> {
@@ -235,6 +259,9 @@ fn require_capability(daemon: &Value, capability: &str, feature: &str) -> Result
     Ok(())
 }
 fn check_attention_filters(daemon: &Value, args: &Value) -> Result<()> {
+    if args.get("card_ids").is_some() {
+        require_capability(daemon, "card_attention", "card-specific attention")?;
+    }
     if args.get("kinds").is_some() || args.get("min_priority").is_some() {
         require_capability(
             daemon,
@@ -317,7 +344,7 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                 .set_read_timeout(Some(Duration::from_secs(45)))?;
             write_request(
                 reader.get_mut(),
-                &Request::new("watch_attention", actor, wire_args),
+                &session_request(&Request::new("watch_attention", actor, wire_args), &daemon)?,
             )?;
             while let Some(line) = read_frame(&mut reader, RESPONSE_LIMIT)? {
                 let mut data = unpack(serde_json::from_str(&line)?)?;
@@ -487,7 +514,8 @@ pub fn watch(
             }
             let req = Request::new("watch", actor, args);
             let mut reader = connect(home, 5)?;
-            handshake(&mut reader, home)?;
+            let daemon = handshake(&mut reader, home)?;
+            let req = session_request(&req, &daemon)?;
             reader
                 .get_mut()
                 .set_read_timeout(Some(Duration::from_secs(45)))?;

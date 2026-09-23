@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS controllers (
     updated_ms INTEGER NOT NULL,
     reason TEXT
 );
+-- Muting is reversible attention suppression, never an acknowledgment.
+CREATE TABLE IF NOT EXISTS muted_cards (
+    agent TEXT NOT NULL REFERENCES agents(name),
+    card_id INTEGER NOT NULL REFERENCES cards(id),
+    PRIMARY KEY(agent, card_id)
+);
 CREATE TABLE IF NOT EXISTS requests (
     actor TEXT NOT NULL,
     key TEXT NOT NULL,

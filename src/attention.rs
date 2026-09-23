@@ -11,6 +11,7 @@ pub const LISTENER_TTL_MS: i64 = 45_000;
 
 pub struct Options {
     pub selection: String,
+    pub card_ids: Vec<i64>,
     pub addressed_to_me: bool,
     pub unresolved: bool,
     pub kinds: Vec<String>,
@@ -25,6 +26,7 @@ impl Options {
             args,
             &[
                 "selection",
+                "card_ids",
                 "addressed_to_me",
                 "unresolved",
                 "kinds",
@@ -39,6 +41,7 @@ impl Options {
         )?;
         Ok(Self {
             selection: crate::store::selection(args)?.to_owned(),
+            card_ids: crate::store::attention_cards(args)?,
             addressed_to_me: boolean(args, "addressed_to_me", false)?,
             unresolved: boolean(args, "unresolved", false)?,
             kinds: crate::store::attention_kinds(args)?,
@@ -54,6 +57,7 @@ impl Options {
     pub fn filter(&self) -> InboxSelection<'_> {
         InboxSelection {
             mode: &self.selection,
+            card_ids: self.card_ids.clone(),
             addressed_to_me: self.addressed_to_me,
             unresolved: self.unresolved,
             kinds: self.kinds.clone(),
@@ -99,6 +103,9 @@ impl Store {
         });
         if !options.kinds.is_empty() {
             packet["kinds"] = json!(options.kinds);
+        }
+        if !options.card_ids.is_empty() {
+            packet["card_ids"] = json!(options.card_ids);
         }
         if let Some(priority) = options.min_priority {
             packet["min_priority"] = json!(priority);

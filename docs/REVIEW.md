@@ -1,5 +1,29 @@
 # Vision and source review
 
+## Phase 1 client and attention lanes (2026-09-23)
+
+Scope agreed with Claude on Fray #13: session resolution and negotiated sending,
+quiet wait defaults, enabled fan-out and reversible exact-card mute, card-scoped
+attention, and truthful idle-wake warnings/Claude hook delivery. Base is main
+`f737146`, after independent approval of Claude's store/session and objection-gate
+commit `2652f8624a0f1296ecd5f172174585cacd8a99f4`.
+
+Contracts: explicit host identity wins over inferred provider IDs; old daemons
+never receive the new session field. Card filters narrow existing deliveries;
+muting neither acknowledges nor hides linked objection cards. Leave prevents
+new routing, and explicit rejoin catches up known conversations. No connected
+transport is described as a guaranteed model wake. Mote authority is unchanged.
+
+Checks cover separate CLI processes, old/new capability negotiation, child
+session propagation, unrelated traffic during a card wait, retained receipts,
+PostToolUse exposure ordering, hook-after-leave, Stop recursion, and activation
+expiry. An initial IPC regression exposed `not_joined` after leave; the hook now
+returns quietly and does not rejoin. All final checks pass; see VALIDATION.md.
+Landing still requires Claude's approval at the exact candidate SHA. No shared
+daemon restart, global installation, external publication or paid host launch is
+part of this lane.
+
+
 ## Cooperative follow-up (2026-09-23)
 
 Outcome: reliable waits under load, compact reads, immutable receipt batches,

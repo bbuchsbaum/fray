@@ -572,7 +572,7 @@ class Integration(unittest.TestCase):
             self.assertEqual(result['error']['code'], 'invalid')
             self.assertTrue(peer.call('ping')['ok'])
     def test_cli_and_claude_hook_contract(self):
-        self.post()
+        self.post(assignee="bob", priority=1)
         env={**os.environ,'FRAY_HOME':self.home,'FRAY_AGENT':'bob'}
         r=subprocess.run([str(BINARY),'hook'],input=json.dumps({'hook_event_name':'PostToolUse'}),text=True,capture_output=True,env=env,timeout=10)
         self.assertEqual(r.returncode,0,r.stderr)

@@ -123,14 +123,20 @@ renew task leases. Mote remains authoritative where adopted.
 
 All content is public. Addressed topics are excluded from ordinary wildcard
 subscriptions. Authors, assignees and contributors receive conversation replies,
-including while absent. Mere receipt of a broadcast does not follow it.
+while enabled. `leave` stops new routing; existing receipts remain, and an
+explicit rejoin catches up current heads for known conversations. Mere receipt
+of a broadcast does not follow it.
 `fray follow ID` opts in; `fray unfollow ID` removes explicit following, not direct
 routing or current subscriptions. Contributing follows again. Narrowing
 `join --topics` preserves old receipts and reports those outside the new scope.
+`mute ID` suppresses that exact card without ACK; `unmute ID` restores its pending
+head. Linked questions/objections are separate cards and remain visible when the
+parent is muted. `wait --card ID` and `watch --attention --card ID` filter existing
+deliveries; use `follow ID` to establish routing if needed.
 
 At natural boundaries, check `fray inbox` only if the host has not supplied fresh
 attention. Keep the runner's inherited `FRAY_SELECTION`. Default
-`drive --selection involved` includes direct incoming/outgoing conversations,
+`wait` and `drive` default to `--selection involved`: direct incoming/outgoing conversations,
 participation/follows and named topics, not wildcard/steward discovery.
 `--selection all` explicitly opts into the broader inbox. Unselected receipts stay
 durable. Steward routing is broad, but does not override the runner's selection.
@@ -147,18 +153,28 @@ mid-turn updates into Codex or wake an idle interactive terminal.
 
 ## Arm a wake before you go idle
 
-An idle interactive agent hears nothing. If you end a turn while waiting on an
-answer, a review or a lane release, arm something that wakes you first; otherwise
-the reply sits unread until a human prompts you. Pick the host's mechanism:
+If waiting for a peer answer, arm a supported host wake mechanism before ending
+an interactive turn. `join` and `brief` warn about open outgoing requests without
+an armed listener. A socket connection, heartbeat or hook alone is not idle wake.
 
-- Claude Code: run `fray watch --attention --selection involved --reconnect` under
-  the Monitor tool (each NDJSON line wakes you; re-arm when it expires), or run
-  `fray wait --selection involved --timeout none` as a background command, which
-  wakes you when it exits.
-- Codex and other stdin hosts: run under `fray drive`, which owns waiting.
+- Hosts with a native monitor: run `fray watch --attention --notification
+  --selection involved --reconnect` through that monitor. Declare
+  `--activation native-monitor` and its `--activation-expires-ms` only when the
+  host mechanism is actually armed. Rearm when it expires.
+- Hosts that resume on background completion: use the same command with `--once`
+  and `--activation background-completion`; handle the packet, then rearm.
+- Managed stdin agents, including Codex: an authorized `fray drive -- COMMAND`
+  owns waiting. It starts a separate worker; it does not wake another idle chat.
+- Without host wake support, use an explicit `fray wait --timeout none` while
+  active, or report that a new user turn is required. Never promise an idle wake
+  that has no implemented host mechanism.
 
-Arm it once per wait, not per message. Handle the packet, then re-arm. While
-blocked, do only work that survives any outcome of the pending decision.
+Preserve `FRAY_SESSION` when inherited from `enter`/`drive`. Interactive clients
+infer Claude/Codex host IDs; other hosts can supply a stable explicit session.
+Do not use `join --takeover` to evade a live identity collision.
+If a command is rejected, inspect `fray --json ping` capabilities: the running
+daemon may predate the installed CLI/skill. Coordinate an upgrade rather than
+assuming a card watcher supplies equivalent filtering or long-message support.
 
 Fray has no queued mutex for collaborators and does not mirror Mote. Do not infer
 automatic interactive wakeups, exclusive access, ownership, or acceptance from a

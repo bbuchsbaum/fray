@@ -19,6 +19,9 @@ struct Cli {
     home: Option<PathBuf>,
     #[arg(long = "as", global = true, env = "FRAY_AGENT", default_value = "")]
     actor: String,
+    /// Stable host session binding; otherwise inferred from Claude or Codex.
+    #[arg(long, global = true, env = "FRAY_SESSION")]
+    session: Option<String>,
     #[arg(long, global = true)]
     json: bool,
     /// Reuse this key when retrying a mutation after an ambiguous connection failure.
@@ -317,6 +320,14 @@ enum Cmd {
         fence: i64,
     },
     Agents,
+    /// Silence this exact card without acknowledging its unread receipts.
+    Mute {
+        id: i64,
+    },
+    /// Restore attention for a muted card; this does not follow or acknowledge it.
+    Unmute {
+        id: i64,
+    },
     /// Read-only listening diagnosis: daemon capabilities, listener state and
     /// pending attention. Never acknowledges or records a presentation.
     Doctor,
@@ -331,7 +342,7 @@ enum Cmd {
         timeout: WaitTimeout,
         #[arg(long, default_value_t = 12)]
         limit: i64,
-        #[arg(long, env = "FRAY_SELECTION", default_value = "all", value_parser = ["all", "involved"])]
+        #[arg(long, env = "FRAY_SELECTION", default_value = "involved", value_parser = ["all", "involved"])]
         selection: String,
         #[arg(long)]
         addressed_to_me: bool,
@@ -435,6 +446,9 @@ impl WakeArgs {
 
 #[derive(Args)]
 struct AttentionFilters {
+    /// Limit to these exact cards (AND with other filters). Use follow to subscribe.
+    #[arg(long = "card", value_delimiter = ',', value_parser = clap::value_parser!(i64).range(1..))]
+    card_ids: Vec<i64>,
     /// Card kinds or pending annotation kinds, including linked objections.
     #[arg(long, value_delimiter = ',', value_parser = ["goal", "task", "question", "decision", "note", "evidence", "objection", "answer"])]
     kinds: Vec<String>,
@@ -444,9 +458,12 @@ struct AttentionFilters {
 }
 impl AttentionFilters {
     fn is_empty(&self) -> bool {
-        self.kinds.is_empty() && self.min_priority.is_none()
+        self.card_ids.is_empty() && self.kinds.is_empty() && self.min_priority.is_none()
     }
     fn apply(self, args: &mut Value) {
+        if !self.card_ids.is_empty() {
+            args["card_ids"] = json!(self.card_ids);
+        }
         if !self.kinds.is_empty() {
             args["kinds"] = json!(self.kinds);
         }
@@ -530,6 +547,8 @@ fn send(
             | "present"
             | "follow"
             | "unfollow"
+            | "mute"
+            | "unmute"
     );
     req.key = if mutation {
         Some(match key {
@@ -605,6 +624,13 @@ fn main() {
     }
 }
 fn run(cli: Cli) -> Result<Option<Value>> {
+    if !matches!(&cli.command, Cmd::Hook) {
+        fray::session::configure(
+            cli.session.as_deref(),
+            None,
+            matches!(&cli.command, Cmd::Enter { .. } | Cmd::Drive { .. }),
+        )?;
+    }
     let home = client::home(cli.home)?;
     let actor = cli.actor;
     let key = cli.key;
@@ -897,6 +923,8 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Renew { id, fence, ttl } => ("renew", json!({"id":id,"fence":fence,"ttl":ttl})),
         Cmd::Release { id, fence } => ("release", json!({"id":id,"fence":fence})),
         Cmd::Agents => ("agents", json!({})),
+        Cmd::Mute { id } => ("mute", json!({"id":id})),
+        Cmd::Unmute { id } => ("unmute", json!({"id":id})),
         Cmd::Doctor => return Ok(Some(fray::diagnostics::inspect(&home, &actor)?)),
         Cmd::Wait {
             filters,
@@ -954,6 +982,10 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             let status = Process::new(&command[0])
                 .args(&command[1..])
                 .env("FRAY_AGENT", &actor)
+                .env(
+                    "FRAY_SESSION",
+                    fray::session::current()?.unwrap_or_default(),
+                )
                 .env("FRAY_HOME", std::fs::canonicalize(&home)?)
                 .status()?;
             if !status.success() {
@@ -965,7 +997,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Cmd::Hook => {
-            hook(&home, &actor)?;
+            hook(&home, &actor, cli.session.as_deref())?;
             return Ok(None);
         }
         Cmd::Drive { options } => {
@@ -1190,6 +1222,14 @@ fn human(v: &Value, out: &mut String) {
             "FRAY  agent={}  cursor={}  current state\n",
             v["agent"], v["cursor"]
         ));
+        if let Some(warning) = v["idle_readiness"]["warning"].as_str() {
+            out.push_str(&format!(
+                "\nWarning: {}\nArm through your host: {}\n{}\n",
+                clean(warning),
+                clean(v["idle_readiness"]["arm_command"].as_str().unwrap_or("")),
+                clean(v["idle_readiness"]["arm_guidance"].as_str().unwrap_or(""))
+            ));
+        }
         for key in [
             "attention",
             "context",
@@ -1310,7 +1350,7 @@ fn output(v: &Value, as_json: bool) -> Result<()> {
         Ok(())
     }
 }
-fn hook(home: &Path, explicit_actor: &str) -> Result<()> {
+fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Result<()> {
     let input: Value = serde_json::from_str(&input_text("-".into(), server::REQUEST_LIMIT)?)?;
     let event = input["hook_event_name"]
         .as_str()
@@ -1336,6 +1376,7 @@ fn hook(home: &Path, explicit_actor: &str) -> Result<()> {
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
+    fray::session::configure(explicit_session, input["session_id"].as_str(), false)?;
     let actor = if explicit_actor.is_empty() {
         let session = input["session_id"]
             .as_str()
@@ -1348,37 +1389,67 @@ fn hook(home: &Path, explicit_actor: &str) -> Result<()> {
     } else {
         explicit_actor.to_string()
     };
-    client::start(home, false)?;
-    if event == "SessionStart" || send(home, &actor, "heartbeat", json!({}), None, 5).is_err() {
-        send(home, &actor, "join", json!({}), None, 5)?;
-    }
-    let data = if event == "SessionStart" {
-        send(home, &actor, "brief", json!({"budget":6000}), None, 5)?
+    let selection = std::env::var("FRAY_SELECTION").unwrap_or_else(|_| "involved".into());
+    fray::store::selection(&json!({"selection":selection}))?;
+    // Only SessionStart is a join. Mid-turn hooks must never undo an explicit
+    // leave or silently take over another host's identity after a failed write.
+    let brief = if event == "SessionStart" {
+        send(home, &actor, "join", json!({}), None, 5)?
     } else {
-        send(
-            home,
-            &actor,
-            "inbox",
-            json!({"fresh":true,"limit":4}),
-            None,
-            5,
-        )?
+        let brief = match send(home, &actor, "brief", json!({"budget":2000}), None, 5) {
+            Ok(brief) => brief,
+            Err(error) if error.code == "not_joined" => {
+                server::write_frame(&mut io::stdout().lock(), &json!({}))?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let enabled = brief["idle_readiness"]["enabled"]
+            .as_bool()
+            .or_else(|| {
+                brief["agents"]["items"]
+                    .as_array()
+                    .and_then(|items| items.iter().find(|a| a["name"] == actor))
+                    .and_then(|a| a["enabled"].as_bool())
+            })
+            .unwrap_or(false);
+        if !enabled {
+            server::write_frame(&mut io::stdout().lock(), &json!({}))?;
+            return Ok(());
+        }
+        send(home, &actor, "heartbeat", json!({}), None, 5)?;
+        brief
     };
-    let page = if event == "SessionStart" {
-        &data["attention"]
-    } else {
-        &data
-    };
-    let items = page["items"].as_array().cloned().unwrap_or_default();
-    if items.is_empty() && event != "SessionStart" {
+    // Pre-tool exposure used to consume the fresh marker before PostToolUse
+    // could surface it. Reserve presentation for completed tool boundaries.
+    if event == "PreToolUse" {
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
-    if event == "Stop"
-        && !items
-            .iter()
-            .any(|v| v["card"]["priority"].as_i64().unwrap_or(3) <= 1)
-    {
+    let mut args = json!({"selection":selection,"fresh":event != "Stop","limit":4});
+    if event != "SessionStart" {
+        args["addressed_to_me"] = json!(true);
+        args["min_priority"] = json!(1);
+        args["unresolved"] = json!(true);
+    }
+    let page = send(home, &actor, "inbox", args, None, 5)?;
+    let mut data = json!({"agent":actor,"attention":page,"idle_readiness":brief["idle_readiness"]});
+    // Preserve a bounded hook payload even if several long annotations arrive.
+    while serde_json::to_vec(&data)?.len() > 6000 {
+        let items = data["attention"]["items"].as_array_mut().unwrap();
+        if items.is_empty() {
+            break;
+        }
+        items.pop();
+        data["attention"]["more"] = json!(true);
+        data["budget_truncated"] = json!(true);
+    }
+    let items = data["attention"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let warning = data["idle_readiness"]["warning"].is_string();
+    if items.is_empty() && event != "SessionStart" && !(event == "Stop" && warning) {
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }

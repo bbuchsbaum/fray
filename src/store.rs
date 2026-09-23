@@ -27,6 +27,7 @@ pub fn selection(args: &Value) -> Result<&str> {
 
 pub struct InboxSelection<'a> {
     pub mode: &'a str,
+    pub card_ids: Vec<i64>,
     pub addressed_to_me: bool,
     pub unresolved: bool,
     pub kinds: Vec<String>,
@@ -36,6 +37,7 @@ impl<'a> InboxSelection<'a> {
     pub fn parse(args: &'a Value) -> Result<Self> {
         Ok(Self {
             mode: selection(args)?,
+            card_ids: attention_cards(args)?,
             addressed_to_me: boolean(args, "addressed_to_me", false)?,
             unresolved: boolean(args, "unresolved", false)?,
             kinds: attention_kinds(args)?,
@@ -52,6 +54,19 @@ impl<'a> InboxSelection<'a> {
             "1"
         }
         .to_owned();
+        condition.push_str(
+            " AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)",
+        );
+        if !self.card_ids.is_empty() {
+            // Typed integers only: no caller-controlled SQL fragments.
+            let ids = self
+                .card_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            condition.push_str(&format!(" AND c.id IN ({ids})"));
+        }
         if self.addressed_to_me {
             condition.push_str(" AND c.assignee=?1");
         }
@@ -85,6 +100,7 @@ impl<'a> From<&'a str> for InboxSelection<'a> {
     fn from(mode: &'a str) -> Self {
         Self {
             mode,
+            card_ids: Vec::new(),
             addressed_to_me: false,
             unresolved: false,
             kinds: Vec::new(),
@@ -103,6 +119,29 @@ const ATTENTION_KINDS: [&str; 8] = [
     "objection",
     "answer",
 ];
+
+pub(crate) fn attention_cards(args: &Value) -> Result<Vec<i64>> {
+    let Some(value) = args.get("card_ids") else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| Error::invalid("card_ids must be an array of positive integers"))?;
+    if values.is_empty() || values.len() > 16 {
+        return Err(Error::invalid("card_ids must contain 1..16 IDs"));
+    }
+    let mut ids = values
+        .iter()
+        .map(|id| {
+            id.as_i64()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| Error::invalid("card_ids must be positive integers"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
 
 pub(crate) fn attention_kinds(args: &Value) -> Result<Vec<String>> {
     let Some(value) = args.get("kinds") else {
@@ -208,6 +247,8 @@ impl Store {
                 | "present"
                 | "follow"
                 | "unfollow"
+                | "mute"
+                | "unmute"
                 | "controller"
         );
         if !write {
@@ -457,13 +498,15 @@ fn emit(
         params![seq, serialized],
     )?;
     if notify {
-        // Fan-out and head update commit together. Existing participants keep receiving updates.
+        // Fan-out and head update commit together. Leave and mute suppress ALL
+        // routes, including authors, assignees, lease owners and participants.
         conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq)
-          SELECT a.name,?1,?2 FROM agents a WHERE a.name<>?3 AND (
+          SELECT a.name,?1,?2 FROM agents a WHERE a.name<>?3 AND a.enabled=1
+            AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=a.name AND m.card_id=?1) AND (
             a.name=?6 OR a.name=?7 OR a.name=?8 OR
             EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=?1) OR
-            (a.enabled=1 AND (?4=1 OR ?5='*' OR ?9=1 OR a.role='steward' OR
-              EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=?5 OR (t.value='*' AND substr(?5,1,1)<>'@')))))
+            ?4=1 OR ?5='*' OR ?9=1 OR a.role='steward' OR
+              EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=?5 OR (t.value='*' AND substr(?5,1,1)<>'@')))
           ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=excluded.pending_seq",
           params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none()])?;
         conn.execute(
@@ -531,12 +574,32 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             conn.execute("INSERT INTO agents(name,role,topics,joined_ms,last_seen_ms) VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,topics=excluded.topics,enabled=1,last_seen_ms=excluded.last_seen_ms",params![actor,role,topics,now,now])?;
             // Seed from live heads, never from the historical event stream. On resume,
             // refresh the pending head without changing any explicit acknowledgment.
-            let sql=format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?,c.id,c.last_seq FROM cards c WHERE {ACTIVE} AND {RELEVANT} AND NOT EXISTS(SELECT 1 FROM events e WHERE e.seq=c.last_seq AND e.actor=?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
+            let sql=format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,c.last_seq FROM cards c WHERE ({ACTIVE} OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id)) AND {RELEVANT} AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) AND NOT EXISTS(SELECT 1 FROM events e WHERE e.seq=c.last_seq AND e.actor=?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
             conn.execute(&sql, params![actor, actor, actor, actor, actor, actor])?;
             let mut result = brief(conn, actor, 12000, now)?;
             let retained: i64 = conn.query_row(&format!("SELECT count(*) FROM deliveries d JOIN cards c ON c.id=d.card_id WHERE d.agent=? AND d.pending_seq>d.ack_seq AND NOT coalesce({RELEVANT},0)"), params![actor,actor,actor,actor,actor], |r| r.get(0))?;
             result["subscriptions"] = json!({"topics":serde_json::from_str::<Value>(&topics)?,"retained_pending_outside_scope":retained,"note":"Existing receipts are retained, not acknowledged. Incidental receipt does not follow a conversation. Steward still receives all traffic; drive defaults to involved selection."});
             Ok(result)
+        }
+        "mute" | "unmute" => {
+            check_fields(a, &["id"])?;
+            let id = integer(a, "id")?;
+            let card = get_card(conn, id)?;
+            if req.op == "mute" {
+                conn.execute(
+                    "INSERT OR IGNORE INTO muted_cards(agent,card_id) VALUES(?,?)",
+                    params![actor, id],
+                )?;
+            } else {
+                conn.execute(
+                    "DELETE FROM muted_cards WHERE agent=? AND card_id=?",
+                    params![actor, id],
+                )?;
+                // Catch up explicitly, including a terminal update missed while
+                // muted. Never manufacture a receipt for the caller's own event.
+                conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM events WHERE seq=?3 AND actor=?1) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)", params![actor,id,card.last_seq])?;
+            }
+            Ok(json!({"id":id,"muted":req.op=="mute","read_is_not_ack":true}))
         }
         "leave" | "heartbeat" => {
             check_fields(a, &[])?;
@@ -1094,7 +1157,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1208,6 +1271,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "limit",
                     "fresh",
                     "selection",
+                    "card_ids",
                     "addressed_to_me",
                     "unresolved",
                     "kinds",
@@ -1751,7 +1815,7 @@ fn inbox(
         items.push(json!({"card":card.compact(now),"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
     }
     Ok(
-        json!({"agent":actor,"selection":selection.mode,"addressed_to_me":selection.addressed_to_me,"unresolved":selection.unresolved,"kinds":selection.kinds,"min_priority":selection.min_priority,"cursor":highwater(conn)?,"items":items,"total":total,"more":(items.len() as i64)<total,"read_is_not_ack":true}),
+        json!({"agent":actor,"selection":selection.mode,"card_ids":selection.card_ids,"addressed_to_me":selection.addressed_to_me,"unresolved":selection.unresolved,"kinds":selection.kinds,"min_priority":selection.min_priority,"cursor":highwater(conn)?,"items":items,"total":total,"more":(items.len() as i64)<total,"read_is_not_ack":true}),
     )
 }
 fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
@@ -1781,6 +1845,52 @@ fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
     }
     Ok(json!({"items":items,"more":more}))
 }
+fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
+    let enabled: bool = conn
+        .query_row("SELECT enabled FROM agents WHERE name=?", [actor], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or(false);
+    let controller = conn.query_row("SELECT state,updated_ms FROM controllers WHERE agent=?", [actor], |r| {
+        let state: String = r.get(0)?;
+        let updated: i64 = r.get(1)?;
+        Ok(json!({"state":state,"live":enabled && matches!(state.as_str(),"waiting"|"running") && now-updated<120000}))
+    }).optional()?;
+    let listener =
+        crate::attention::listener_status(conn, actor, enabled, now)?.unwrap_or(Value::Null);
+    let listening = crate::diagnostics::listening(
+        &json!({"enabled":enabled,"controller":controller,"listener":listener}),
+        now,
+    );
+    // A narrowly filtered stream may be alive but cannot promise to deliver all
+    // future answers. Be conservative rather than call that session armed.
+    let filters = &listener["selection"];
+    let unfiltered = ["card_ids", "kinds"]
+        .iter()
+        .all(|key| filters[*key].as_array().is_none_or(Vec::is_empty))
+        && filters["min_priority"].is_null()
+        && filters["addressed_to_me"] != true
+        && filters["unresolved"] != true;
+    let armed = listening["live"] == true
+        && listening["activation_expired"] != true
+        && matches!(
+            listening["activation"].as_str(),
+            Some("managed" | "native-monitor" | "background-completion")
+        )
+        && (listening["transport"] == "managed-runner" || unfiltered);
+    let outgoing: i64 = conn.query_row(&format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)"), [actor], |r| r.get(0))?;
+    let mut out = json!({"enabled":enabled,"open_requests_awaiting_others":outgoing,"armed":armed,"listening":listening,"model_response_guaranteed":false});
+    if enabled && outgoing > 0 && !armed {
+        out["warning"] = json!(format!("{outgoing} open requests awaiting others; no armed listener covering their replies. A connected transport or a hook alone cannot wake an idle host."));
+        out["arm_command"] = json!(format!(
+            "fray --as {actor} watch --attention --notification --selection involved"
+        ));
+        out["arm_guidance"] = json!("Run the command through the host's supported notification tool. Add --activation native-monitor or background-completion only when that mechanism is actually installed, and --activation-expires-ms for a bounded lifetime. In hosts without idle wake support, use an explicit fray wait --timeout none while the session is active; do not promise automatic wake after returning control.");
+    }
+    Ok(out)
+}
+
 fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Value> {
     let p = || vec![SqlValue::Text(actor.into()); 4];
     let context = select_page(
@@ -1819,6 +1929,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
             r.get(0)
         })?;
     let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
+    out["idle_readiness"] = idle_readiness(conn, actor, now)?;
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {
         let mut removed = false;

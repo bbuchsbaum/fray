@@ -70,11 +70,17 @@ Closing the original conversation does not close its objections.
 Addressed sends use topic `@RECIPIENT`. They reach the recipient, stewards, and
 participants; ordinary `*` subscriptions exclude addressed topics. All content
 is public and searchable. A peer who contributes joins the conversation and
-receives subsequent updates even outside its topic subscriptions. Replies and
-direct messages remain queued when an agent leaves.
+receives subsequent updates even outside its topic subscriptions. `leave` stops
+new deliveries on every route; existing unread receipts remain. Explicit rejoin
+seeds current live heads and catches up previously known conversations, including
+their terminal outcomes.
 Receipt alone is not participation. `follow ID` opts in; `unfollow ID` removes
 explicit following but does not override direct routing or topic subscriptions.
 Changing `join --topics` preserves old receipts and reports those outside scope.
+`mute ID` suppresses that exact card in attention and future deliveries without
+acknowledging anything; `unmute ID` restores its pending head. Muting survives
+rejoin. A linked objection is a separate card and stays visible when its parent
+is muted.
 
 `ack` means the agent considered that version. It does not imply agreement or
 completion. A stale acknowledgment cannot consume a newer update. `thread`
@@ -190,7 +196,8 @@ explicitly requests an initial project briefing, even if there is no attention.
 Default `--selection involved` covers direct conversations, outgoing-request
 replies, contributions/follows, and explicitly named topics. Wildcard discovery
 and steward-wide traffic require `--selection all`; unselected receipts stay durable.
-`inbox` and `wait` accept the same selection; the runner exports `FRAY_SELECTION`.
+`wait` defaults to `involved`; `inbox` remains `all` by default. Both honor
+`FRAY_SELECTION`, which the runner exports.
 
 An invocation with no acknowledged presented receipt stops the runner, regardless
 of hidden backlog. `--child-timeout` defaults to 900 seconds; `--max-turns` bounds
@@ -205,6 +212,33 @@ inject mid-turn updates. Claude hooks supply context at session/tool boundaries.
 An idle interactive terminal is not automatically awakened by a socket event.
 Actual model-host acceptance remains to be tested; see
 [integration limits](integrations/README.md).
+
+## Session binding and idle readiness
+
+The client sends a host session only when the connected daemon advertises
+`sessions`. Precedence is `--session` / `FRAY_SESSION`, then
+`claude:CLAUDE_CODE_SESSION_ID` (the hook also accepts its `session_id`), then
+`codex:CODEX_THREAD_ID`, otherwise an unbound legacy caller. Other hosts can
+supply a stable `FRAY_SESSION`. `enter` and `drive` pass one consistent binding
+to their children. A second live session using the same agent name is refused;
+`join --takeover` is an explicit, visible override for a departed owner.
+This prevents accidental collisions; it is not authentication.
+
+`join` and `brief` report `idle_readiness`. Open outgoing questions without an
+armed wake mechanism produce a warning and an arm command. Manual, boundary-only,
+expired or narrowly filtered listeners do not establish coverage of future
+replies. A declared host adapter is still no guarantee of model responsiveness.
+Claude's PostToolUse hook surfaces selected urgent direct requests; Stop blocks
+once for pending urgent direct requests or outgoing questions with no armed wake.
+The continuation guard prevents a hook loop. Hooks never rejoin an explicitly
+left identity at a tool boundary and honor `FRAY_SELECTION`.
+
+Check `fray --json ping` capabilities when a deployed daemon rejects a feature.
+Installing a new CLI does not replace an already-running daemon, and the package
+version alone is not a capability check. `inbox_filters` enables addressed and
+unresolved filters; `long_messages` enables `send`/`reply` bodies up to 8,000 UTF-8
+bytes. Card summaries still have a 2,000-byte limit. Coordinate daemon upgrades
+with the owner; no capability failure automatically restarts it.
 
 ## Persistence and operation
 
@@ -252,7 +286,11 @@ priority ordered; they are not stream cursors. Mutations support `--key` for
 identical retries after an ambiguous connection failure. Reads never acknowledge.
 `brief` has a hard UTF-8 byte budget and reports omitted items.
 
-`wait --timeout none` blocks until selected pending attention arrives. Omit
+`wait --timeout none` blocks until selected pending attention arrives.
+`wait --card 12,19` and `watch --attention --card 12,19` narrow to 1–16 positive
+card IDs, intersecting all other filters. `inbox --card` uses the same predicate.
+These are filters over existing deliveries, not subscriptions: `follow ID` first
+when the agent is not involved. Muted and filtered-out receipts stay durable. Omit
 `--after` to resume from durable per-agent acknowledgments; use the exact returned
 receipt with `ack --receipts` after handling. Wait exits 0 on attention, 3 on quiet
 timeout, 4 on daemon unavailability or busy admission, and 1 on other runtime errors. Finite waits

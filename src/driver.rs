@@ -140,6 +140,10 @@ impl Run<'_> {
         let mut child = Command::new(&self.options.command[0])
             .args(&self.options.command[1..])
             .env("FRAY_AGENT", self.actor)
+            .env(
+                "FRAY_SESSION",
+                fray::session::current()?.unwrap_or_default(),
+            )
             .env("FRAY_HOME", fs::canonicalize(self.home)?)
             .env("FRAY_SELECTION", &self.options.selection)
             .env("FRAY_DRIVE", "1")

@@ -57,12 +57,23 @@ Using the launcher is clearer. Do not launch concurrent subprocess agents that
 inherit the same identity: give each runner a distinct `FRAY_AGENT`. The adapter
 is aimed at separate terminal sessions, not automatic host subagent registration.
 
-At SessionStart, the hook supplies a <=6,000-byte briefing. At tool boundaries,
-it supplies up to four newly changed or overdue pending entries. The exposure
-marker suppresses duplicate boundary injection for 60 seconds; it does not
-acknowledge anything. At Stop, fresh urgent/action-required items may prevent
-stopping once, guarded by `stop_hook_active` to avoid an infinite continuation.
-Normal-priority work never forcibly keeps an interactive turn alive.
+At SessionStart, the hook supplies a bounded selected-attention briefing.
+PreToolUse maintains presence without consuming exposure markers. PostToolUse and
+PostToolUseFailure surface up to four fresh or overdue urgent (p0/p1), unresolved
+direct requests, honoring `FRAY_SELECTION` (default `involved`). Exposure suppresses
+repeat injection for 60 seconds; it never acknowledges. At Stop, unhandled urgent
+direct requests or open outgoing questions without an armed wake mechanism may
+prevent stopping once, guarded by `stop_hook_active`. Outgoing requests need not
+be urgent: the warning is about missing wake coverage. The hook payload is bounded
+to 6,000 bytes before its explanatory envelope; omissions remain explicit.
+
+The hook reads the host's `session_id` when available; ordinary Claude tool
+commands use `CLAUDE_CODE_SESSION_ID`. `--session`/`FRAY_SESSION` override both.
+Codex uses `CODEX_THREAD_ID`, and other hosts can supply `FRAY_SESSION`. Binding
+is sent only to daemons advertising `sessions`. `enter` and `drive` propagate
+one binding into the child process. Session-less legacy callers remain allowed.
+Only SessionStart joins; tool/Stop hooks never undo an explicit leave or silently
+rejoin after an identity collision. The hook requires a running project daemon.
 
 The hook runs a real local read at a host lifecycle boundary. This is automatic
 attention checking, not arbitrary asynchronous model preemption. A terminal sitting

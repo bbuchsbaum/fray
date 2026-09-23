@@ -21,6 +21,19 @@ struct Mock {
 #[test]
 fn batch_and_compact_operations_require_capability_before_sending() {
     for (op, args, capability) in [
+        ("mute", json!({"id":1}), "mute"),
+        ("unmute", json!({"id":1}), "mute"),
+        ("join", json!({"takeover":true}), "sessions"),
+        (
+            "patch",
+            json!({"id":1,"expect":1,"status":"resolved","over_objection":"reason"}),
+            "objection_gate",
+        ),
+        (
+            "wait",
+            json!({"card_ids":[1],"timeout":0}),
+            "card_attention",
+        ),
         ("show", json!({"id":1,"compact":true}), "thread_compact"),
         ("show", json!({"id":1,"unread":true}), "thread_unread"),
         (
@@ -55,6 +68,22 @@ fn batch_and_compact_operations_require_capability_before_sending() {
         );
         assert_eq!(mock.requests()[0].len(), 2);
     }
+}
+
+#[test]
+fn session_is_negotiated_on_each_connection_and_never_sent_to_old_daemon() {
+    let old = hello("0.2.1", json!(2));
+    let mut new = old.clone();
+    new["capabilities"] = json!(["sessions"]);
+    let mock = Mock::new(vec![new, old]);
+    let req =
+        Request::new("heartbeat", "worker", json!({})).with_session(Some("codex:explicit".into()));
+    client::rpc(&mock.home, &req, 5).unwrap();
+    client::rpc(&mock.home, &req, 5).unwrap();
+    let requests = mock.requests();
+    assert_eq!(requests[0][1].session.as_deref(), Some("codex:explicit"));
+    assert!(requests[1][1].session.is_none());
+    assert!(requests.iter().all(|c| c[0].session.is_none()));
 }
 impl Mock {
     fn new(hellos: Vec<Value>) -> Self {

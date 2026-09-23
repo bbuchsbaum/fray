@@ -155,7 +155,7 @@ fn departing_participant_retains_the_final_outcome() {
 }
 
 #[test]
-fn directed_messages_queue_for_a_departed_recipient() {
+fn directed_messages_seed_only_after_explicit_rejoin() {
     let mut store = team();
     call(&mut store, "claude", "leave", json!({}));
     call(
@@ -174,7 +174,7 @@ fn directed_messages_queue_for_a_departed_recipient() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|r| r["agent"] == "claude" && r["enabled"] == false && r["pending_seq"] == 1));
+        .all(|r| r["agent"] != "claude"));
     assert_eq!(
         call(&mut store, "claude", "join", json!({}))["attention"]["total"],
         1

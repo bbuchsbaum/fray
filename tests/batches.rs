@@ -314,6 +314,7 @@ fn directly_built_kind_filters_cannot_inject_sql() {
         unresolved: false,
         kinds: vec!["x') OR 1=1 --".into()],
         min_priority: None,
+        card_ids: Vec::new(),
     };
     let page = s.filtered_attention("claude", 0, 10, hostile, NOW).unwrap();
     assert_eq!(page["total"], 0);
@@ -323,6 +324,7 @@ fn directly_built_kind_filters_cannot_inject_sql() {
         unresolved: false,
         kinds: vec!["question".into()],
         min_priority: None,
+        card_ids: Vec::new(),
     };
     assert_eq!(
         s.filtered_attention("claude", 0, 10, honest, NOW).unwrap()["total"],

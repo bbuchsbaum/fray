@@ -458,6 +458,7 @@ fn wait(
             "timeout",
             "limit",
             "selection",
+            "card_ids",
             "addressed_to_me",
             "unresolved",
             "kinds",
@@ -536,6 +537,9 @@ fn watch_attention(stream: &mut UnixStream, shared: &Shared, req: &Request) -> R
         .transpose()?;
     let connection_id = random_key()?;
     let mut filters = json!({"selection":options.selection,"addressed_to_me":options.addressed_to_me,"unresolved":options.unresolved,"kinds":options.kinds,"min_priority":options.min_priority});
+    if !options.card_ids.is_empty() {
+        filters["card_ids"] = json!(options.card_ids);
+    }
     if let Some(activation) = activation {
         filters["activation"] = activation;
     }
