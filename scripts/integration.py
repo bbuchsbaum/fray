@@ -105,9 +105,19 @@ class Integration(unittest.TestCase):
         self.assertEqual(receipt['through_seq'], final['event_seq'])
         thread = self.cli('manager', 'thread', id_)
         self.assertEqual([x['actor'] for x in thread['history']], ['manager', 'codex', 'claude', 'deepseek', 'codex'])
-        # Closing a parent is not acceptance of an unresolved objection.
-        self.cli('manager', 'patch', id_, '--expect', str(thread['card']['rev']), '--status', 'resolved')
+        # Closing a parent is not acceptance of an unresolved objection: a plain
+        # resolve is refused, and an explicit override is recorded while the
+        # objection itself stays open.
+        refused = subprocess.run([str(BINARY), '--home', self.home, '--as', 'manager', '--json', 'patch', id_,
+                                  '--expect', str(thread['card']['rev']), '--status', 'resolved'],
+                                 capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(json.loads(refused.stdout)['error']['code'], 'open_objections')
+        self.cli('manager', 'patch', id_, '--expect', str(thread['card']['rev']), '--status', 'resolved',
+                 '--over-objection', 'Manager closes the thread; the objection is handed to deepseek.')
         self.assertEqual(self.call('show', args={'id': follow_up})['card']['status'], 'open')
+        overridden = self.call('show', args={'id': int(id_), 'history': True, 'limit': 100})['history'][-1]
+        self.assertEqual(overridden['payload']['detail']['open_objections'], [follow_up])
         handoff = self.cli('manager', 'send', 'deepseek', 'Please verify the linked objection.', '--ask', '--ref', 'mote:parser-42')
         self.assertEqual(self.cli('deepseek', 'query', '--ref', 'mote:parser-42')['items'][0]['id'], handoff['card']['id'])
     def test_reply_refs_survive_restart_and_are_searchable(self):

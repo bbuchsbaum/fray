@@ -250,7 +250,17 @@ impl Store {
         if req.op != "join" {
             registered(&tx, &req.actor)?;
         }
+        let replaced = bind_session(&tx, req, now)?;
         let mut result = mutate(&tx, req, now)?;
+        if let Some(replaced) = replaced {
+            result["session_replaced"] = replaced;
+        }
+        if req.op == "leave" {
+            tx.execute(
+                "UPDATE sessions SET ended_ms=?,ended_reason='left' WHERE agent=? AND ended_ms IS NULL AND (?3 IS NULL OR session=?3)",
+                params![now, req.actor, req.session],
+            )?;
+        }
         // A listener registering what it displayed is not the agent acting;
         // keep presence tied to deliberate activity.
         if req.op != "present" {
@@ -494,7 +504,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
     let actor = req.actor.as_str();
     match req.op.as_str() {
         "join" => {
-            check_fields(a, &["role", "topics"])?;
+            check_fields(a, &["role", "topics", "takeover"])?;
             let existing: Option<(String, String, bool)> = conn
                 .query_row(
                     "SELECT role,topics,enabled FROM agents WHERE name=?",
@@ -653,11 +663,23 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             check_fields(
                 a,
                 &[
-                    "id", "expect", "fence", "kind", "topic", "title", "summary", "status",
-                    "priority", "pinned", "tags", "assignee",
+                    "id",
+                    "expect",
+                    "fence",
+                    "kind",
+                    "topic",
+                    "title",
+                    "summary",
+                    "status",
+                    "priority",
+                    "pinned",
+                    "tags",
+                    "assignee",
+                    "over_objection",
                 ],
             )?;
             let mut c = get_card(conn, integer(a, "id")?)?;
+            let was_resolved = c.status == "resolved";
             if c.rev != integer(a, "expect")? {
                 return Err(Error::new(
                     "conflict",
@@ -669,7 +691,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             if a.as_object().map_or(0, |x| {
                 x.keys()
-                    .filter(|k| !["id", "expect", "fence"].contains(&k.as_str()))
+                    .filter(|k| !["id", "expect", "fence", "over_objection"].contains(&k.as_str()))
                     .count()
             }) == 0
             {
@@ -678,13 +700,35 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             apply_fields(&mut c, a)?;
             validate_card(&c)?;
             assignee_known(conn, &c.assignee)?;
+            // Resolving past an open objection must be deliberate and visible.
+            // Superseding or withdrawing is not a claim that the work is right.
+            let mut detail = Value::Null;
+            if c.status == "resolved" && !was_resolved {
+                let open = open_objections(conn, c.id)?;
+                if !open.is_empty() {
+                    let Some(reason) = a.get("over_objection") else {
+                        return Err(Error::new(
+                            "open_objections",
+                            format!(
+                                "card {} has open objections {open:?}; resolve them first, or patch with --over-objection REASON",
+                                c.id
+                            ),
+                        ));
+                    };
+                    let reason = reason
+                        .as_str()
+                        .ok_or_else(|| Error::invalid("over_objection must be a string"))?;
+                    text(reason, "over_objection", 2000, false)?;
+                    detail = json!({"over_objection":reason,"open_objections":open});
+                }
+            }
             if c.terminal() {
                 c.lease_owner = None;
                 c.lease_until_ms = 0;
                 c.fence += 1;
             }
             conn.execute("UPDATE cards SET rev=rev+1,kind=?,topic=?,title=?,summary=?,status=?,priority=?,pinned=?,tags=?,assignee=?,lease_owner=?,lease_until_ms=?,fence=?,updated_ms=? WHERE id=?",params![c.kind,c.topic,c.title,c.summary,c.status,c.priority,c.pinned,serde_json::to_string(&c.tags)?,c.assignee,c.lease_owner,c.lease_until_ms,c.fence,now,c.id])?;
-            emit(conn, actor, "patch", c.id, Value::Null, now, true)
+            emit(conn, actor, "patch", c.id, detail, now, true)
         }
         "annotate" => {
             check_fields(a, &["id", "kind", "body", "refs"])?;
@@ -1050,7 +1094,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1409,6 +1453,102 @@ fn query(conn: &Connection, a: &Value, actor: &str, now: i64) -> Result<Value> {
         now,
     )
 }
+/// How long a session's binding to a name survives without activity.
+pub const IDENTITY_TTL_MS: i64 = 30 * 60_000;
+
+fn session_label(session: &str) -> String {
+    clip(session, 20)
+}
+
+/// Bind the request's host session to its agent name. Two live sessions
+/// never silently share a name: the second is refused unless it joins with
+/// `takeover`, which ends the first visibly. A stale binding yields.
+/// Returns what was replaced, if anything. Legacy (session-less) requests pass.
+fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Value>> {
+    let Some(session) = req.session.as_deref() else {
+        return Ok(None);
+    };
+    if session.is_empty()
+        || session.len() > 128
+        || !session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":._-".contains(c))
+    {
+        return Err(Error::invalid(
+            "session must be 1..128 characters of [A-Za-z0-9:._-]",
+        ));
+    }
+    let actor = &req.actor;
+    let takeover = req.op == "join" && boolean(&req.args, "takeover", false)?;
+    let bound: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT session,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1",
+            [actor],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let replaced = match bound {
+        Some((held, _)) if held == session => {
+            conn.execute(
+                "UPDATE sessions SET last_seen_ms=? WHERE session=? AND agent=?",
+                params![now, session, actor],
+            )?;
+            return Ok(None);
+        }
+        Some((held, seen)) if now - seen < IDENTITY_TTL_MS && !takeover => {
+            return Err(Error::new(
+                "identity_busy",
+                format!(
+                    "{actor:?} is in use by another live session ({}, last seen {}s ago). Choose a distinct --as NAME; use join --takeover only if that session is gone",
+                    session_label(&held),
+                    (now - seen) / 1000
+                ),
+            ));
+        }
+        Some((held, seen)) => {
+            let reason = if now - seen < IDENTITY_TTL_MS {
+                format!("takeover by {}", session_label(session))
+            } else {
+                format!("stale; replaced by {}", session_label(session))
+            };
+            conn.execute(
+                "UPDATE sessions SET ended_ms=?,ended_reason=? WHERE session=? AND agent=?",
+                params![now, reason, held, actor],
+            )?;
+            Some(json!({"session":session_label(&held),"last_seen_ms":seen,"reason":reason}))
+        }
+        None => None,
+    };
+    conn.execute(
+        "INSERT INTO sessions(session,agent,started_ms,last_seen_ms) VALUES(?,?,?,?) ON CONFLICT(session,agent) DO UPDATE SET last_seen_ms=excluded.last_seen_ms,ended_ms=NULL,ended_reason=NULL",
+        params![session, actor, now, now],
+    )?;
+    Ok(replaced)
+}
+
+/// The live binding for `roster`, plus a recent takeover so a displaced
+/// session can see what happened.
+fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
+    let bound = conn
+        .query_row(
+            "SELECT session,started_ms,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1",
+            [agent],
+            |r| {
+                let seen: i64 = r.get(2)?;
+                Ok(json!({"session":session_label(&r.get::<_,String>(0)?),"since_ms":r.get::<_,i64>(1)?,"last_seen_ms":seen,"live":now-seen<IDENTITY_TTL_MS}))
+            },
+        )
+        .optional()?;
+    let takeover = conn
+        .query_row(
+            "SELECT session,ended_ms,ended_reason FROM sessions WHERE agent=? AND ended_reason LIKE 'takeover%' AND ended_ms>? ORDER BY ended_ms DESC LIMIT 1",
+            params![agent, now - IDENTITY_TTL_MS],
+            |r| Ok(json!({"displaced":session_label(&r.get::<_,String>(0)?),"at_ms":r.get::<_,i64>(1)?,"reason":r.get::<_,String>(2)?})),
+        )
+        .optional()?;
+    Ok(json!({"bound":bound,"recent_takeover":takeover}))
+}
+
 const BATCH_TTL_MS: i64 = 86_400_000;
 
 /// The exact (card, through_seq) pairs one presented batch showed this actor.
@@ -1462,7 +1602,13 @@ fn compact_event(e: &Value, previous: Option<&Value>) -> Value {
         out["title"] = card["title"].clone();
         out["body"] = card["summary"].clone();
     }
-    for key in ["refs", "follow_up_id", "parent_card"] {
+    for key in [
+        "refs",
+        "follow_up_id",
+        "parent_card",
+        "over_objection",
+        "open_objections",
+    ] {
         if !detail[key].is_null() && detail[key] != json!([]) {
             out[key] = detail[key].clone();
         }
@@ -1504,6 +1650,17 @@ fn compact_events(events: &[Value]) -> Vec<Value> {
 }
 
 const FOLLOW_UP_LIMIT: usize = 50;
+
+/// Open follow-ups on `card` that originated as objections (not questions).
+fn open_objections(conn: &Connection, card: i64) -> Result<Vec<i64>> {
+    let mut s = conn.prepare(&format!(
+        "SELECT c.id FROM cards c JOIN events child ON child.card_id=c.id AND child.op='post' JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE {ACTIVE} AND parent.card_id=? AND parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection' ORDER BY c.id"
+    ))?;
+    let ids = s
+        .query_map([card], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    Ok(ids)
+}
 
 /// Open questions and objections raised against a card, via their parent tag.
 /// Never silently truncated: an omission is flagged with a continuation.
@@ -1620,7 +1777,7 @@ fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"last_seen_ms":last,"controller":controller,"listener":listener}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?}));
     }
     Ok(json!({"items":items,"more":more}))
 }
