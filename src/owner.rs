@@ -10,26 +10,25 @@ use serde_json::Value;
 pub const HISTORY_EVENTS: usize = 20;
 /// Lines shown per history body before folding.
 const BODY_LINES: usize = 12;
-/// Characters shown per line before truncation.
-const LINE_CHARS: usize = 200;
+/// Characters per screen row of agent text. The margin plus this stays under
+/// 80 columns, and with ASCII-only output one character is one column, so no
+/// agent text can soft-wrap onto a row of its own.
+const LINE_CHARS: usize = 72;
 const QUOTE: &str = "    | ";
+/// Request text taller than this gets a scroll warning in the end banner.
+const TALL: usize = 30;
 
-/// Terminal-safe text: control characters become spaces, and invisible or
-/// reordering format characters (bidi overrides and isolates, zero-width
-/// characters, line/paragraph separators, BOM, soft hyphen) are shown
-/// escaped, so nothing can hide or rearrange what the owner reads.
+/// Terminal-safe text by allowlist: printable ASCII passes; every other
+/// character (invisible tags and variation selectors, bidi controls, wide or
+/// combining characters, all controls) is shown as a visible `\u{...}`
+/// escape, so nothing can be hidden, reordered or misaligned on screen.
 pub fn clean(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
-        let invisible = matches!(c,
-            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}');
-        if invisible {
-            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
-        } else if c.is_control() {
-            out.push(' ');
-        } else {
-            out.push(c);
+        match c {
+            ' '..='~' => out.push(c),
+            '\t' => out.push(' '),
+            _ => out.push_str(&format!("\\u{{{:04X}}}", c as u32)),
         }
     }
     out
@@ -37,12 +36,11 @@ pub fn clean(s: &str) -> String {
 
 fn line(s: &str) -> String {
     let cleaned = clean(s);
-    let mut it = cleaned.chars();
-    let mut kept: String = it.by_ref().take(LINE_CHARS).collect();
-    if it.next().is_some() {
-        kept.push('…');
+    if cleaned.len() > LINE_CHARS {
+        format!("{}...", &cleaned[..LINE_CHARS - 3])
+    } else {
+        cleaned
     }
-    kept
 }
 
 fn quoted(out: &mut String, text: &str) {
@@ -54,7 +52,7 @@ fn quoted(out: &mut String, text: &str) {
     }
     if lines.len() > BODY_LINES {
         out.push_str(&format!(
-            "{QUOTE}… {} more lines (fray thread ID --bodies)\n",
+            "{QUOTE}... {} more lines (fray thread ID --bodies)\n",
             lines.len() - BODY_LINES
         ));
     }
@@ -67,11 +65,16 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
     let events: Vec<&Value> = thread["history"].as_array().into_iter().flatten().collect();
     let skip = events.len().saturating_sub(HISTORY_EVENTS);
     let mut out = String::from("\n  HISTORY (agent-written text is quoted with |):\n");
-    if skip > 0 || truncated {
+    if skip > 0 {
         out.push_str(&format!(
-            "  ({} earlier event(s) not shown; read them with fray thread {} --bodies)\n",
-            skip, head["id"]
+            "  ({skip} earlier event(s) not shown; read them with fray thread {} --bodies)\n",
+            head["id"]
         ));
+    }
+    if truncated {
+        out.push_str(
+            "  (history is longer than review reads; the NEWEST events may be missing here)\n",
+        );
     }
     for event in &events[skip..] {
         out.push_str(&format!(
@@ -103,7 +106,7 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
         .as_str()
         .or(head["summary"].as_str())
         .unwrap_or("");
-    let title = line(head["title"].as_str().unwrap_or(""));
+
     out.push_str(&format!(
         "\n==== DECIDING ON REQUEST #{} (revision {}, {}, from {}) ====\n",
         head["id"],
@@ -111,7 +114,18 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
         line(head["status"].as_str().unwrap_or("")),
         line(head["author"].as_str().unwrap_or(""))
     ));
-    out.push_str(&format!("TITLE:\n{QUOTE}{title}\nTEXT:\n"));
+    // Title and text are both what is being approved: wrapped, never cut.
+    out.push_str("TITLE:\n");
+    for chunk in clean(head["title"].as_str().unwrap_or(""))
+        .as_bytes()
+        .chunks(LINE_CHARS)
+    {
+        out.push_str(QUOTE);
+        out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        out.push('\n');
+    }
+    out.push_str("TEXT:\n");
+    let mut rows = 0;
     let mut blank = false;
     for l in text.lines() {
         let cleaned = clean(l);
@@ -119,21 +133,29 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
             if !blank {
                 out.push_str(QUOTE.trim_end());
                 out.push('\n');
+                rows += 1;
             }
             blank = true;
             continue;
         }
         blank = false;
-        let chars: Vec<char> = cleaned.chars().collect();
-        for chunk in chars.chunks(LINE_CHARS) {
+        for chunk in cleaned.as_bytes().chunks(LINE_CHARS) {
             out.push_str(QUOTE);
-            out.extend(chunk.iter());
+            out.push_str(std::str::from_utf8(chunk).unwrap_or(""));
             out.push('\n');
+            rows += 1;
         }
     }
+    // The banner never repeats agent text; it says how tall the text is so
+    // a request that scrolled its own start away is noticed.
+    let scroll = if rows > TALL {
+        format!(", {rows} lines: scroll up to read it all")
+    } else {
+        String::new()
+    };
     out.push_str(&format!(
-        "==== end of request #{} revision {}: {} ====\n",
-        head["id"], head["rev"], title
+        "==== end of request #{} revision {}{scroll} ====\n",
+        head["id"], head["rev"]
     ));
     out
 }

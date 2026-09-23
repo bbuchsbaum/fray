@@ -87,9 +87,12 @@ owner.** What a design can do:
   request cannot be decided.
 - The review screen prints the request last, directly above the prompt, between
   banners only the renderer writes. All agent-written text (the request and its
-  history) is quoted with a margin, history bodies are folded, control
-  characters are removed and invisible or bidi-reordering characters are shown
-  escaped.
+  history) is quoted with a margin and wrapped to fit 80 columns, and history
+  bodies are folded. The screen is printable ASCII only: every other character
+  (invisible tag characters and variation selectors, bidi controls, wide or
+  combining characters, controls) is shown as a visible `\u{...}` escape. An
+  allowlist, because each blocklist of "invisible" characters proved
+  incomplete. A request taller than the screen says so in its end banner.
 - Comments on a request are context, not part of what is decided. An annotation
   added after the screen is rendered does not change the request's revision, so
   a decision still applies to exactly the text the owner saw.

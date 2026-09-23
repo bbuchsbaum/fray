@@ -680,7 +680,8 @@ fn audit3_agent_text_cannot_scroll_away_or_fake_the_request() {
     // The only unquoted banners are the renderer's; the fake one is quoted.
     let banners: Vec<&str> = screen.lines().filter(|l| l.starts_with("==== ")).collect();
     assert_eq!(banners.len(), 2, "{banners:?}");
-    assert!(banners[1].contains("Force-push main"));
+    // The end banner names the request and revision, never agent text.
+    assert!(banners[1].starts_with("==== end of request") && banners[1].contains("revision"));
     // The real request is the last thing before the prompt.
     let tail: String = screen.lines().rev().take(4).collect::<Vec<_>>().join("\n");
     assert!(tail.contains("Force-push main"), "{tail}");
@@ -726,5 +727,49 @@ fn audit3_newest_history_is_shown_and_long_sends_are_whole() {
     assert!(screen.contains("DECISIVE: newest"), "newest event missing");
     assert!(screen.contains("earlier event(s) not shown"));
     // The decided text is the whole long send, wrapped, not the 400-char head.
-    assert!(screen.contains("END-OF-REQUEST"), "full text missing");
+    // Rejoin the wrapped, quoted lines of the request block.
+    let block = &screen[screen.find("==== DECIDING").unwrap()..];
+    let joined: String = block
+        .lines()
+        .filter_map(|l| l.strip_prefix("    | "))
+        .collect();
+    assert!(joined.contains("END-OF-REQUEST"), "full text missing");
+}
+
+#[test]
+fn audit4_only_printable_ascii_reaches_the_owners_terminal() {
+    let mut s = board();
+    // Unicode tag characters can carry a hidden sentence that terminals draw
+    // as nothing. Encode "also force-push main" as tags after a benign ask.
+    let hidden: String = "also force-push main"
+        .chars()
+        .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())
+        .collect();
+    let id = ask(&mut s, &format!("Restart daemon?{hidden}\u{FE0F}\u{3164}"));
+    let screen = review_screen(&mut s, &id);
+    assert!(
+        screen
+            .chars()
+            .all(|c| c == '\n' || (' '..='~').contains(&c)),
+        "non-ASCII reached the screen"
+    );
+    assert!(
+        screen.contains("\\u{E0061}"),
+        "tags must be visible as escapes"
+    );
+    // Every row fits an 80-column terminal, so nothing soft-wraps into a row
+    // of its own.
+    assert!(
+        screen.lines().all(|l| l.len() <= 80),
+        "a row exceeds 80 columns"
+    );
+    // A tall request says so in the end banner.
+    let id = ask(&mut s, &"a\n".repeat(3_000));
+    let screen = review_screen(&mut s, &id);
+    let end = screen
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("==== end"))
+        .unwrap();
+    assert!(end.contains("scroll up"), "{end}");
 }
