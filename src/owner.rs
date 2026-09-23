@@ -15,8 +15,8 @@ const BODY_ROWS: usize = 12;
 /// Columns of agent text per row; with the 6-column margin, 78 in total.
 const WIDTH: usize = 72;
 const QUOTE: &str = "    | ";
-/// Request blocks taller than this say so in the end banner (a 24-row
-/// terminal minus the banners and the prompt).
+/// Request blocks taller than this get a scroll notice above the end banner
+/// (a 24-row terminal minus the banners and the prompt).
 const TALL: usize = 18;
 /// Actor names are shown clipped so a header row stays within 80 columns.
 const ACTOR: usize = 40;
@@ -60,7 +60,8 @@ fn quote_rows(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut blank = false;
     for line in text.lines() {
-        if line.trim().is_empty() {
+        // Only ASCII spaces count as blank; other whitespace is shown escaped.
+        if line.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r')) {
             if !blank {
                 out.push(QUOTE.trim_end().to_owned());
             }
@@ -108,8 +109,15 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
             .as_str()
             .or(event["op"].as_str())
             .unwrap_or("");
+        // Real owner events are marked by the renderer from the store's
+        // authority field, which agents cannot set; a lookalike name is not.
+        let owner = if event["authority"].is_string() {
+            " [OWNER AUTHORITY]"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "  @{} {} {}\n",
+            "  @{} {} {}{owner}\n",
             event["seq"],
             actor,
             clean(kind).chars().take(16).collect::<String>()
@@ -148,7 +156,7 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
         .take(ACTOR)
         .collect();
     out.push_str(&format!(
-        "\n==== DECIDING ON REQUEST #{id} (revision {rev}, {status}) ====\nFROM: {author}\nTITLE:\n"
+        "\n==== DECIDING #{id} revision {rev} ({status}) ====\nFROM: {author}\nTITLE:\n"
     ));
     let title = quote_rows(head["title"].as_str().unwrap_or(""));
     let body = quote_rows(text);
@@ -158,13 +166,12 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
     // The banner never repeats agent text; it says how tall the request is so
     // one that scrolled its own start away is noticed.
     let rows = title.len() + body.len();
-    let scroll = if rows > TALL {
-        format!(", {rows} rows: scroll up to read it all")
-    } else {
-        String::new()
-    };
-    out.push_str(&format!(
-        "==== end of request #{id} revision {rev}{scroll} ====\n"
-    ));
+    if rows > TALL {
+        out.push_str(&format!(
+            "  ({rows} rows of request above: scroll up to read all of it)\n"
+        ));
+    }
+    // Numbers only, so the banner always fits 80 columns.
+    out.push_str(&format!("==== end of request #{id} revision {rev} ====\n"));
     out
 }

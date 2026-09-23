@@ -766,12 +766,12 @@ fn audit4_only_printable_ascii_reaches_the_owners_terminal() {
     // A tall request says so in the end banner.
     let id = ask(&mut s, &"a\n".repeat(3_000));
     let screen = review_screen(&mut s, &id);
-    let end = screen
-        .lines()
-        .rev()
-        .find(|l| l.starts_with("==== end"))
-        .unwrap();
-    assert!(end.contains("scroll up"), "{end}");
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.starts_with("  (") && l.contains("scroll up")),
+        "no scroll notice"
+    );
 }
 
 #[test]
@@ -838,4 +838,48 @@ fn audit5_every_row_is_either_quoted_or_a_fixed_renderer_row() {
         screen.contains("literal \\u{005C}u{00E9} versus \\u{00E9}"),
         "{screen}"
     );
+}
+
+#[test]
+fn audit6_numbers_cannot_widen_banners_and_lookalikes_are_marked_apart() {
+    let mut s = board();
+    for name in ["own3r", "0vvner", "OWN3R1"] {
+        assert_eq!(
+            run(&mut s, name, "join", json!({})).unwrap_err(),
+            "reserved_owner",
+            "{name}"
+        );
+    }
+    let id = ask(&mut s, &"a\n".repeat(4_000));
+    let screen = review_screen(&mut s, &id);
+    assert!(
+        screen.lines().all(|l| l.len() <= 80),
+        "a row exceeds 80 columns"
+    );
+    // Whitespace-only non-ASCII lines are shown, not collapsed away.
+    let id = ask(&mut s, "x\n\u{3000}\u{3000}\ny");
+    let screen = review_screen(&mut s, &id);
+    assert!(screen.contains("\\u{3000}\\u{3000}"), "{screen}");
+    // A real owner reply is marked by the renderer; an agent's is not.
+    run(
+        &mut s,
+        OWNER,
+        "owner_answer",
+        json!({"id": id, "verdict": "answer", "body": "Noted."}),
+    )
+    .unwrap();
+    run(
+        &mut s,
+        "codex",
+        "annotate",
+        json!({"id": id, "kind": "answer", "body": "Noted."}),
+    )
+    .unwrap();
+    let screen = review_screen(&mut s, &id);
+    let marked: Vec<&str> = screen
+        .lines()
+        .filter(|l| l.contains("[OWNER AUTHORITY]"))
+        .collect();
+    assert_eq!(marked.len(), 1, "{marked:?}");
+    assert!(marked[0].contains(" owner "), "{marked:?}");
 }
