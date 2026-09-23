@@ -318,7 +318,9 @@ fn a_long_objection_reaches_its_assignee_whole() {
         .clone();
     assert_eq!(follow_up["assignee"], "lead");
     let it = item(&call(&mut s, "lead", "inbox", json!({})), &follow_up["id"]);
-    assert_eq!(it["card"]["summary"], objection);
+    let shown = it["card"]["summary"].as_str().unwrap();
+    assert!(shown.starts_with(&objection), "{shown}");
+    assert!(shown.ends_with("Resolve this question explicitly after addressing it."));
     assert_eq!(it["full_text"], true);
     // In excerpt mode the long objection is honestly flagged.
     let page = call(&mut s, "lead", "inbox", json!({"full_text_budget": 0}));
@@ -326,4 +328,63 @@ fn a_long_objection_reaches_its_assignee_whole() {
         item(&page, &follow_up["id"])["card"]["summary_truncated"],
         true
     );
+}
+
+#[test]
+fn every_objection_length_is_shown_whole_or_flagged() {
+    // Review BLOCK at 6fca8bc: objections of about 401-494 characters were
+    // cut off yet labelled full, because the gate compared byte lengths.
+    for len in (380..=520).step_by(7) {
+        let mut s = board();
+        let asked = call(
+            &mut s,
+            "lead",
+            "send",
+            json!({"to": "worker", "body": "Please review.", "ask": true}),
+        );
+        let objection = "o".repeat(len);
+        let follow_up = call(
+            &mut s,
+            "worker",
+            "annotate",
+            json!({"id": asked["card"]["id"], "kind": "objection", "body": objection}),
+        )["follow_up"]
+            .clone();
+        let it = item(&call(&mut s, "lead", "inbox", json!({})), &follow_up["id"]);
+        let shown = it["card"]["summary"].as_str().unwrap();
+        assert!(shown.starts_with(&objection), "len {len}: {shown}");
+        assert_eq!(it["full_text"], true, "len {len}");
+        let excerpt = call(&mut s, "lead", "inbox", json!({"full_text_budget": 0}));
+        let flagged = item(&excerpt, &follow_up["id"])["card"]["summary_truncated"] == true;
+        assert!(
+            flagged,
+            "len {len}: excerpt mode must flag the clipped head"
+        );
+    }
+}
+
+#[test]
+fn a_patched_follow_up_shows_its_current_summary() {
+    let mut s = board();
+    let asked = call(
+        &mut s,
+        "lead",
+        "send",
+        json!({"to": "worker", "body": "Please review.", "ask": true}),
+    );
+    let follow_up = call(
+        &mut s,
+        "worker",
+        "annotate",
+        json!({"id": asked["card"]["id"], "kind": "objection", "body": "o".repeat(900)}),
+    )["follow_up"]
+        .clone();
+    call(
+        &mut s,
+        "worker",
+        "patch",
+        json!({"id": follow_up["id"], "expect": follow_up["rev"], "summary": "CORRECTED objection"}),
+    );
+    let it = item(&call(&mut s, "lead", "inbox", json!({})), &follow_up["id"]);
+    assert_eq!(it["card"]["summary"], "CORRECTED objection");
 }
