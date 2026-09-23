@@ -1473,6 +1473,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             if c.author == OWNER {
                 v["card"]["authority"] = json!("owner (unsigned)");
             }
+            v["full_text"] = json!(full_text(conn, &c)?);
             open_follow_ups(conn, c.id, &mut v)?;
             if boolean(a, "unread", false)? {
                 // Unread = this reader's delivered-but-unacknowledged range. The
@@ -2050,6 +2051,34 @@ fn compact_events(events: &[Value]) -> Vec<Value> {
 
 const FOLLOW_UP_LIMIT: usize = 50;
 
+/// The complete current text of a card. A long send keeps only a bounded
+/// head on the card; the whole message lives in its creation event, or, for
+/// a linked question/objection card, in the annotation that raised it. The
+/// original is used exactly while the card still shows its creation head and
+/// that head is not the original itself (it was clipped, or had a pointer
+/// line added); after a patch the current summary is the truth. No lengths.
+fn full_text(conn: &Connection, card: &Card) -> Result<String> {
+    let original: Option<(Option<String>, Option<String>, bool)> = conn
+        .query_row(
+            "SELECT coalesce(json_extract(e.payload,'$.detail.body'),(SELECT json_extract(a.payload,'$.detail.body') FROM events a WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate')),json_extract(e.payload,'$.card.summary'),json_extract(e.payload,'$.detail.annotation_seq') IS NOT NULL FROM events e WHERE e.card_id=? AND e.op='post' ORDER BY e.seq LIMIT 1",
+            [card.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match original {
+        Some((Some(body), Some(head), linked)) if head == card.summary && body != head => {
+            match head.lines().last().filter(|_| linked) {
+                // Keep a linked card's pointer and "resolve" instruction.
+                Some(pointer) if pointer.starts_with("Full context:") => {
+                    format!("{body}\n{pointer}")
+                }
+                _ => body,
+            }
+        }
+        _ => card.summary.clone(),
+    })
+}
+
 /// Open follow-ups on `card` that originated as objections (not questions).
 fn open_objections(conn: &Connection, card: i64) -> Result<Vec<i64>> {
     let mut s = conn.prepare(&format!(
@@ -2198,34 +2227,7 @@ fn inbox(
         let mut compact = card.compact(now);
         let mut full = false;
         if addressed {
-            // A long send keeps only a bounded head on the card; the whole
-            // message lives in its creation event, or, for a linked
-            // question/objection card, in the annotation that raised it. Use
-            // it only while the card still shows that original head: after a
-            // patch, the current summary is the truth, never the superseded
-            // original.
-            let original: Option<(Option<String>, Option<String>, bool)> = conn
-                .query_row(
-                    "SELECT coalesce(json_extract(e.payload,'$.detail.body'),(SELECT json_extract(a.payload,'$.detail.body') FROM events a WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate')),json_extract(e.payload,'$.card.summary'),json_extract(e.payload,'$.detail.annotation_seq') IS NOT NULL FROM events e WHERE e.card_id=? AND e.op='post' ORDER BY e.seq LIMIT 1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            // The original is the full truth exactly when the card still shows
-            // its creation head and that head is not the original itself
-            // (it was clipped, or had a pointer line added). No length test.
-            let text = match original {
-                Some((Some(body), Some(head), linked)) if head == card.summary && body != head => {
-                    match head.lines().last().filter(|_| linked) {
-                        // Keep a linked card's pointer and "resolve" instruction.
-                        Some(pointer) if pointer.starts_with("Full context:") => {
-                            format!("{body}\n{pointer}")
-                        }
-                        _ => body,
-                    }
-                }
-                _ => card.summary.clone(),
-            };
+            let text = full_text(conn, &card)?;
             let cost = encoded(&text);
             if cost <= full_budget {
                 full_budget -= cost;

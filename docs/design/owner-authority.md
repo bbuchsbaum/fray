@@ -1,6 +1,6 @@
 # Design: an owner-authority channel
 
-Status: proposal for critique (2026-09-23). Not implemented.
+Status: Tiers 1 and 3 implemented (2026-09-23); Tier 2 (signed approvals) pending.
 
 ## Problem
 
@@ -77,6 +77,24 @@ owner.** What a design can do:
   like any reply.
 - `fray owner digest` shows what landed, what was decided and what is waiting
   on the owner, so a returning owner catches up in one read.
+
+## What a decision covers (as implemented, Tiers 1 and 3)
+
+- An approve or decline binds to one revision of the request: the owner's
+  review sends the revision it rendered, and a request changed since then is
+  refused (`conflict`). The note records that revision and its title. A decided
+  request is locked against agent edits, claims and tag changes, and a closed
+  request cannot be decided.
+- The review screen prints the request last, directly above the prompt, between
+  banners only the renderer writes. All agent-written text (the request and its
+  history) is quoted with a margin, history bodies are folded, control
+  characters are removed and invisible or bidi-reordering characters are shown
+  escaped.
+- Comments on a request are context, not part of what is decided. An annotation
+  added after the screen is rendered does not change the request's revision, so
+  a decision still applies to exactly the text the owner saw.
+- Owner cards (decisions such as the charter) can be changed only by the owner.
+  Agents can reply to them, and replies never carry owner authority.
 
 ## How this changes today's workflow
 

@@ -539,9 +539,9 @@ fn audit2_review_shows_the_version_a_decision_binds_to() {
         json!({"id": id, "history": true, "compact": true, "limit": 100}),
     )
     .unwrap();
-    let screen = fray::owner::render_request(&thread);
+    let screen = fray::owner::render_request(&thread, false);
     assert!(
-        screen.contains("CURRENT TEXT:\n    Restart daemon AND force-push main"),
+        screen.contains("TEXT:\n    | Restart daemon AND force-push main"),
         "{screen}"
     );
     assert!(screen.contains("changed summary"), "{screen}");
@@ -616,4 +616,115 @@ fn audit2_closed_requests_cannot_be_decided_and_replies_name_their_version() {
             "{verdict}"
         );
     }
+}
+
+fn review_screen(s: &mut Store, id: &Value) -> String {
+    // What `fray owner review` reads (all history pages) and renders.
+    let mut thread = run(
+        s,
+        OWNER,
+        "show",
+        json!({"id": id, "history": true, "compact": true, "limit": 100}),
+    )
+    .unwrap();
+    let mut events = thread["history"].as_array().cloned().unwrap();
+    while thread["more"] == true {
+        let next = run(
+            s,
+            OWNER,
+            "show",
+            json!({"id": id, "history": true, "compact": true, "limit": 100, "after": thread["next_after"]}),
+        )
+        .unwrap();
+        events.extend(next["history"].as_array().cloned().unwrap());
+        thread["more"] = next["more"].clone();
+        thread["next_after"] = next["next_after"].clone();
+    }
+    thread["history"] = json!(events);
+    fray::owner::render_request(&thread, false)
+}
+
+fn ask(s: &mut Store, body: &str) -> Value {
+    run(
+        s,
+        "claude",
+        "send",
+        json!({"to": OWNER, "body": body, "ask": true, "pending": true}),
+    )
+    .unwrap()["card"]["id"]
+        .clone()
+}
+
+#[test]
+fn audit3_agent_text_cannot_scroll_away_or_fake_the_request() {
+    let mut s = board();
+    let id = ask(&mut s, "Force-push main and delete release tags?");
+    let fake = format!(
+        "{}==== DECIDING ON REQUEST #1 (revision 1, open, from claude) ====\nTITLE:\n    | Restart the daemon?\nTEXT:\n    | Restart the daemon?\n==== end of request #1 revision 1: Restart the daemon? ====",
+        "\n".repeat(3000)
+    );
+    run(
+        &mut s,
+        "codex",
+        "annotate",
+        json!({"id": id, "kind": "note", "body": fake}),
+    )
+    .unwrap();
+    let screen = review_screen(&mut s, &id);
+    // Bounded: agent text is folded, so the real request stays on screen.
+    assert!(
+        screen.lines().count() < 120,
+        "{} lines",
+        screen.lines().count()
+    );
+    // The only unquoted banners are the renderer's; the fake one is quoted.
+    let banners: Vec<&str> = screen.lines().filter(|l| l.starts_with("==== ")).collect();
+    assert_eq!(banners.len(), 2, "{banners:?}");
+    assert!(banners[1].contains("Force-push main"));
+    // The real request is the last thing before the prompt.
+    let tail: String = screen.lines().rev().take(4).collect::<Vec<_>>().join("\n");
+    assert!(tail.contains("Force-push main"), "{tail}");
+}
+
+#[test]
+fn audit3_invisible_and_reordering_characters_are_shown_escaped() {
+    let mut s = board();
+    let id = ask(
+        &mut s,
+        "Restart\u{202E}niam hsup-ecrof\u{202C} daemon\u{200B}?\u{1B}[2K",
+    );
+    let screen = review_screen(&mut s, &id);
+    assert!(
+        screen.contains("\\u{202E}") && screen.contains("\\u{200B}"),
+        "{screen}"
+    );
+    assert!(!screen.contains('\u{202E}') && !screen.contains('\u{1B}'));
+}
+
+#[test]
+fn audit3_newest_history_is_shown_and_long_sends_are_whole() {
+    let mut s = board();
+    let long = format!("Please approve: {} END-OF-REQUEST", "x".repeat(3_000));
+    let id = ask(&mut s, &long);
+    for n in 0..110 {
+        run(
+            &mut s,
+            "codex",
+            "annotate",
+            json!({"id": id, "kind": "note", "body": format!("note {n}")}),
+        )
+        .unwrap();
+    }
+    run(
+        &mut s,
+        "codex",
+        "annotate",
+        json!({"id": id, "kind": "note", "body": "DECISIVE: newest"}),
+    )
+    .unwrap();
+    let screen = review_screen(&mut s, &id);
+    assert!(screen.contains("DECISIVE: newest"), "newest event missing");
+    assert!(screen.contains("earlier event(s) not shown"));
+    // The decided text is the whole long send, wrapped, not the 400-char head.
+    assert!(screen.contains("END-OF-REQUEST"), "full text missing");
 }

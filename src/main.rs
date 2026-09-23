@@ -601,7 +601,10 @@ fn owner(home: &Path, action: OwnerCmd, as_json: bool) -> Result<Option<Value>> 
             let mut answered = Vec::new();
             for card in items {
                 let id = card["id"].as_i64().unwrap_or(0);
-                let thread = send(
+                // Page through the whole history so the newest events are
+                // shown; the head comes from the first read and its revision
+                // is what the decision binds to.
+                let mut thread = send(
                     home,
                     who,
                     "show",
@@ -609,7 +612,25 @@ fn owner(home: &Path, action: OwnerCmd, as_json: bool) -> Result<Option<Value>> 
                     None,
                     10,
                 )?;
-                eprint!("{}", fray::owner::render_request(&thread));
+                let mut events = thread["history"].as_array().cloned().unwrap_or_default();
+                let mut pages = 1;
+                while thread["more"] == true && pages < 50 {
+                    let next = send(
+                        home,
+                        who,
+                        "show",
+                        json!({"id":id,"history":true,"compact":true,"limit":100,"after":thread["next_after"]}),
+                        None,
+                        10,
+                    )?;
+                    events.extend(next["history"].as_array().cloned().unwrap_or_default());
+                    thread["more"] = next["more"].clone();
+                    thread["next_after"] = next["next_after"].clone();
+                    pages += 1;
+                }
+                let truncated = thread["more"] == true;
+                thread["history"] = json!(events);
+                eprint!("{}", fray::owner::render_request(&thread, truncated));
                 let choice = prompt("[a]pprove  [d]ecline  [r]eply  [s]kip  [q]uit: ")?;
                 let verdict = match choice.as_str() {
                     "a" => "approve",
