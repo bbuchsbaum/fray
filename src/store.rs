@@ -22,10 +22,35 @@ fn owner_lookalike(name: &str) -> bool {
     folded.trim_end_matches(|c: char| c.is_ascii_digit()) == OWNER
 }
 
-/// Only the owner may use `authority:` tags, so a tag can never read as
-/// owner authority on an agent's card.
+/// Marks an ask card the owner approved or declined; set only by the owner.
+const DECIDED: &str = "authority:decided";
+
+fn decided_tags(c: &Card) -> Vec<String> {
+    let mut tags = c.tags.clone();
+    if !tags.iter().any(|t| t == DECIDED) {
+        tags.push(DECIDED.to_owned());
+    }
+    tags.retain(|t| !t.is_empty());
+    tags
+}
+
+/// Cards only the owner may change: the owner's own, and requests the owner
+/// has decided (so a decision can never be moved onto different content).
+fn owner_controlled(c: &Card) -> bool {
+    c.author == OWNER || c.tags.iter().any(|t| t == DECIDED)
+}
+
+/// Only the owner may use `authority` tags (in any case or spelling), so a
+/// tag can never read as owner authority on an agent's card.
 fn reserve_authority_tags(actor: &str, tags: &[String]) -> Result<()> {
-    if actor != OWNER && tags.iter().any(|t| t.starts_with("authority:")) {
+    let reserved = |t: &String| {
+        t.to_lowercase()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .starts_with("authority")
+    };
+    if actor != OWNER && tags.iter().any(reserved) {
         return Err(Error::new(
             "reserved_owner",
             "authority: tags are reserved for the owner",
@@ -896,10 +921,10 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             // Authority follows the author, so only the owner may change an
             // owner card; others can reply to it, never rewrite it.
-            if c.author == OWNER && actor != OWNER {
+            if owner_controlled(&c) && actor != OWNER {
                 return Err(Error::new(
                     "reserved_owner",
-                    "owner cards can only be changed by the owner; reply to it instead",
+                    "owner cards and owner-decided requests can only be changed by the owner; reply instead",
                 ));
             }
             if c.lease_owner.is_some() {
@@ -970,7 +995,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             merged.dedup();
             let merged = tags(&json!(merged))?;
             // A reply never changes an owner card: its refs stay on the reply.
-            if merged != c.tags && (c.author != OWNER || actor == OWNER) {
+            if merged != c.tags && (!owner_controlled(&c) || actor == OWNER) {
                 conn.execute(
                     "UPDATE cards SET tags=?,rev=rev+1,updated_ms=? WHERE id=?",
                     params![serde_json::to_string(&merged)?, now, c.id],
@@ -1052,7 +1077,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let c = get_card(conn, integer(a, "id")?)?;
             // Leasing an owner card would edit it and redirect objections to
             // the leaseholder instead of the owner.
-            if c.author == OWNER && actor != OWNER && req.op != "release" {
+            if owner_controlled(&c) && actor != OWNER && req.op != "release" {
                 return Err(Error::new(
                     "reserved_owner",
                     "owner cards cannot be claimed; reply to it instead",
@@ -1224,16 +1249,29 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "owner_answer" => {
             // The owner answers a request from the owner queue. The asker is
             // routed the answer like any reply; approve/decline also close it.
-            check_fields(a, &["id", "verdict", "body"])?;
+            check_fields(a, &["id", "verdict", "body", "expect"])?;
             let id = integer(a, "id")?;
             let verdict = string(a, "verdict")?;
             if !["approve", "decline", "answer"].contains(&verdict) {
                 return Err(Error::invalid("verdict: approve|decline|answer"));
             }
             let body = string(a, "body")?;
+            // A decision binds to exactly the version the owner saw: if the
+            // request changed since it was displayed, nothing is recorded.
+            let shown = get_card(conn, id)?;
+            if verdict != "answer" && integer(a, "expect")? != shown.rev {
+                return Err(Error::new(
+                    "conflict",
+                    format!(
+                        "request #{id} changed since it was shown (now revision {}); review it again",
+                        shown.rev
+                    ),
+                ));
+            }
+            let what = format!("revision {}: {:?}", shown.rev, shown.title);
             let text = match verdict {
-                "approve" => format!("APPROVED by the owner. {body}"),
-                "decline" => format!("DECLINED by the owner. {body}"),
+                "approve" => format!("APPROVED by the owner ({what}). {body}"),
+                "decline" => format!("DECLINED by the owner ({what}). {body}"),
                 _ => body.to_owned(),
             };
             let mut result = mutate(
@@ -1261,7 +1299,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     &Request::new(
                         "patch",
                         OWNER,
-                        json!({"id":id,"expect":card.rev,"status":if verdict == "approve" {"resolved"} else {"withdrawn"},"over_objection":"The owner decided this request."}),
+                        json!({"id":id,"expect":card.rev,"status":if verdict == "approve" {"resolved"} else {"withdrawn"},"tags":decided_tags(&card),"over_objection":"The owner decided this request."}),
                     ),
                     now,
                 )?;
@@ -2015,11 +2053,11 @@ fn open_objections(conn: &Connection, card: i64) -> Result<Vec<i64>> {
 /// Never silently truncated: an omission is flagged with a continuation.
 fn open_follow_ups(conn: &Connection, card: i64, v: &mut Value) -> Result<()> {
     let mut s = conn.prepare(&format!(
-        "SELECT c.id,c.title,c.status,c.assignee,c.author FROM cards c WHERE {ACTIVE} AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value=?) ORDER BY c.id LIMIT {}",
+        "SELECT c.id,c.title,c.status,c.assignee,c.author FROM cards c WHERE {ACTIVE} AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value=?1) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.op='post' AND json_extract(e.payload,'$.detail.parent_card')=?2) ORDER BY c.id LIMIT {}",
         FOLLOW_UP_LIMIT + 1
     ))?;
     let mut rows = s
-        .query_map([format!("parent:{card}")], |r| {
+        .query_map(params![format!("parent:{card}"), card], |r| {
             Ok(json!({"id":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"author":r.get::<_,String>(4)?}))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

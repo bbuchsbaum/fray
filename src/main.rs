@@ -639,11 +639,12 @@ fn owner(home: &Path, action: OwnerCmd, as_json: bool) -> Result<Option<Value>> 
                     eprintln!("A reply needs text; skipped.");
                     continue;
                 }
+                // Bind the decision to the exact version shown above.
                 match send(
                     home,
                     who,
                     "owner_answer",
-                    json!({"id":id,"verdict":verdict,"body":body}),
+                    json!({"id":id,"verdict":verdict,"body":body,"expect":thread["card"]["rev"]}),
                     None,
                     10,
                 ) {

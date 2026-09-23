@@ -13,6 +13,10 @@ fn run(s: &mut Store, actor: &str, op: &str, args: Value) -> Result<Value, Strin
         .map_err(|e| e.code)
 }
 
+fn rev(s: &mut Store, id: &Value) -> Value {
+    run(s, "claude", "show", json!({"id": id})).unwrap()["card"]["rev"].clone()
+}
+
 fn board() -> Store {
     let mut s = Store::memory().unwrap();
     for who in ["claude", "codex"] {
@@ -118,11 +122,12 @@ fn ask_owner_queues_and_the_answer_reaches_the_asker() {
     .unwrap();
     assert_eq!(queue["items"][0]["id"], id);
     // Clear claude's own view, then the owner approves.
+    let shown_id = rev(&mut s, &id);
     let answered = run(
         &mut s,
         OWNER,
         "owner_answer",
-        json!({"id": id, "verdict": "approve", "body": "Go ahead after announcing it."}),
+        json!({"id": id, "verdict": "approve", "body": "Go ahead after announcing it.", "expect": shown_id}),
     )
     .unwrap();
     assert_eq!(answered["verdict"], "approve");
@@ -243,21 +248,23 @@ fn review_fu3_fu5_a_claimed_ask_cannot_block_the_owner_and_decline_is_distinct()
     };
     let first = ask(&mut s, "Restart?");
     run(&mut s, "codex", "claim", json!({"id": first})).unwrap();
+    let shown_first = rev(&mut s, &first);
     let approved = run(
         &mut s,
         OWNER,
         "owner_answer",
-        json!({"id": first, "verdict": "approve", "body": ""}),
+        json!({"id": first, "verdict": "approve", "body": "", "expect": shown_first}),
     )
     .unwrap();
     assert_eq!(approved["card"]["status"], "resolved");
     assert!(approved["card"]["lease_owner"].is_null());
     let second = ask(&mut s, "Publish?");
+    let shown_second = rev(&mut s, &second);
     let declined = run(
         &mut s,
         OWNER,
         "owner_answer",
-        json!({"id": second, "verdict": "decline", "body": "Not yet."}),
+        json!({"id": second, "verdict": "decline", "body": "Not yet.", "expect": shown_second}),
     )
     .unwrap();
     assert_eq!(declined["card"]["status"], "withdrawn");
@@ -395,4 +402,113 @@ fn review2_authority_tags_are_reserved_for_the_owner() {
         .unwrap_err(),
         "reserved_owner"
     );
+}
+
+#[test]
+fn audit_an_owner_decision_is_bound_to_what_the_owner_saw() {
+    let mut s = board();
+    let asked = run(
+        &mut s,
+        "claude",
+        "send",
+        json!({"to": OWNER, "body": "Restart the shared daemon?", "ask": true, "pending": true}),
+    )
+    .unwrap();
+    let id = asked["card"]["id"].clone();
+    let shown = rev(&mut s, &id);
+    // Retitled between display and the owner's keypress: nothing is recorded.
+    run(
+        &mut s,
+        "codex",
+        "patch",
+        json!({"id": id, "expect": shown, "title": "Force-push main and delete release tags?"}),
+    )
+    .unwrap();
+    assert_eq!(
+        run(
+            &mut s,
+            OWNER,
+            "owner_answer",
+            json!({"id": id, "verdict": "approve", "body": "", "expect": shown})
+        )
+        .unwrap_err(),
+        "conflict"
+    );
+    // Approving the version actually shown records what was approved.
+    let now_shown = rev(&mut s, &id);
+    let answered = run(
+        &mut s,
+        OWNER,
+        "owner_answer",
+        json!({"id": id, "verdict": "decline", "body": "No.", "expect": now_shown}),
+    )
+    .unwrap();
+    assert!(answered["card"]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("authority:decided")));
+    let history = run(
+        &mut s,
+        "claude",
+        "show",
+        json!({"id": id, "history": true, "compact": true}),
+    )
+    .unwrap();
+    let note = history["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|e| e["body"].as_str().filter(|b| b.starts_with("DECLINED")))
+        .unwrap()
+        .to_owned();
+    assert!(note.contains("Force-push main"), "{note}");
+    // After the decision, agents can no longer move it onto other content.
+    let decided = rev(&mut s, &id);
+    for (op, args) in [
+        (
+            "patch",
+            json!({"id": id, "expect": decided, "title": "Publish to CRAN now?", "status": "open"}),
+        ),
+        ("claim", json!({"id": id})),
+    ] {
+        assert_eq!(
+            run(&mut s, "codex", op, args).unwrap_err(),
+            "reserved_owner",
+            "{op}"
+        );
+    }
+}
+
+#[test]
+fn audit_authority_tag_spellings_and_spoofed_links_are_refused_or_ignored() {
+    let mut s = board();
+    for tag in [
+        "Authority:owner",
+        "AUTHORITY:OWNER",
+        "authority.owner",
+        "authority/owner",
+    ] {
+        assert_eq!(
+            run(
+                &mut s,
+                "claude",
+                "post",
+                json!({"title": "t", "summary": "s", "tags": [tag]})
+            )
+            .unwrap_err(),
+            "reserved_owner",
+            "{tag}"
+        );
+    }
+    let card = charter(&mut s);
+    // A card merely tagged parent:N is not a linked follow-up of N.
+    run(
+        &mut s,
+        "claude",
+        "post",
+        json!({"kind": "question", "title": "spoof", "summary": "s", "tags": [format!("parent:{}", card["id"])]}),
+    )
+    .unwrap();
+    let shown = run(&mut s, "codex", "show", json!({"id": card["id"]})).unwrap();
+    assert_eq!(shown["follow_ups"].as_array().unwrap().len(), 0);
 }
