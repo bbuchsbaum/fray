@@ -114,6 +114,10 @@ enum Cmd {
         topics: Option<Vec<String>>,
         #[arg(long)]
         role: Option<String>,
+        /// Replace another live session holding this name. Only when that
+        /// session is gone; the displaced session is recorded and visible.
+        #[arg(long)]
+        takeover: bool,
     },
     Leave,
     Heartbeat,
@@ -216,6 +220,9 @@ enum Cmd {
         /// Target a registered agent; '-' clears the target. This is public routing.
         #[arg(long)]
         assignee: Option<String>,
+        /// Resolve despite open objections; the reason is recorded in the thread.
+        #[arg(long, requires = "status")]
+        over_objection: Option<String>,
     },
     /// Append evidence, an objection, an answer, or a note; never overwrite history.
     Annotate {
@@ -640,7 +647,17 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         }
         Cmd::Stop => ("shutdown", json!({})),
         Cmd::Ping => ("ping", json!({})),
-        Cmd::Join { topics, role } => ("join", join_args(role, topics)),
+        Cmd::Join {
+            topics,
+            role,
+            takeover,
+        } => {
+            let mut args = join_args(role, topics);
+            if takeover {
+                args["takeover"] = json!(true);
+            }
+            ("join", args)
+        }
         Cmd::Leave => ("leave", json!({})),
         Cmd::Heartbeat => ("heartbeat", json!({})),
         Cmd::Brief { budget } => ("brief", json!({"budget":budget})),
@@ -750,8 +767,12 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             pinned,
             tags,
             assignee,
+            over_objection,
         } => {
             let mut a = json!({"id":id,"expect":expect});
+            if let Some(reason) = over_objection {
+                a["over_objection"] = json!(reason);
+            }
             for (k, v) in [
                 ("title", title),
                 ("summary", summary),

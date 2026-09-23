@@ -55,6 +55,10 @@ pub struct Request {
     pub key: Option<String>,
     #[serde(default = "empty_object")]
     pub args: Value,
+    /// The host session speaking for `actor` (e.g. `claude:<id>`). Sent only
+    /// to daemons advertising `sessions`; absent means a legacy caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 fn empty_object() -> Value {
     json!({})
@@ -66,7 +70,12 @@ impl Request {
             actor: actor.into(),
             key: None,
             args,
+            session: None,
         }
+    }
+    pub fn with_session(mut self, session: Option<String>) -> Self {
+        self.session = session;
+        self
     }
 }
 pub fn success(data: Value) -> Value {

@@ -107,4 +107,17 @@ CREATE TABLE IF NOT EXISTS presented_items(
     through_seq INTEGER NOT NULL,
     PRIMARY KEY(batch, card_id)
 );
+-- Which host session currently speaks for an agent name. Collision
+-- prevention, not authentication: any caller may assert a session.
+-- One host session may speak for several names (e.g. a worker and a fixture).
+CREATE TABLE IF NOT EXISTS sessions(
+    session TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    started_ms INTEGER NOT NULL,
+    last_seen_ms INTEGER NOT NULL,
+    ended_ms INTEGER,
+    ended_reason TEXT,
+    PRIMARY KEY(session, agent)
+);
+CREATE INDEX IF NOT EXISTS sessions_agent ON sessions(agent, ended_ms, last_seen_ms);
 PRAGMA user_version = 2;
