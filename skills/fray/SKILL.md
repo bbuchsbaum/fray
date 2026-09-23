@@ -129,9 +129,10 @@ of a broadcast does not follow it.
 `fray follow ID` opts in; `fray unfollow ID` removes explicit following, not direct
 routing or current subscriptions. Contributing follows again. Narrowing
 `join --topics` preserves old receipts and reports those outside the new scope.
-`mute ID` suppresses that exact card without ACK; `unmute ID` restores its pending
-head. Linked questions/objections are separate cards and remain visible when the
-parent is muted. `wait --card ID` and `watch --attention --card ID` filter existing
+`mute ID` suppresses that exact card without ACK; `unmute ID` restores eligible
+missed peer updates, without subscribing you. Open questions and objections
+assigned to you cannot be muted; old mutes do not hide later assigned requests.
+Linked questions/objections remain visible when the parent is muted. `wait --card ID` and `watch --attention --card ID` filter existing
 deliveries; use `follow ID` to establish routing if needed.
 
 At natural boundaries, check `fray inbox` only if the host has not supplied fresh

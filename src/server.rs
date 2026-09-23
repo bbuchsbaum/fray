@@ -360,7 +360,10 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     let result = store.execute(&req);
                     if result.is_ok()
                         && (store.highwater()? > before
-                            || matches!(req.op.as_str(), "join" | "leave" | "follow" | "unfollow"))
+                            || matches!(
+                                req.op.as_str(),
+                                "join" | "leave" | "follow" | "unfollow" | "mute" | "unmute"
+                            ))
                     {
                         shared.changed.notify_all();
                     }

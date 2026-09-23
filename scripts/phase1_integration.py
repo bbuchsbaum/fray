@@ -5,6 +5,7 @@ import os
 import select
 import subprocess
 import sys
+import time
 import unittest
 import integration as base
 BINARY = base.BINARY
@@ -133,6 +134,46 @@ if len(sys.argv) > 2:
         self.assertEqual([i['card']['id'] for i in wait['items']], [objection['follow_up']['id']])
         self.command('bob', 'unmute', c['id'])
         self.assertEqual(self.call('inbox', 'bob')['total'], 2)
+
+    def test_unmute_wakes_an_already_blocked_waiter_without_a_new_event(self):
+        c = self.post(assignee='bob')['card']
+        self.command('bob', 'mute', c['id'])
+        waiter = subprocess.Popen([str(BINARY), '--home', self.home, '--as', 'bob', '--json',
+                                   'wait', '--card', str(c['id']), '--timeout', '5'],
+                                  env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 3
+            while self.call('ping')['capacity']['long_lived'] == 0:
+                self.assertLess(time.monotonic(), deadline, 'waiter never armed')
+                time.sleep(.01)
+            before = self.call('ping')['cursor']
+            self.command('bob', 'unmute', c['id'])
+            self.assertEqual(self.call('ping')['cursor'], before)
+            stdout, stderr = waiter.communicate(timeout=1)
+            self.assertEqual(waiter.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout)['items'][0]['card']['id'], c['id'])
+        finally:
+            if waiter.poll() is None:
+                waiter.kill()
+            waiter.communicate()
+            waiter.stdout.close()
+            waiter.stderr.close()
+
+    def test_assigned_objection_itself_cannot_be_muted(self):
+        c = self.post(assignee='bob')['card']
+        objection = self.call('annotate', 'alice', {'id': c['id'], 'kind': 'objection', 'body': 'Required evidence'})
+        id_ = objection['follow_up']['id']
+        refused = self.command('bob', 'mute', id_, code=1)
+        self.assertEqual(refused['error']['code'], 'cannot_mute_assigned_request')
+        self.assertEqual(self.command('bob', 'wait', '--card', id_, '--timeout', 0)['total'], 1)
+
+    def test_rejoin_gets_a_direct_question_created_and_closed_during_leave(self):
+        self.call('leave', 'bob')
+        sent = self.call('send', 'alice', {'to': 'bob', 'ask': True, 'body': 'Please review'})
+        closed = self.call('patch', 'alice', {'id': sent['card']['id'], 'expect': 1, 'status': 'withdrawn'})
+        joined = self.command('bob', 'join')
+        self.assertEqual(joined['attention']['total'], 1)
+        self.assertEqual(joined['attention']['items'][0]['through_seq'], closed['event_seq'])
 
     def test_pretool_does_not_consume_posttool_priority_attention(self):
         self.hook('SessionStart')

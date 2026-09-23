@@ -73,14 +73,16 @@ is public and searchable. A peer who contributes joins the conversation and
 receives subsequent updates even outside its topic subscriptions. `leave` stops
 new deliveries on every route; existing unread receipts remain. Explicit rejoin
 seeds current live heads and catches up previously known conversations, including
-their terminal outcomes.
+their terminal outcomes. Direct requests created and closed during the absence
+are also delivered on rejoin.
 Receipt alone is not participation. `follow ID` opts in; `unfollow ID` removes
 explicit following but does not override direct routing or topic subscriptions.
 Changing `join --topics` preserves old receipts and reports those outside scope.
 `mute ID` suppresses that exact card in attention and future deliveries without
-acknowledging anything; `unmute ID` restores its pending head. Muting survives
-rejoin. A linked objection is a separate card and stays visible when its parent
-is muted.
+acknowledging anything; `unmute ID` restores eligible missed peer updates. It
+does not subscribe an unrelated agent. Muting survives rejoin. Open questions
+and objections assigned to you cannot be muted, and old mutes do not hide later
+assigned requests. A linked objection stays visible when its parent is muted.
 
 `ack` means the agent considered that version. It does not imply agreement or
 completion. A stale acknowledgment cannot consume a newer update. `thread`

@@ -12,6 +12,8 @@ const ACTIVE: &str = "c.status NOT IN ('resolved','superseded','withdrawn')";
 const RELEVANT:&str="(c.pinned=1 OR c.topic='*' OR c.author=? OR c.assignee=? OR c.lease_owner=? OR EXISTS(SELECT 1 FROM agents a WHERE a.name=? AND (a.role='steward' OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=c.id) OR (c.kind IN ('task','question') AND c.assignee IS NULL) OR EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=c.topic OR (t.value='*' AND substr(c.topic,1,1)<>'@')))))";
 // One predicate for selected inboxes, blocking waits, runner packets and progress checks.
 const INVOLVED: &str = "(c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM agents a,json_each(a.topics) t WHERE a.name=?1 AND t.value<>'*' AND t.value=c.topic))";
+// An old mute must not hide a question subsequently assigned to this actor.
+const UNMUTED: &str = "(NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) OR (c.kind='question' AND c.assignee=?1 AND c.status NOT IN ('resolved','superseded','withdrawn')))";
 
 pub fn selection(args: &Value) -> Result<&str> {
     let value = args
@@ -54,9 +56,8 @@ impl<'a> InboxSelection<'a> {
             "1"
         }
         .to_owned();
-        condition.push_str(
-            " AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)",
-        );
+        condition.push_str(" AND ");
+        condition.push_str(UNMUTED);
         if !self.card_ids.is_empty() {
             // Typed integers only: no caller-controlled SQL fragments.
             let ids = self
@@ -498,17 +499,18 @@ fn emit(
         params![seq, serialized],
     )?;
     if notify {
-        // Fan-out and head update commit together. Leave and mute suppress ALL
-        // routes, including authors, assignees, lease owners and participants.
+        // Fan-out and head update commit together. Leave suppresses every route.
+        // Mute suppresses a card unless it is an open request assigned to the recipient.
         conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq)
           SELECT a.name,?1,?2 FROM agents a WHERE a.name<>?3 AND a.enabled=1
-            AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=a.name AND m.card_id=?1) AND (
+            AND (NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=a.name AND m.card_id=?1)
+              OR (?10=1 AND a.name=?7)) AND (
             a.name=?6 OR a.name=?7 OR a.name=?8 OR
             EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=?1) OR
             ?4=1 OR ?5='*' OR ?9=1 OR a.role='steward' OR
               EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=?5 OR (t.value='*' AND substr(?5,1,1)<>'@')))
           ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=excluded.pending_seq",
-          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none()])?;
+          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none(),card.kind=="question" && !card.terminal()])?;
         conn.execute(
             "INSERT OR IGNORE INTO participants(agent,card_id) VALUES(?,?)",
             params![actor, id],
@@ -574,7 +576,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             conn.execute("INSERT INTO agents(name,role,topics,joined_ms,last_seen_ms) VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,topics=excluded.topics,enabled=1,last_seen_ms=excluded.last_seen_ms",params![actor,role,topics,now,now])?;
             // Seed from live heads, never from the historical event stream. On resume,
             // refresh the pending head without changing any explicit acknowledgment.
-            let sql=format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,c.last_seq FROM cards c WHERE ({ACTIVE} OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id)) AND {RELEVANT} AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) AND NOT EXISTS(SELECT 1 FROM events e WHERE e.seq=c.last_seq AND e.actor=?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
+            let sql=format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,c.last_seq FROM cards c WHERE ({ACTIVE} OR c.assignee=?1 OR c.author=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id)) AND {RELEVANT} AND {UNMUTED} AND NOT EXISTS(SELECT 1 FROM events e WHERE e.seq=c.last_seq AND e.actor=?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
             conn.execute(&sql, params![actor, actor, actor, actor, actor, actor])?;
             let mut result = brief(conn, actor, 12000, now)?;
             let retained: i64 = conn.query_row(&format!("SELECT count(*) FROM deliveries d JOIN cards c ON c.id=d.card_id WHERE d.agent=? AND d.pending_seq>d.ack_seq AND NOT coalesce({RELEVANT},0)"), params![actor,actor,actor,actor,actor], |r| r.get(0))?;
@@ -586,18 +588,28 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let id = integer(a, "id")?;
             let card = get_card(conn, id)?;
             if req.op == "mute" {
+                if card.kind == "question"
+                    && !card.terminal()
+                    && card.assignee.as_deref() == Some(actor)
+                {
+                    return Err(Error::new("cannot_mute_assigned_request", "an open question or objection assigned to you cannot be muted; resolve it or arrange a handoff"));
+                }
                 conn.execute(
                     "INSERT OR IGNORE INTO muted_cards(agent,card_id) VALUES(?,?)",
                     params![actor, id],
                 )?;
             } else {
-                conn.execute(
+                let removed = conn.execute(
                     "DELETE FROM muted_cards WHERE agent=? AND card_id=?",
                     params![actor, id],
                 )?;
-                // Catch up explicitly, including a terminal update missed while
-                // muted. Never manufacture a receipt for the caller's own event.
-                conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM events WHERE seq=?3 AND actor=?1) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)", params![actor,id,card.last_seq])?;
+                if removed > 0 {
+                    // Unmute restores eligible routing; it is not an implicit
+                    // follow. Retain missed peer updates even if the actor wrote
+                    // the latest event, without manufacturing an own-event receipt.
+                    let sql = format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR {RELEVANT}) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
+                    conn.execute(&sql, params![actor, id, actor, actor, actor, actor])?;
+                }
             }
             Ok(json!({"id":id,"muted":req.op=="mute","read_is_not_ack":true}))
         }

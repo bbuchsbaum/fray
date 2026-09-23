@@ -111,7 +111,12 @@ fn card_filter_rejects_empty_overlong_and_nonpositive_values() {
 #[test]
 fn mute_retains_receipts_survives_rejoin_and_does_not_hide_a_direct_objection() {
     let mut s = board();
-    let a = send(&mut s, "Review A");
+    let a = call(
+        &mut s,
+        "author",
+        "send",
+        json!({"to":"reviewer","body":"Review A"}),
+    );
     let id = a["card"]["id"].clone();
     call(&mut s, "reviewer", "mute", json!({"id":id}));
     assert_eq!(call(&mut s, "reviewer", "inbox", json!({}))["total"], 0);
@@ -234,4 +239,144 @@ fn readiness_warning_with_maximum_identity_fits_the_minimum_brief_budget() {
     assert_eq!(brief["idle_readiness"]["open_requests_awaiting_others"], 1);
     assert_eq!(brief["idle_readiness"]["details_omitted"], true);
     assert_eq!(brief["budget_truncated"], true);
+}
+
+#[test]
+fn direct_request_created_and_closed_while_away_is_delivered_on_rejoin() {
+    let mut s = board();
+    call(&mut s, "reviewer", "leave", json!({}));
+    let request = send(&mut s, "Never mind this review");
+    let closed = call(
+        &mut s,
+        "author",
+        "patch",
+        json!({"id":request["card"]["id"],"expect":1,"status":"withdrawn"}),
+    );
+    let shown = call(
+        &mut s,
+        "author",
+        "show",
+        json!({"id":request["card"]["id"],"receipts":true}),
+    );
+    assert!(shown["receipts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["agent"] != "reviewer"));
+    let joined = call(&mut s, "reviewer", "join", json!({}));
+    assert_eq!(joined["attention"]["total"], 1);
+    assert_eq!(
+        joined["attention"]["items"][0]["through_seq"],
+        closed["event_seq"]
+    );
+    assert_eq!(
+        joined["attention"]["items"][0]["card"]["status"],
+        "withdrawn"
+    );
+    assert_eq!(
+        call(&mut s, "newcomer", "join", json!({}))["attention"]["total"],
+        0
+    );
+}
+
+#[test]
+fn assigned_open_questions_and_objection_children_cannot_be_muted() {
+    let mut s = board();
+    let request = send(&mut s, "Review request");
+    let objection = call(
+        &mut s,
+        "author",
+        "annotate",
+        json!({"id":request["card"]["id"],"kind":"objection","body":"Missing proof"}),
+    );
+    for id in [
+        request["card"]["id"].clone(),
+        objection["follow_up"]["id"].clone(),
+    ] {
+        let error = s
+            .execute_at(&Request::new("mute", "reviewer", json!({"id":id})), NOW)
+            .unwrap_err();
+        assert_eq!(error.code, "cannot_mute_assigned_request");
+        let page = call(
+            &mut s,
+            "reviewer",
+            "inbox",
+            json!({"card_ids":[id],"addressed_to_me":true,"unresolved":true}),
+        );
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["items"][0]["ack_seq"], 0);
+    }
+}
+
+#[test]
+fn a_prior_mute_cannot_hide_a_later_assigned_question() {
+    let mut s = board();
+    let note = call(
+        &mut s,
+        "author",
+        "send",
+        json!({"to":"reviewer","body":"Ordinary thread"}),
+    );
+    let id = note["card"]["id"].clone();
+    call(&mut s, "other", "mute", json!({"id":id}));
+    let assigned = call(
+        &mut s,
+        "author",
+        "patch",
+        json!({"id":id,"expect":1,"kind":"question","assignee":"other","priority":0}),
+    );
+    let args =
+        json!({"selection":"involved","card_ids":[id],"addressed_to_me":true,"unresolved":true});
+    let packet = s
+        .wake_packet(
+            "other",
+            &Options::parse(&args).unwrap(),
+            &HashMap::new(),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        packet["items"][0]["receipt"]["through_seq"],
+        assigned["event_seq"]
+    );
+    assert_eq!(
+        call(&mut s, "other", "join", json!({}))["attention"]["total"],
+        1
+    );
+}
+
+#[test]
+fn unmute_does_not_subscribe_but_recovers_missed_peers_before_ones_own_reply() {
+    let mut s = board();
+    let note = call(
+        &mut s,
+        "author",
+        "send",
+        json!({"to":"reviewer","body":"Ordinary thread"}),
+    );
+    let id = note["card"]["id"].clone();
+    call(&mut s, "other", "unmute", json!({"id":id}));
+    call(&mut s, "other", "mute", json!({"id":id}));
+    call(&mut s, "other", "unmute", json!({"id":id}));
+    assert_eq!(
+        call(&mut s, "other", "inbox", json!({"selection":"all"}))["total"],
+        0
+    );
+    call(&mut s, "reviewer", "mute", json!({"id":id}));
+    let peer = call(
+        &mut s,
+        "author",
+        "annotate",
+        json!({"id":id,"body":"Missed peer evidence"}),
+    );
+    call(
+        &mut s,
+        "reviewer",
+        "annotate",
+        json!({"id":id,"body":"My later note"}),
+    );
+    call(&mut s, "reviewer", "unmute", json!({"id":id}));
+    let page = call(&mut s, "reviewer", "inbox", json!({}));
+    assert_eq!(page["items"][0]["through_seq"], peer["event_seq"]);
+    assert_eq!(page["items"][0]["ack_seq"], 0);
 }

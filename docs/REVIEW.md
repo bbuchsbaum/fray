@@ -20,7 +20,11 @@ PostToolUse exposure ordering, hook-after-leave, Stop recursion, and activation
 expiry. An initial IPC regression exposed `not_joined` after leave; the hook now
 returns quietly and does not rejoin. A maximum-length identity also exposed a
 brief-budget overflow; optional readiness detail now shrinks without losing the
-warning or arm command, with a regression. All final checks pass; see VALIDATION.md.
+warning or arm command, with a regression. Cross-review #17/#18 added direct
+terminal catch-up and protection of assigned questions from mute, including later
+reassignments. Unmute now restores eligible missed peer events without implicit
+subscription and wakes blocked consumers even without a new event. All final
+checks pass; see VALIDATION.md.
 Landing still requires Claude's approval at the exact candidate SHA. No shared
 daemon restart, global installation, external publication or paid host launch is
 part of this lane.

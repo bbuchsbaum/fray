@@ -3,16 +3,16 @@
 ## Phase 1 client and attention candidate (2026-09-23)
 
 At source manifest
-`28f4c5de5a65b49fe9246f9149d92767faa159736f9a3cb09459dbd44b1286b2`,
-formatting, locked check, strict Clippy, **131 Rust tests** and locked build pass.
-A frozen binary (`5be756aa1cf644410cc435ced072045908625a73cb944960ca7ca1c43464fe61`)
-passes **73 IPC tests**: 10 new Phase 1, 32 legacy, 24 attention and 7 reliability.
-Python resource warnings are errors. SQL validation prepares 76 static statements
+`cfb75235bc6fd90e3885e194cd8f6b744f82500a6f5d0bb801abef02eaa94b64`,
+formatting, locked check, strict Clippy, **135 Rust tests** and locked build pass.
+A frozen binary (`4ef98a5df9147dd2a58079de54b87f33f2a5a14e1d40e2656ced88d16d80d936`)
+passes **76 IPC tests**: 13 new Phase 1, 32 legacy, 24 attention and 7 reliability.
+Python resource warnings are errors. SQL validation prepares 75 static statements
 and passes 22 checks; bundled skill and Claude plugin validation pass.
 
-Evidence is `/tmp/fray-phase1-candidate-v2/` (frozen binary, 46-file source manifest,
-IPC logs and exit metadata), `/tmp/fray-phase1-cargo-v2.log`, and
-`/tmp/fray-phase1-sql-final.log`. The manifest includes source, tests, scripts,
+Evidence is `/tmp/fray-phase1-candidate-v4/` (frozen binary, 46-file source manifest,
+IPC logs and exit metadata), `/tmp/fray-phase1-cargo-v4.log`, and
+`/tmp/fray-phase1-sql-v4-fixed.log`. The manifest includes source, tests, scripts,
 integrations and bundled skills. Validation documentation itself is excluded.
 
 The new cases establish host-neutral precedence and stable identity across fresh
@@ -27,6 +27,21 @@ found the first candidate returned 2,042 bytes for a 2,000-byte brief with an
 80-character actor name. The corrected candidate adds a regression and drops
 optional readiness detail after exhausting rows, retaining the warning and arm
 command. All Cargo and IPC gates above were rerun on that correction.
+
+Cross-review on Fray #13 found two further blockers: a direct question created
+and closed while the recipient was away did not return on rejoin (#17), and the
+assigned objection card itself could be muted (#18). Rejoin now covers terminal
+direct routes; active assigned questions cannot be muted, and previous mutes are
+ignored if a card later becomes an assigned question. Bare unmute no longer
+creates an unrelated receipt, and catch-up includes missed peer events preceding
+a later own reply. Store and CLI regressions cover these cases.
+
+An additional IPC regression failed against the v2 frozen binary because unmute
+did not notify an already blocked waiter when no event sequence changed. The
+server now signals mute/unmute selection changes under the existing lock. The
+regression arms the waiter first and requires the restored receipt within one
+second. Its failing evidence is `/tmp/fray-phase1-unmute-baseline.log`; it passes
+in the final Phase 1 IPC log. All Cargo/IPC results above cover these review fixes.
 
 These are local macOS tests with synthetic host payloads and ordinary Python
 children. New native host hook installation, automatic idle wake across every
