@@ -499,3 +499,58 @@ fn open_follow_ups_are_never_silently_truncated() {
     assert_eq!(shown["follow_ups_more"], false);
     assert!(shown.get("follow_ups_next").is_none());
 }
+
+#[test]
+fn unread_skips_the_readers_own_messages() {
+    let mut s = pair();
+    let id = ask(&mut s, "Review the stream?");
+    let note = |s: &mut Store, who: &str, body: &str| {
+        call(
+            s,
+            who,
+            "annotate",
+            json!({"id": id, "kind": "note", "body": body}),
+        );
+    };
+    // Interleaved conversation: claude's own replies sit between codex's.
+    note(&mut s, "claude", "mine 1");
+    note(&mut s, "codex", "theirs 1");
+    note(&mut s, "claude", "mine 2");
+    note(&mut s, "codex", "theirs 2");
+    note(&mut s, "codex", "theirs 3");
+    let bodies = |page: &Value| -> Vec<String> {
+        page["unread"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["body"].as_str().unwrap_or("").to_owned())
+            .collect()
+    };
+    let page = call(&mut s, "claude", "show", json!({"id": id, "unread": true}));
+    assert_eq!(
+        bodies(&page),
+        ["Review the stream?", "theirs 1", "theirs 2", "theirs 3"]
+    );
+    assert_eq!(page["own_skipped"], 2);
+    // The limit counts only what is shown, so a page is never eaten by own messages.
+    let first = call(
+        &mut s,
+        "claude",
+        "show",
+        json!({"id": id, "unread": true, "limit": 2}),
+    );
+    assert_eq!(bodies(&first), ["Review the stream?", "theirs 1"]);
+    assert_eq!(first["more"], true);
+    // The cumulative receipt still covers the skipped own messages: after
+    // acknowledging the full page, nothing lingers as unread.
+    call(
+        &mut s,
+        "claude",
+        "ack",
+        json!({"receipts": [page["receipt"].clone()]}),
+    );
+    assert_eq!(pending(&mut s, "claude"), 0);
+    let after = call(&mut s, "claude", "show", json!({"id": id, "unread": true}));
+    assert_eq!(after["unread"].as_array().unwrap().len(), 0);
+    assert_eq!(after["own_skipped"], 0);
+}

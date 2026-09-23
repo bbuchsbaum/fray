@@ -11,7 +11,7 @@ mod driver;
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("FRAY_BUILD"), ")"),
     about = "Live, state-first coordination for local coding agents"
 )]
 struct Cli {
@@ -1064,6 +1064,11 @@ fn unread_text(v: &Value) -> String {
     let events = v["unread"].as_array().cloned().unwrap_or_default();
     if events.is_empty() {
         out.push_str("(nothing unread)\n");
+    }
+    if let Some(own) = v["own_skipped"].as_i64().filter(|n| *n > 0) {
+        out.push_str(&format!(
+            "({own} of your own message(s) in this range skipped; see thread --bodies)\n"
+        ));
     }
     for event in &events {
         let kind = event["kind"]
