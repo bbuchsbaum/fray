@@ -126,4 +126,23 @@ CREATE TABLE IF NOT EXISTS sessions(
     PRIMARY KEY(session, agent)
 );
 CREATE INDEX IF NOT EXISTS sessions_agent ON sessions(agent, ended_ms, last_seen_ms);
+-- Declared lanes: who is working on which paths. Advisory, never a lock.
+CREATE TABLE IF NOT EXISTS lanes(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    paths TEXT NOT NULL CHECK(json_valid(paths)),
+    purpose TEXT NOT NULL,
+    card_id INTEGER,
+    state TEXT NOT NULL CHECK(state IN ('held','queued')),
+    created_ms INTEGER NOT NULL,
+    released_ms INTEGER,
+    released_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS lanes_live ON lanes(released_ms, agent);
+-- One current status line per agent, updated in place.
+CREATE TABLE IF NOT EXISTS agent_status(
+    agent TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
 PRAGMA user_version = 2;

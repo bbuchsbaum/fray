@@ -355,6 +355,25 @@ enum Cmd {
         #[arg(short = 'p', long, default_value_t = 1)]
         priority: i64,
     },
+    /// Declare, release or list lanes: which paths each agent is working on.
+    /// Advisory, never a lock.
+    Lane {
+        #[command(subcommand)]
+        action: LaneCmd,
+    },
+    /// Set your one current status line (empty clears it).
+    Status {
+        text: String,
+    },
+    /// Before editing or committing: who else declared or is actually
+    /// editing these paths (declared lanes plus every worktree's git status).
+    Preflight {
+        /// Paths to check; default: your worktree's modified files.
+        paths: Vec<String>,
+        /// Check the files staged for commit.
+        #[arg(long, conflicts_with = "paths")]
+        staged: bool,
+    },
     /// Read-only listening diagnosis: daemon capabilities, listener state and
     /// pending attention. Never acknowledges or records a presentation.
     Doctor,
@@ -410,6 +429,33 @@ enum Cmd {
     Rpc {
         request: String,
     },
+}
+
+#[derive(Subcommand)]
+enum LaneCmd {
+    /// Take a lane on paths (a trailing / means a whole directory).
+    Take {
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(long)]
+        purpose: String,
+        /// The card this work belongs to.
+        #[arg(long = "for")]
+        card: Option<i64>,
+        /// If held by someone else, queue to be notified when it frees.
+        #[arg(long)]
+        queue: bool,
+    },
+    /// Release a lane, or hand it to another agent.
+    Release {
+        id: i64,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// List live lanes (stale ones are marked).
+    List,
 }
 
 #[derive(Subcommand)]
@@ -540,6 +586,107 @@ impl std::str::FromStr for WaitTimeout {
             .ok_or_else(|| "timeout must be none or 0..86400 seconds".into())
     }
 }
+fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
+    Process::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Paths from `git status --porcelain` lines (renames keep the new path).
+fn porcelain_paths(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .filter(|l| l.len() > 3)
+        .map(|l| {
+            let path = &l[3..];
+            path.rsplit(" -> ")
+                .next()
+                .unwrap_or(path)
+                .trim_matches('"')
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Declared lanes plus observed edits in every other worktree of this repo.
+fn preflight(home: &Path, actor: &str, mut paths: Vec<String>, staged: bool) -> Result<Value> {
+    let here = std::env::current_dir()?;
+    let top = git_lines(&here, &["rev-parse", "--show-toplevel"])
+        .pop()
+        .map(PathBuf::from)
+        .unwrap_or(here.clone());
+    if staged {
+        paths = git_lines(&top, &["diff", "--cached", "--name-only"]);
+    } else if paths.is_empty() {
+        paths = porcelain_paths(git_lines(
+            &top,
+            &["status", "--porcelain", "--untracked-files=no"],
+        ));
+    }
+    let overlaps = |theirs: &str| {
+        paths
+            .iter()
+            .any(|mine| fray::store::paths_overlap(theirs, mine))
+    };
+    let declared: Vec<Value> = send(home, actor, "lanes", json!({"paths":paths}), None, 10)?
+        ["lanes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l["agent"] != actor)
+        .collect();
+    // Observed: what other worktrees have actually modified, declared or not.
+    let mut observed = Vec::new();
+    let mut worktree: Option<PathBuf> = None;
+    let mut branch = String::new();
+    let mut entries = git_lines(&top, &["worktree", "list", "--porcelain"]);
+    entries.push(String::new());
+    for line in entries {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            worktree = Some(PathBuf::from(path));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            branch = b.trim_start_matches("refs/heads/").to_owned();
+        } else if line.is_empty() {
+            if let Some(wt) = worktree.take() {
+                let same = fs_same(&wt, &top);
+                if !same {
+                    let touched: Vec<String> = porcelain_paths(git_lines(
+                        &wt,
+                        &["status", "--porcelain", "--untracked-files=no"],
+                    ))
+                    .into_iter()
+                    .filter(|p| overlaps(p))
+                    .collect();
+                    if !touched.is_empty() {
+                        observed.push(json!({"worktree":wt,"branch":branch,"paths":touched}));
+                    }
+                }
+            }
+            branch.clear();
+        }
+    }
+    let clear = declared.is_empty() && observed.is_empty();
+    Ok(json!({"paths":paths,"declared":declared,"observed":observed,"clear":clear}))
+}
+
+fn fs_same(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Owner commands need a person at an interactive terminal. Agent tool shells
 /// are not terminals, so ordinary tool calls cannot act as the owner. This
 /// prevents accidents and injected instructions; it is not authentication.
@@ -716,6 +863,9 @@ fn send(
             | "present"
             | "owner_decide"
             | "owner_answer"
+            | "lane_take"
+            | "lane_release"
+            | "set_status"
             | "follow"
             | "unfollow"
             | "mute"
@@ -1122,6 +1272,35 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 "send",
                 json!({"to":fray::store::OWNER,"body":message_body(body,body_file)?,"ask":true,"pending":true,"priority":priority,"refs":refs}),
             )
+        }
+        Cmd::Lane { action } => match action {
+            LaneCmd::Take {
+                paths,
+                purpose,
+                card,
+                queue,
+            } => {
+                let mut args = json!({"paths":paths,"purpose":purpose,"queue":queue});
+                if let Some(card) = card {
+                    args["card"] = json!(card);
+                }
+                ("lane_take", args)
+            }
+            LaneCmd::Release { id, to, reason } => {
+                let mut args = json!({"id":id});
+                if let Some(to) = to {
+                    args["to"] = json!(to);
+                }
+                if let Some(reason) = reason {
+                    args["reason"] = json!(reason);
+                }
+                ("lane_release", args)
+            }
+            LaneCmd::List => ("lanes", json!({})),
+        },
+        Cmd::Status { text } => ("set_status", json!({"text":text})),
+        Cmd::Preflight { paths, staged } => {
+            return Ok(Some(preflight(&home, &actor, paths, staged)?));
         }
         Cmd::Owner { action } => {
             owner_terminal()?;

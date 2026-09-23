@@ -316,6 +316,9 @@ impl Store {
                 | "controller"
                 | "owner_decide"
                 | "owner_answer"
+                | "lane_take"
+                | "lane_release"
+                | "set_status"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -1331,6 +1334,162 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             result["verdict"] = json!(verdict);
             Ok(result)
         }
+        "lane_take" => {
+            // Declare the paths you are working on. Advisory, never a lock:
+            // overlapping another agent's held lane is refused unless you
+            // queue behind it, which only orders notifications.
+            check_fields(a, &["paths", "purpose", "card", "queue"])?;
+            let paths: Vec<String> = a["paths"]
+                .as_array()
+                .filter(|p| !p.is_empty() && p.len() <= 32)
+                .ok_or_else(|| Error::invalid("paths must be 1..32 strings"))?
+                .iter()
+                .map(|p| {
+                    p.as_str()
+                        .ok_or_else(|| Error::invalid("paths must be strings"))
+                        .and_then(|p| lane_path(p).map(|_| p.to_owned()))
+                })
+                .collect::<Result<_>>()?;
+            let purpose = string(a, "purpose")?;
+            text(purpose, "purpose", 200, false)?;
+            let card = a.get("card").map(|_| integer(a, "card")).transpose()?;
+            if let Some(card) = card {
+                get_card(conn, card)?;
+            }
+            let queue = boolean(a, "queue", false)?;
+            let conflicts = lane_conflicts(&live_lanes(conn, now)?, actor, &paths);
+            if !conflicts.is_empty() && !queue {
+                let holders: Vec<String> = conflicts
+                    .iter()
+                    .map(|l| {
+                        format!(
+                            "{} (lane {}{})",
+                            l["agent"].as_str().unwrap_or(""),
+                            l["id"],
+                            if l["stale"] == true { ", stale" } else { "" }
+                        )
+                    })
+                    .collect();
+                return Err(Error::new(
+                    "lane_busy",
+                    format!("overlaps lane(s) held by {}; ask them, or take it with --queue to be notified when it frees", holders.join(", ")),
+                ));
+            }
+            let state = if conflicts.is_empty() {
+                "held"
+            } else {
+                "queued"
+            };
+            conn.execute(
+                "INSERT INTO lanes(agent,paths,purpose,card_id,state,created_ms) VALUES(?,?,?,?,?,?)",
+                params![actor, serde_json::to_string(&paths)?, purpose, card, state, now],
+            )?;
+            let id = conn.last_insert_rowid();
+            Ok(
+                json!({"lane":{"id":id,"agent":actor,"paths":paths,"purpose":purpose,"card":card,"state":state},"waiting_on":conflicts}),
+            )
+        }
+        "lane_release" => {
+            // Release (or hand over) a lane. The next queued lane that no
+            // longer conflicts is promoted, and its agent is told.
+            check_fields(a, &["id", "to", "reason"])?;
+            let id = integer(a, "id")?;
+            let lanes = live_lanes(conn, now)?;
+            let lane = lanes
+                .iter()
+                .find(|l| l["id"] == id)
+                .ok_or_else(|| Error::new("not_found", format!("no live lane {id}")))?
+                .clone();
+            let holder = lane["agent"].as_str().unwrap_or("").to_owned();
+            if holder != actor && lane["stale"] != true {
+                return Err(Error::new(
+                    "lane_not_yours",
+                    format!("lane {id} is held by {holder}, who is still present; ask them to release it"),
+                ));
+            }
+            let to = a.get("to").map(|_| string(a, "to")).transpose()?;
+            let reason = match (&to, holder == actor) {
+                (Some(to), _) => format!("handed to {to}"),
+                (None, true) => a
+                    .get("reason")
+                    .map(|_| string(a, "reason"))
+                    .transpose()?
+                    .unwrap_or("released")
+                    .to_owned(),
+                (None, false) => format!("stale; released by {actor}"),
+            };
+            text(&reason, "reason", 200, false)?;
+            conn.execute(
+                "UPDATE lanes SET released_ms=?,released_reason=? WHERE id=?",
+                params![now, reason, id],
+            )?;
+            let paths: Vec<String> = serde_json::from_value(lane["paths"].clone())?;
+            let mut handed = Value::Null;
+            if let Some(to) = to {
+                assignee_known(conn, &Some(to.to_owned()))?;
+                conn.execute(
+                    "INSERT INTO lanes(agent,paths,purpose,card_id,state,created_ms) VALUES(?,?,?,?,'held',?)",
+                    params![to, serde_json::to_string(&paths)?, lane["purpose"].as_str().unwrap_or(""), lane["card"].as_i64(), now],
+                )?;
+                handed = json!(conn.last_insert_rowid());
+                lane_notice(
+                    conn,
+                    actor,
+                    to,
+                    "Lane handed to you",
+                    &format!(
+                        "{actor} handed you lane {id}: {} ({}).",
+                        paths.join(", "),
+                        lane["purpose"].as_str().unwrap_or("")
+                    ),
+                    now,
+                )?;
+            }
+            // Promote queued lanes, oldest first, once nothing held blocks them.
+            let mut promoted = Vec::new();
+            for queued in live_lanes(conn, now)?
+                .iter()
+                .filter(|l| l["state"] == "queued")
+            {
+                let agent = queued["agent"].as_str().unwrap_or("").to_owned();
+                let qpaths: Vec<String> = serde_json::from_value(queued["paths"].clone())?;
+                if lane_conflicts(&live_lanes(conn, now)?, &agent, &qpaths).is_empty() {
+                    conn.execute(
+                        "UPDATE lanes SET state='held' WHERE id=?",
+                        [queued["id"].as_i64()],
+                    )?;
+                    lane_notice(
+                        conn,
+                        actor,
+                        &agent,
+                        "Your queued lane is free",
+                        &format!(
+                            "Lane {} ({}) is now held by you.",
+                            queued["id"],
+                            qpaths.join(", ")
+                        ),
+                        now,
+                    )?;
+                    promoted.push(queued["id"].clone());
+                }
+            }
+            Ok(json!({"released":id,"reason":reason,"handed_to_lane":handed,"promoted":promoted}))
+        }
+        "set_status" => {
+            // One current status line per agent, updated in place; empty clears.
+            check_fields(a, &["text"])?;
+            let status = string(a, "text")?;
+            text(status, "status", 200, true)?;
+            if status.trim().is_empty() {
+                conn.execute("DELETE FROM agent_status WHERE agent=?", [actor])?;
+            } else {
+                conn.execute(
+                    "INSERT INTO agent_status(agent,text,updated_ms) VALUES(?,?,?) ON CONFLICT(agent) DO UPDATE SET text=excluded.text,updated_ms=excluded.updated_ms",
+                    params![actor, status, now],
+                )?;
+            }
+            Ok(json!({"agent":actor,"status":status}))
+        }
         "present" => {
             // Records exactly what a CLI showed. Presentation is exposure, never ACK.
             check_fields(a, &["source", "receipts"])?;
@@ -1458,7 +1617,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1686,6 +1845,30 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             Ok(
                 json!({"items":items.into_iter().take(limit as usize).collect::<Vec<_>>(),"more":more,"next_offset":offset+limit,"cursor":highwater(conn)?,"warning":"Historical text may be superseded. Use show for the current head."}),
             )
+        }
+        "lanes" => {
+            check_fields(a, &["paths"])?;
+            let lanes = live_lanes(conn, now)?;
+            // With paths: only lanes that could touch them (preflight).
+            let lanes = match a.get("paths").and_then(Value::as_array) {
+                Some(paths) => {
+                    let paths: Vec<String> = paths
+                        .iter()
+                        .filter_map(|p| p.as_str().map(str::to_owned))
+                        .collect();
+                    lanes
+                        .into_iter()
+                        .filter(|l| {
+                            l["paths"].as_array().into_iter().flatten().any(|h| {
+                                h.as_str()
+                                    .is_some_and(|h| paths.iter().any(|p| paths_overlap(h, p)))
+                            })
+                        })
+                        .collect()
+                }
+                None => lanes,
+            };
+            Ok(json!({"lanes":lanes}))
         }
         "agents" => {
             check_fields(a, &["limit"])?;
@@ -1930,6 +2113,146 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
         )
         .optional()?;
     Ok(json!({"bound":bound,"recent_takeover":takeover}))
+}
+
+/// A lane path: repo-relative, no `..`, printable ASCII without spaces. A
+/// trailing `/`, `/*` or `/**` means the whole directory.
+fn lane_path(p: &str) -> Result<(String, bool)> {
+    if p.is_empty()
+        || p.len() > 200
+        || p.starts_with('/')
+        || p.split('/').any(|seg| seg == "..")
+        || !p.chars().all(|c| c.is_ascii_graphic())
+    {
+        return Err(Error::invalid(format!(
+            "lane path {p:?}: repo-relative, no .., 1..200 printable characters"
+        )));
+    }
+    for suffix in ["/**", "/*", "/"] {
+        if let Some(dir) = p.strip_suffix(suffix) {
+            return Ok((format!("{dir}/"), true));
+        }
+    }
+    Ok((p.to_owned(), false))
+}
+
+/// Whether two lane paths could touch the same file.
+pub fn paths_overlap(a: &str, b: &str) -> bool {
+    let (Ok((a, a_dir)), Ok((b, b_dir))) = (lane_path(a), lane_path(b)) else {
+        return false;
+    };
+    match (a_dir, b_dir) {
+        (false, false) => a == b,
+        (true, false) => b.starts_with(&a),
+        (false, true) => a.starts_with(&b),
+        (true, true) => a.starts_with(&b) || b.starts_with(&a),
+    }
+}
+
+/// Whether an agent is still present: a live session binding, or recent
+/// activity for session-less callers.
+fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+    let seen: Option<i64> = conn
+        .query_row(
+            "SELECT max(last_seen_ms) FROM (SELECT last_seen_ms FROM sessions WHERE agent=?1 AND ended_ms IS NULL UNION ALL SELECT last_seen_ms FROM agents WHERE name=?1 AND enabled=1)",
+            [agent],
+            |r| r.get(0),
+        )?;
+    Ok(seen.is_some_and(|seen| now - seen < IDENTITY_TTL_MS))
+}
+
+/// Live (unreleased) lanes, with a stale flag for holders no longer present.
+fn live_lanes(conn: &Connection, now: i64) -> Result<Vec<Value>> {
+    let mut s = conn.prepare(
+        "SELECT id,agent,paths,purpose,card_id,state,created_ms FROM lanes WHERE released_ms IS NULL ORDER BY id",
+    )?;
+    let rows = s
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::new();
+    for (id, agent, paths, purpose, card, state, created) in rows {
+        let stale = !agent_live(conn, &agent, now)?;
+        out.push(json!({"id":id,"agent":agent,"paths":serde_json::from_str::<Value>(&paths)?,"purpose":purpose,"card":card,"state":state,"created_ms":created,"stale":stale}));
+    }
+    Ok(out)
+}
+
+fn lane_conflicts(lanes: &[Value], actor: &str, paths: &[String]) -> Vec<Value> {
+    lanes
+        .iter()
+        .filter(|l| l["agent"] != actor && l["state"] == "held")
+        .filter(|l| {
+            l["paths"].as_array().into_iter().flatten().any(|held| {
+                held.as_str()
+                    .is_some_and(|held| paths.iter().any(|p| paths_overlap(held, p)))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Tell an agent something about its lane, as an addressed note.
+fn lane_notice(
+    conn: &Connection,
+    actor: &str,
+    to: &str,
+    title: &str,
+    text: &str,
+    now: i64,
+) -> Result<()> {
+    if to == actor {
+        return Ok(());
+    }
+    create_card(
+        conn,
+        actor,
+        &json!({"kind":"note","topic":format!("@{to}"),"title":title,"summary":text,"assignee":to,"tags":["lane"]}),
+        json!({"body":text}),
+        now,
+    )?;
+    Ok(())
+}
+
+fn agent_status_text(conn: &Connection, agent: &str) -> Result<Value> {
+    Ok(conn
+        .query_row(
+            "SELECT text,updated_ms FROM agent_status WHERE agent=?",
+            [agent],
+            |r| Ok(json!({"text":r.get::<_,String>(0)?,"updated_ms":r.get::<_,i64>(1)?})),
+        )
+        .optional()?
+        .unwrap_or(Value::Null))
+}
+
+/// Paths of an agent's held lanes, for the roster ("who's where").
+fn held_lane_paths(conn: &Connection, agent: &str) -> Result<Vec<Value>> {
+    let mut s = conn.prepare(
+        "SELECT id,paths,purpose FROM lanes WHERE agent=? AND state='held' AND released_ms IS NULL ORDER BY id",
+    )?;
+    let rows = s
+        .query_map([agent], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(id, paths, purpose)| {
+            Ok(json!({"id":id,"paths":serde_json::from_str::<Value>(&paths)?,"purpose":purpose}))
+        })
+        .collect()
 }
 
 const BATCH_TTL_MS: i64 = 86_400_000;
@@ -2297,7 +2620,7 @@ fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?}));
     }
     Ok(json!({"items":items,"more":more}))
 }
