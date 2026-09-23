@@ -1289,12 +1289,28 @@ fn human(v: &Value, out: &mut String) {
                 ));
                 if let Some(notes) = item["annotations"].as_array() {
                     for n in notes {
-                        out.push_str(&format!(
-                            "      @{} {}: {}\n",
-                            n["seq"],
-                            clean(n["kind"].as_str().unwrap_or("note")),
-                            clean(n["excerpt"].as_str().unwrap_or(""))
-                        ));
+                        let text = n["excerpt"].as_str().unwrap_or("");
+                        if n["full"] == true {
+                            // Addressed to you: the whole message, layout kept.
+                            out.push_str(&format!(
+                                "      @{} {} {} (full):\n",
+                                n["seq"],
+                                clean(n["actor"].as_str().unwrap_or("")),
+                                clean(n["kind"].as_str().unwrap_or("note"))
+                            ));
+                            for line in text.lines() {
+                                out.push_str("        ");
+                                out.push_str(&clean(line));
+                                out.push('\n');
+                            }
+                        } else {
+                            out.push_str(&format!(
+                                "      @{} {}: {}\n",
+                                n["seq"],
+                                clean(n["kind"].as_str().unwrap_or("note")),
+                                clean(text)
+                            ));
+                        }
                     }
                 }
             } else if item.get("rev").is_some() {

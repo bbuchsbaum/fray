@@ -1849,6 +1849,9 @@ fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Resul
         .collect::<rusqlite::Result<Vec<_>>>()?;
     raw.into_iter().map(|(seq,ts,actor,op,id,payload)|Ok(json!({"seq":seq,"ts_ms":ts,"actor":actor,"op":op,"card_id":id,"payload":serde_json::from_str::<Value>(&payload)?}))).collect()
 }
+/// Bytes of full message text one inbox page may carry for addressed items.
+const ADDRESSED_FULL_TEXT_BUDGET: usize = 16_000;
+
 fn inbox(
     conn: &Connection,
     actor: &str,
@@ -1882,19 +1885,51 @@ fn inbox(
         conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
             r.get(0)
         })?;
+    // Full text for what is addressed to you (assigned to you, or replies to
+    // your own request), within a page-wide budget; broadcasts keep previews.
+    let mut full_budget = ADDRESSED_FULL_TEXT_BUDGET;
     for (id, pending, ack) in rows {
         let card = get_card(conn, id)?;
+        let addressed = card.assignee.as_deref() == Some(actor) || card.author == actor;
         let count: i64 = conn.query_row(
             "SELECT count(*) FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=?",
             params![id, ack, pending],
             |r| r.get(0),
         )?;
         let mut s=conn.prepare("SELECT seq,actor,json_extract(payload,'$.detail.kind'),json_extract(payload,'$.detail.body'),json_extract(payload,'$.detail.follow_up_id') FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=? ORDER BY seq DESC LIMIT 2")?;
-        let annotations=s.query_map(params![id,ack,pending],|r|{
-            let body:String=r.get(3)?;
-            Ok(json!({"seq":r.get::<_,i64>(0)?,"actor":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"excerpt":clip(&body,200),"excerpt_truncated":body.chars().count()>200,"follow_up_id":r.get::<_,Option<i64>>(4)?}))
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
-        items.push(json!({"card":card.compact(now),"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
+        let raw = s
+            .query_map(params![id, ack, pending], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut compact = card.compact(now);
+        let mut full = false;
+        if addressed && card.summary.len() <= full_budget {
+            full_budget -= card.summary.len();
+            compact["summary"] = json!(card.summary);
+            compact["summary_truncated"] = json!(false);
+            full = true;
+        }
+        let mut annotations = Vec::new();
+        for (seq, who, kind, body, follow_up) in raw {
+            let whole = addressed && body.len() <= full_budget;
+            if whole {
+                full_budget -= body.len();
+            }
+            let excerpt = if whole {
+                body.clone()
+            } else {
+                clip(&body, 200)
+            };
+            annotations.push(json!({"seq":seq,"actor":who,"kind":kind,"excerpt":excerpt,"excerpt_truncated":!whole && body.chars().count()>200,"full":whole,"follow_up_id":follow_up}));
+        }
+        items.push(json!({"card":compact,"addressed":addressed,"full_text":full,"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
     }
     Ok(
         json!({"agent":actor,"selection":selection.mode,"card_ids":selection.card_ids,"addressed_to_me":selection.addressed_to_me,"unresolved":selection.unresolved,"kinds":selection.kinds,"min_priority":selection.min_priority,"cursor":highwater(conn)?,"items":items,"total":total,"more":(items.len() as i64)<total,"read_is_not_ack":true}),
