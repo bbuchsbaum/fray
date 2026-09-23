@@ -601,10 +601,11 @@ fn ack_last_acknowledges_this_sessions_latest_pull_only() {
         "session_required"
     );
     let pulled = present_as(&mut s, "claude", "claude:me", "inbox");
-    // Later, a background attention packet under the same session shows more.
-    // It may not be taken as "last".
+    // Later, a background attention packet and a background wait under the
+    // same session show more. Neither may be taken as "last".
     let second = ask(&mut s, "Second?");
     present_as(&mut s, "claude", "claude:me", "attention");
+    present_as(&mut s, "claude", "claude:me", "wait");
     // A different live session cannot even present under this name.
     assert_eq!(
         as_session(
@@ -636,7 +637,7 @@ fn ack_last_supports_an_ids_subset_and_fails_closed_without_a_pull() {
     );
     let first = ask(&mut s, "First?");
     let second = ask(&mut s, "Second?");
-    present_as(&mut s, "claude", "claude:me", "wait");
+    present_as(&mut s, "claude", "claude:me", "inbox");
     as_session(
         &mut s,
         "claude",

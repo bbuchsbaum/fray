@@ -86,6 +86,7 @@ fn pending_mail_waits_for_the_agent_and_arrives_on_join() {
         .unwrap()
         .clone();
     assert_eq!(pending["enabled"], false);
+    assert_eq!(pending["pending"], true);
     // A second pending send to the same name reuses it.
     run(
         &mut s,

@@ -336,7 +336,7 @@ impl Store {
         fresh: bool,
         now: i64,
     ) -> Result<Value> {
-        inbox(&self.conn, actor, after, limit, fresh, "all".into(), now)
+        inbox(&self.conn, actor, after, limit, fresh, "all".into(), 0, now)
     }
     pub fn selected_attention(
         &self,
@@ -353,6 +353,7 @@ impl Store {
             limit,
             false,
             selection.into(),
+            0,
             now,
         )
     }
@@ -364,7 +365,16 @@ impl Store {
         selection: InboxSelection<'_>,
         now: i64,
     ) -> Result<Value> {
-        inbox(&self.conn, actor, after, limit, false, selection, now)
+        inbox(
+            &self.conn,
+            actor,
+            after,
+            limit,
+            false,
+            selection,
+            ADDRESSED_FULL_TEXT_BUDGET,
+            now,
+        )
     }
 }
 fn highwater(conn: &Connection) -> Result<i64> {
@@ -1243,7 +1253,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1368,6 +1378,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "unresolved",
                     "kinds",
                     "min_priority",
+                    "full_text_budget",
                 ],
             )?;
             inbox(
@@ -1377,6 +1388,13 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 bounded(a, "limit", 20, 1, 100)?,
                 boolean(a, "fresh", false)?,
                 InboxSelection::parse(a)?,
+                bounded(
+                    a,
+                    "full_text_budget",
+                    ADDRESSED_FULL_TEXT_BUDGET as i64,
+                    0,
+                    64_000,
+                )? as usize,
                 now,
             )
         }
@@ -1707,9 +1725,10 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
 
 const BATCH_TTL_MS: i64 = 86_400_000;
 
-/// The newest batch this session explicitly pulled (inbox, wait or thread).
-/// Attention packets arrive asynchronously, so they are excluded: acking the
-/// "last" one could consume a packet that arrived after what was read.
+/// The newest batch this session explicitly read (inbox or thread). Waits and
+/// attention packets are excluded: both often run in the background, so the
+/// newest one may have arrived after what the agent actually read. Ack those
+/// by their batch token.
 /// Without a session there is no safe notion of "last": fail closed.
 fn last_batch(conn: &Connection, actor: &str, session: Option<&str>, now: i64) -> Result<String> {
     let session = session.ok_or_else(|| {
@@ -1719,7 +1738,7 @@ fn last_batch(conn: &Connection, actor: &str, session: Option<&str>, now: i64) -
         )
     })?;
     conn.query_row(
-        "SELECT batch FROM presented_batches WHERE agent=? AND session=? AND source IN ('inbox','wait','thread') AND created_ms>=? ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+        "SELECT batch FROM presented_batches WHERE agent=? AND session=? AND source IN ('inbox','thread') AND created_ms>=? ORDER BY created_ms DESC,rowid DESC LIMIT 1",
         params![actor, session, now - BATCH_TTL_MS],
         |r| r.get(0),
     )
@@ -1727,7 +1746,7 @@ fn last_batch(conn: &Connection, actor: &str, session: Option<&str>, now: i64) -
     .ok_or_else(|| {
         Error::new(
             "batch_unknown",
-            "this session has no presented inbox/wait/thread batch to acknowledge; nothing was acknowledged",
+            "this session has no inbox/thread batch to acknowledge (waits and attention packets are acked by their batch token); nothing was acknowledged",
         )
     })
 }
@@ -1914,6 +1933,9 @@ fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Resul
 /// Bytes of full message text one inbox page may carry for addressed items.
 const ADDRESSED_FULL_TEXT_BUDGET: usize = 16_000;
 
+// One read path shared by every consumer; each argument is a distinct,
+// caller-chosen dimension, so a parameter struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn inbox(
     conn: &Connection,
     actor: &str,
@@ -1921,6 +1943,7 @@ fn inbox(
     limit: i64,
     fresh: bool,
     selection: InboxSelection<'_>,
+    full_budget: usize,
     now: i64,
 ) -> Result<Value> {
     registered(conn, actor)?;
@@ -1947,12 +1970,15 @@ fn inbox(
         conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
             r.get(0)
         })?;
-    // Full text for what is addressed to you (assigned to you, or replies to
-    // your own request), within a page-wide budget; broadcasts keep previews.
-    let mut full_budget = ADDRESSED_FULL_TEXT_BUDGET;
+    // Full text for what is addressed to you (assigned to you, or replies on
+    // a question/task you asked), within a page-wide budget measured in encoded
+    // JSON bytes; broadcasts keep previews.
+    let mut full_budget = full_budget;
+    let encoded = |text: &str| serde_json::to_string(text).map_or(usize::MAX, |t| t.len());
     for (id, pending, ack) in rows {
         let card = get_card(conn, id)?;
-        let addressed = card.assignee.as_deref() == Some(actor) || card.author == actor;
+        let addressed = card.assignee.as_deref() == Some(actor)
+            || (card.author == actor && matches!(card.kind.as_str(), "question" | "task"));
         let count: i64 = conn.query_row(
             "SELECT count(*) FROM events WHERE card_id=? AND op='annotate' AND seq>? AND seq<=?",
             params![id, ack, pending],
@@ -1972,17 +1998,36 @@ fn inbox(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut compact = card.compact(now);
         let mut full = false;
-        if addressed && card.summary.len() <= full_budget {
-            full_budget -= card.summary.len();
-            compact["summary"] = json!(card.summary);
-            compact["summary_truncated"] = json!(false);
-            full = true;
+        if addressed {
+            // A long send keeps only a bounded head on the card; the whole
+            // message lives in its creation event.
+            let original: Option<String> = conn
+                .query_row(
+                    "SELECT json_extract(payload,'$.detail.body') FROM events WHERE card_id=? AND op='post' ORDER BY seq LIMIT 1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            let text = original
+                .filter(|body| body.len() > card.summary.len())
+                .unwrap_or_else(|| card.summary.clone());
+            let cost = encoded(&text);
+            if cost <= full_budget {
+                full_budget -= cost;
+                compact["summary"] = json!(text);
+                compact["summary_truncated"] = json!(false);
+                full = true;
+            } else {
+                compact["summary_truncated"] = json!(true);
+            }
         }
         let mut annotations = Vec::new();
         for (seq, who, kind, body, follow_up) in raw {
-            let whole = addressed && body.len() <= full_budget;
+            let cost = encoded(&body);
+            let whole = addressed && cost <= full_budget;
             if whole {
-                full_budget -= body.len();
+                full_budget -= cost;
             }
             let excerpt = if whole {
                 body.clone()
@@ -2020,7 +2065,7 @@ fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?}));
     }
     Ok(json!({"items":items,"more":more}))
 }
@@ -2107,7 +2152,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
             r.get(0)
         })?;
-    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
+    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
     out["idle_readiness"] = idle_readiness(conn, actor, now)?;
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {

@@ -50,6 +50,7 @@ fray find ..
 
 Sending to a name that has not joined fails and suggests the nearest names; use
 `fray send NAME --pending BODY` to leave a message it will receive on joining.
+After that the name is registered (shown as pending), so check the spelling first.
 
 Uppercase values are placeholders. A send opens one conversation; reply in it
 instead of creating a card per response. `send --ask` creates a question.
@@ -89,9 +90,10 @@ chatter, or work merely to keep agents busy. Idle is a valid outcome.
 
 ## Handle exact receipts
 
-Read current heads and annotations. Items addressed to you (assigned to you, or
-replies on your own requests) arrive in full; broadcasts arrive as previews. If a
-preview is truncated, read the full text with `fray thread ID --unread`: everything delivered to you and not yet acked, in
+Read current heads and annotations. In `inbox` and `wait`, items addressed to
+you (assigned to you, or replies on a question or task you asked) arrive in full
+within a per-page budget; broadcasts, hook context and `brief` show previews. If
+anything is truncated, read the full text with `fray thread ID --unread`: everything delivered to you and not yet acked, in
 full, with open objections listed. Page with `--after N` from its `next_after`.
 `fray thread ID --compact` reads a whole thread without repeated card heads.
 
@@ -101,7 +103,7 @@ exactly what that command showed you. After handling it, acknowledge exactly tha
 ```sh
 fray ack --batch BATCH            # everything that batch showed you
 fray ack --batch BATCH --ids 3,4  # only the items you handled
-fray ack --last                   # the batch your latest inbox/wait/thread showed
+fray ack --last                   # the batch your latest inbox or thread showed
 fray batch BATCH                  # re-read what it covers; never acks
 # Without a batch, name exact versions:
 fray ack ID --through THROUGH_SEQ
@@ -110,8 +112,8 @@ fray ack --receipts '[{"store_id":"STORE","agent":"NAME","id":123,"through_seq":
 
 A batch acks the versions shown, never newer ones that arrived later; they stay
 pending. `ack --last` names no ID but is just as exact: it is the batch your own
-session last pulled with inbox, wait or thread, never a fresh read and never a
-background attention packet (ack those by their batch token). There is
+session last pulled with inbox or thread, never a fresh read. Waits and attention
+packets often run in the background, so ack those by their batch token. There is
 deliberately no "ack everything": acknowledging what you have not read is
 exactly the failure batches prevent.
 

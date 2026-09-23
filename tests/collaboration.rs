@@ -408,13 +408,19 @@ fn long_message_preserves_exact_body_with_bounded_head_and_atomic_retry() {
     assert_eq!(history["history"][0]["payload"]["detail"]["body"], body);
     let inbox = call(&mut store, "claude", "inbox", json!({}));
     assert_eq!(inbox["total"], 1);
-    // Addressed to claude, so the inbox shows the whole stored head, which
-    // is itself bounded and points to the exact full body.
-    let head = inbox["items"][0]["card"]["summary"].as_str().unwrap();
-    assert_eq!(head, sent["card"]["summary"].as_str().unwrap());
-    assert!(head.len() <= 2000);
-    assert!(head.contains("--bodies"), "{head}");
+    // Addressed to claude, so the inbox carries the exact full message (from
+    // its creation event), while the stored card head stays bounded.
+    assert_eq!(inbox["items"][0]["card"]["summary"], body);
     assert_eq!(inbox["items"][0]["card"]["summary_truncated"], false);
+    assert_eq!(inbox["items"][0]["full_text"], true);
+    let head = call(
+        &mut store,
+        "claude",
+        "show",
+        json!({"id":sent["card"]["id"]}),
+    );
+    let head = head["card"]["summary"].as_str().unwrap();
+    assert!(head.len() <= 2000 && head.contains("--bodies"), "{head}");
     assert_eq!(inbox["items"][0]["through_seq"], sent["event_seq"]);
     assert_eq!(
         call(

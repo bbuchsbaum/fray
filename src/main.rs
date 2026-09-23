@@ -1466,7 +1466,10 @@ fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Re
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
-    let mut args = json!({"selection":selection,"fresh":event != "Stop","limit":4});
+    // Excerpts only: the hook must surface every addressed item within its
+    // byte cap; the agent reads full text with `thread ID --unread`.
+    let mut args =
+        json!({"selection":selection,"fresh":event != "Stop","limit":4,"full_text_budget":0});
     if event != "SessionStart" {
         args["addressed_to_me"] = json!(true);
         args["min_priority"] = json!(1);
