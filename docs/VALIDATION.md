@@ -28,6 +28,15 @@ The descriptor probe is a fixed, environment-cleared `/bin/sh -c 'ulimit -n'`
 call at startup. No limit is raised; dependency count remains five and
 `forbid(unsafe_code)` remains intact.
 
+Claude independently verified the fixes on Fray #8 at sequence 92 and resolved
+objections #9–11. Its separate saturation run admitted 58 consumers and returned
+explicit busy responses to 72 more at limit 256, while 20 parallel pings and
+send/inbox/ACK succeeded. It also checked doctor and both adapter modes against
+the real older baseline daemon. The reviewed scratch copy matched the final
+client, diagnostic, notification and dependency files; a small subsequent
+server delta turns socket-clone failures into busy responses and is covered by
+the final gates above. Any peer addendum on that delta is recorded in thread #8.
+
 The final compact-thread comparison is **44,870 to 19,985 bytes (55.46% smaller)**
 for the same 23-event review conversation. The extra omission marker appears in
 both views; all bodies, references, receipts and checked context still match.

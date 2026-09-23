@@ -23,6 +23,8 @@ Implementation and required gates are complete at source manifest
 validation pass. The real review thread shrank 55.46% without losing checked
 context. Claude's native Monitor handled the compact notification on an isolated
 board; the fixture was stopped. Transport re-review is recorded on Fray #8.
+Claude verified and resolved the three transport/compatibility objections there;
+the final source also explicitly returns busy on socket-clone allocation failure.
 
 Field observations from this exchange (evidence, not inferred activity metrics):
 
