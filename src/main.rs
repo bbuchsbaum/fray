@@ -145,6 +145,10 @@ enum Cmd {
         /// Attach a searchable reference, for example --ref mote:ISSUE. Repeatable.
         #[arg(long = "ref")]
         refs: Vec<String>,
+        /// Leave the message for an agent that has not joined yet; it is
+        /// delivered when that name joins. Without this, unknown names fail.
+        #[arg(long)]
+        pending: bool,
     },
     /// Reply in a conversation. Questions and objections open linked questions.
     Reply {
@@ -699,10 +703,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             ask,
             priority,
             refs,
+            pending,
         } => {
             let mut a = json!({"to":to,"body":message_body(body,body_file)?,"ask":ask,"priority":priority,"refs":refs});
             if let Some(title) = title {
                 a["title"] = json!(title);
+            }
+            if pending {
+                a["pending"] = json!(true);
             }
             ("send", a)
         }

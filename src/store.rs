@@ -392,12 +392,62 @@ fn assignee_known(conn: &Connection, who: &Option<String>) -> Result<()> {
             |r| r.get(0),
         )?;
         if !exists {
-            return Err(Error::invalid(format!(
-                "unknown assignee {who}; join that identity first"
-            )));
+            let near = nearest_agents(conn, who)?;
+            let hint = if near.is_empty() {
+                String::new()
+            } else {
+                format!(" Did you mean {}?", near.join(", "))
+            };
+            return Err(Error::new(
+                "unknown_agent",
+                format!(
+                    "no agent named {who:?} has joined.{hint} To leave a message for an agent that will join later, use send --pending {who}."
+                ),
+            ));
         }
     }
     Ok(())
+}
+
+/// Registered names that are probably what a mistyped or shortened name meant:
+/// a prefix either way (codex -> codex-attention-0923), or a small edit distance.
+fn nearest_agents(conn: &Connection, who: &str) -> Result<Vec<String>> {
+    let mut s = conn.prepare("SELECT name FROM agents")?;
+    let names = s
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let wanted = who.to_lowercase();
+    let mut scored: Vec<(usize, String)> = names
+        .into_iter()
+        .filter_map(|name| {
+            let lower = name.to_lowercase();
+            let score = if lower.starts_with(&wanted) || wanted.starts_with(&lower) {
+                0
+            } else {
+                edit_distance(&lower, &wanted)
+            };
+            (score <= (wanted.chars().count() / 4).max(2)).then_some((score, name))
+        })
+        .collect();
+    scored.sort();
+    Ok(scored.into_iter().take(3).map(|(_, name)| name).collect())
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(ca != *cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 fn row_card(r: &Row<'_>) -> rusqlite::Result<Card> {
     let raw: String = r.get(9)?;
@@ -690,10 +740,22 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "send" => {
-            check_fields(a, &["to", "body", "title", "ask", "priority", "refs"])?;
+            check_fields(
+                a,
+                &["to", "body", "title", "ask", "priority", "refs", "pending"],
+            )?;
             let target = string(a, "to")?;
             if !valid_name(target) {
                 return Err(Error::invalid("to must be a registered agent name"));
+            }
+            // Explicitly leave mail for an agent that has not joined yet: it
+            // is registered disabled and receives the message when it joins.
+            // Only on request, so a typo still fails with suggestions.
+            if boolean(a, "pending", false)? {
+                conn.execute(
+                    "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
+                    params![target, "[\"*\"]", now],
+                )?;
             }
             let body = string(a, "body")?;
             text(body, "body", 8000, false)?;
@@ -1181,7 +1243,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
