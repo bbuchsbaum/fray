@@ -10,14 +10,28 @@ const COLS:&str="id,rev,kind,topic,title,summary,status,priority,pinned,tags,aut
 /// The reserved identity for the project owner (see owner-authority design).
 pub const OWNER: &str = "owner";
 
-/// Names a reader could mistake for the owner (OWNER, 0wner, owner_ …).
+/// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
+/// owner1 …): case, separators and a numeric suffix are ignored.
 fn owner_lookalike(name: &str) -> bool {
     let folded: String = name
         .to_lowercase()
         .chars()
+        .filter(char::is_ascii_alphanumeric)
         .map(|c| if c == '0' { 'o' } else { c })
         .collect();
-    folded.trim_matches(|c: char| !c.is_ascii_alphanumeric()) == OWNER
+    folded.trim_end_matches(|c: char| c.is_ascii_digit()) == OWNER
+}
+
+/// Only the owner may use `authority:` tags, so a tag can never read as
+/// owner authority on an agent's card.
+fn reserve_authority_tags(actor: &str, tags: &[String]) -> Result<()> {
+    if actor != OWNER && tags.iter().any(|t| t.starts_with("authority:")) {
+        return Err(Error::new(
+            "reserved_owner",
+            "authority: tags are reserved for the owner",
+        ));
+    }
+    Ok(())
 }
 const ACTIVE: &str = "c.status NOT IN ('resolved','superseded','withdrawn')";
 // Topic scope is an attention filter, not a visibility/security boundary.
@@ -628,6 +642,7 @@ fn create_card(
     )?;
     apply_fields(&mut card, args)?;
     validate_card(&card)?;
+    reserve_authority_tags(actor, &card.tags)?;
     assignee_known(conn, &card.assignee)?;
     conn.execute("INSERT INTO cards(kind,topic,title,summary,status,priority,pinned,tags,author,assignee,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![card.kind,card.topic,card.title,card.summary,card.status,card.priority,card.pinned,serde_json::to_string(&card.tags)?,actor,card.assignee,now,now])?;
     emit(
@@ -900,6 +915,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             apply_fields(&mut c, a)?;
             validate_card(&c)?;
+            reserve_authority_tags(actor, &c.tags)?;
             assignee_known(conn, &c.assignee)?;
             // Resolving past an open objection must be deliberate and visible.
             // Superseding or withdrawing is not a claim that the work is right.
@@ -947,12 +963,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ));
             }
             let refs = a.get("refs").map(tags).transpose()?.unwrap_or_default();
+            reserve_authority_tags(actor, &refs)?;
             let mut merged = c.tags.clone();
             merged.extend(refs.iter().cloned());
             merged.sort();
             merged.dedup();
             let merged = tags(&json!(merged))?;
-            if merged != c.tags {
+            // A reply never changes an owner card: its refs stay on the reply.
+            if merged != c.tags && (c.author != OWNER || actor == OWNER) {
                 conn.execute(
                     "UPDATE cards SET tags=?,rev=rev+1,updated_ms=? WHERE id=?",
                     params![serde_json::to_string(&merged)?, now, c.id],
@@ -1032,6 +1050,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "claim" | "renew" | "release" => {
             check_fields(a, &["id", "fence", "ttl"])?;
             let c = get_card(conn, integer(a, "id")?)?;
+            // Leasing an owner card would edit it and redirect objections to
+            // the leaseholder instead of the owner.
+            if c.author == OWNER && actor != OWNER && req.op != "release" {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "owner cards cannot be claimed; reply to it instead",
+                ));
+            }
             let ttl = bounded(a, "ttl", 900, 1, 86400)?;
             match req.op.as_str() {
                 "claim" => {

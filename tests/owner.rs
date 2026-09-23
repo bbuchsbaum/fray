@@ -277,7 +277,15 @@ fn review_fu3_fu5_a_claimed_ask_cannot_block_the_owner_and_decline_is_distinct()
 #[test]
 fn review_fu7_owner_lookalike_names_are_refused() {
     let mut s = board();
-    for name in ["Owner", "OWNER", "0wner", "owner_", "-owner-"] {
+    for name in [
+        "Owner",
+        "OWNER",
+        "0wner",
+        "owner_",
+        "-owner-",
+        "o-w-n-e-r",
+        "OWNER1",
+    ] {
         assert_eq!(
             run(&mut s, name, "join", json!({})).unwrap_err(),
             "reserved_owner",
@@ -314,4 +322,77 @@ fn review_block2_raw_rpc_cannot_reach_owner_operations() {
         let text = String::from_utf8_lossy(&out.stderr);
         assert!(text.contains("reserved_owner"), "{text}");
     }
+}
+
+#[test]
+fn review2_replies_and_leases_cannot_change_an_owner_card() {
+    let mut s = board();
+    let card = charter(&mut s);
+    // BLOCK: reply refs used to merge into the owner card's tags.
+    run(
+        &mut s,
+        "codex",
+        "annotate",
+        json!({"id": card["id"], "kind": "note", "body": "noted", "refs": ["approved-by-owner"]}),
+    )
+    .unwrap();
+    let shown = run(&mut s, "claude", "show", json!({"id": card["id"]})).unwrap();
+    assert_eq!(shown["card"]["tags"], json!(["authority:owner"]));
+    assert_eq!(shown["card"]["rev"], card["rev"]);
+    // A lease would edit the card and redirect objections away from the owner.
+    assert_eq!(
+        run(&mut s, "claude", "claim", json!({"id": card["id"]})).unwrap_err(),
+        "reserved_owner"
+    );
+    let objection = run(
+        &mut s,
+        "claude",
+        "annotate",
+        json!({"id": card["id"], "kind": "objection", "body": "This charter is too broad."}),
+    )
+    .unwrap()["follow_up"]
+        .clone();
+    assert_eq!(objection["assignee"], OWNER);
+}
+
+#[test]
+fn review2_authority_tags_are_reserved_for_the_owner() {
+    let mut s = board();
+    assert_eq!(
+        run(
+            &mut s,
+            "claude",
+            "post",
+            json!({"title": "Fake", "summary": "s", "pinned": true, "tags": ["authority:owner"]}),
+        )
+        .unwrap_err(),
+        "reserved_owner"
+    );
+    let own = run(
+        &mut s,
+        "claude",
+        "post",
+        json!({"title": "Mine", "summary": "s"}),
+    )
+    .unwrap();
+    assert_eq!(
+        run(
+            &mut s,
+            "claude",
+            "patch",
+            json!({"id": own["card"]["id"], "expect": own["card"]["rev"], "tags": ["authority:owner"]}),
+        )
+        .unwrap_err(),
+        "reserved_owner"
+    );
+    assert_eq!(
+        run(
+            &mut s,
+            "claude",
+            "annotate",
+            json!({"id": own["card"]["id"], "body": "x", "refs": ["authority:owner"]}),
+        )
+        .unwrap_err(),
+        "reserved_owner"
+    );
 }
