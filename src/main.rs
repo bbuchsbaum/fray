@@ -1065,6 +1065,11 @@ fn unread_text(v: &Value) -> String {
     if events.is_empty() {
         out.push_str("(nothing unread)\n");
     }
+    if let Some(own) = v["own_skipped"].as_i64().filter(|n| *n > 0) {
+        out.push_str(&format!(
+            "({own} of your own message(s) in this range skipped; see thread --bodies)\n"
+        ));
+    }
     for event in &events {
         let kind = event["kind"]
             .as_str()

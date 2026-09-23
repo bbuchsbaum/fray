@@ -1217,10 +1217,10 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         params![actor, c.id, start],
                         |r| r.get::<_, bool>(0),
                     )?;
-                let unread: Vec<Value> = events(conn, start, Some(c.id), limit + 1)?
-                    .into_iter()
-                    .filter(|e| e["seq"].as_i64().is_some_and(|seq| seq <= pending))
-                    .collect();
+                // Your own messages are context you already have, not news. They
+                // are skipped (and counted), and the cumulative receipt still
+                // covers them, so they never linger as "unread".
+                let unread = unread_events(conn, c.id, actor, start, pending, limit + 1)?;
                 let more = unread.len() > limit as usize;
                 let unread: Vec<Value> = unread.into_iter().take(limit as usize).collect();
                 let through = if more {
@@ -1235,6 +1235,12 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
                         r.get(0)
                     })?;
+                let own_skipped: i64 = conn.query_row(
+                    "SELECT count(*) FROM events WHERE card_id=? AND seq>? AND seq<=? AND actor=?",
+                    params![c.id, start, through, actor],
+                    |r| r.get(0),
+                )?;
+                v["own_skipped"] = json!(own_skipped);
                 v["unread"] = json!(compact_events(&unread));
                 v["ack_seq"] = json!(ack);
                 v["pending_seq"] = json!(pending);
@@ -1760,6 +1766,33 @@ fn open_follow_ups(conn: &Connection, card: i64, v: &mut Value) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Events on `card` in (after, until] written by anyone except `reader`.
+fn unread_events(
+    conn: &Connection,
+    card: i64,
+    reader: &str,
+    after: i64,
+    until: i64,
+    limit: i64,
+) -> Result<Vec<Value>> {
+    let mut s = conn.prepare(
+        "SELECT seq,ts_ms,actor,op,card_id,payload FROM events WHERE card_id=? AND seq>? AND seq<=? AND actor<>? ORDER BY seq LIMIT ?",
+    )?;
+    let raw = s
+        .query_map(params![card, after, until, reader, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    raw.into_iter().map(|(seq,ts,actor,op,id,payload)|Ok(json!({"seq":seq,"ts_ms":ts,"actor":actor,"op":op,"card_id":id,"payload":serde_json::from_str::<Value>(&payload)?}))).collect()
 }
 
 fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Result<Vec<Value>> {
