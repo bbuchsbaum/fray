@@ -512,3 +512,108 @@ fn audit_authority_tag_spellings_and_spoofed_links_are_refused_or_ignored() {
     let shown = run(&mut s, "codex", "show", json!({"id": card["id"]})).unwrap();
     assert_eq!(shown["follow_ups"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn audit2_review_shows_the_version_a_decision_binds_to() {
+    let mut s = board();
+    let asked = run(
+        &mut s,
+        "claude",
+        "send",
+        json!({"to": OWNER, "body": "Restart daemon?", "ask": true, "pending": true}),
+    )
+    .unwrap();
+    let id = asked["card"]["id"].clone();
+    run(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id": id, "expect": asked["card"]["rev"], "summary": "Restart daemon AND force-push main"}),
+    )
+    .unwrap();
+    // Exactly the read `fray owner review` makes, rendered as the owner sees it.
+    let thread = run(
+        &mut s,
+        OWNER,
+        "show",
+        json!({"id": id, "history": true, "compact": true, "limit": 100}),
+    )
+    .unwrap();
+    let screen = fray::owner::render_request(&thread);
+    assert!(
+        screen.contains("CURRENT TEXT:\n    Restart daemon AND force-push main"),
+        "{screen}"
+    );
+    assert!(screen.contains("changed summary"), "{screen}");
+    assert!(
+        screen.contains(&format!("revision {}", thread["card"]["rev"])),
+        "{screen}"
+    );
+}
+
+#[test]
+fn audit2_closed_requests_cannot_be_decided_and_replies_name_their_version() {
+    let mut s = board();
+    let asked = run(
+        &mut s,
+        "claude",
+        "send",
+        json!({"to": OWNER, "body": "Deploy?", "ask": true, "pending": true}),
+    )
+    .unwrap();
+    let id = asked["card"]["id"].clone();
+    // A plain reply names the revision and title it answers.
+    let replied = run(
+        &mut s,
+        OWNER,
+        "owner_answer",
+        json!({"id": id, "verdict": "answer", "body": "Yes, go ahead."}),
+    )
+    .unwrap();
+    let shown = run(
+        &mut s,
+        "claude",
+        "show",
+        json!({"id": id, "history": true, "compact": true}),
+    )
+    .unwrap();
+    let reply = shown["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|e| {
+            e["body"]
+                .as_str()
+                .filter(|b| b.starts_with("Yes, go ahead."))
+        })
+        .unwrap()
+        .to_owned();
+    assert!(
+        reply.contains("Owner reply to revision") && reply.contains("Deploy?"),
+        "{reply}"
+    );
+    let _ = replied;
+    // The asker withdraws; a later approve or decline records nothing.
+    let current = rev(&mut s, &id);
+    run(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id": id, "expect": current, "status": "withdrawn"}),
+    )
+    .unwrap();
+    let closed = rev(&mut s, &id);
+    for verdict in ["approve", "decline"] {
+        assert_eq!(
+            run(
+                &mut s,
+                OWNER,
+                "owner_answer",
+                json!({"id": id, "verdict": verdict, "body": "", "expect": closed})
+            )
+            .unwrap_err(),
+            "already_closed",
+            "{verdict}"
+        );
+    }
+}

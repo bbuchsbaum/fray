@@ -609,23 +609,7 @@ fn owner(home: &Path, action: OwnerCmd, as_json: bool) -> Result<Option<Value>> 
                     None,
                     10,
                 )?;
-                eprintln!(
-                    "\n#{id} from {}: {}",
-                    clean(card["author"].as_str().unwrap_or("")),
-                    clean(card["title"].as_str().unwrap_or(""))
-                );
-                for event in thread["history"].as_array().into_iter().flatten() {
-                    if let Some(body) = event["body"].as_str() {
-                        eprintln!(
-                            "  @{} {}:",
-                            event["seq"],
-                            clean(event["actor"].as_str().unwrap_or(""))
-                        );
-                        for line in body.lines() {
-                            eprintln!("    {}", clean(line));
-                        }
-                    }
-                }
+                eprint!("{}", fray::owner::render_request(&thread));
                 let choice = prompt("[a]pprove  [d]ecline  [r]eply  [s]kip  [q]uit: ")?;
                 let verdict = match choice.as_str() {
                     "a" => "approve",

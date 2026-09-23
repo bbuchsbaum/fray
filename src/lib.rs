@@ -6,6 +6,7 @@ pub mod client;
 pub mod diagnostics;
 pub mod model;
 pub mod notification;
+pub mod owner;
 pub mod server;
 pub mod session;
 pub mod skill;

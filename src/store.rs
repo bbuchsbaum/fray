@@ -1259,6 +1259,16 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // A decision binds to exactly the version the owner saw: if the
             // request changed since it was displayed, nothing is recorded.
             let shown = get_card(conn, id)?;
+            if verdict != "answer" && shown.terminal() {
+                // A closed request cannot be decided (or decided twice).
+                return Err(Error::new(
+                    "already_closed",
+                    format!(
+                        "request #{id} is already {}; nothing was recorded",
+                        shown.status
+                    ),
+                ));
+            }
             if verdict != "answer" && integer(a, "expect")? != shown.rev {
                 return Err(Error::new(
                     "conflict",
@@ -1272,7 +1282,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let text = match verdict {
                 "approve" => format!("APPROVED by the owner ({what}). {body}"),
                 "decline" => format!("DECLINED by the owner ({what}). {body}"),
-                _ => body.to_owned(),
+                // A reply records which version it answers, so a later edit
+                // of the request cannot borrow it.
+                _ => format!("{body}\n(Owner reply to {what}.)"),
             };
             let mut result = mutate(
                 conn,
