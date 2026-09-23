@@ -966,7 +966,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     actor,
                     "post",
                     id,
-                    json!({"parent_card":c.id,"annotation_seq":result["event_seq"]}),
+                    // The whole objection travels with its card, so addressed readers
+                    // get full text instead of the 400-character head.
+                    json!({"parent_card":c.id,"annotation_seq":result["event_seq"],"body":body}),
                     now,
                     true,
                 )?;

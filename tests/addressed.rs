@@ -296,3 +296,34 @@ fn a_short_request_in_excerpt_mode_is_not_flagged_truncated() {
         true
     );
 }
+
+#[test]
+fn a_long_objection_reaches_its_assignee_whole() {
+    // Review follow-up at 7b0f983: the linked follow-up card only held a
+    // 400-character head yet claimed full text.
+    let mut s = board();
+    let asked = call(
+        &mut s,
+        "lead",
+        "send",
+        json!({"to": "worker", "body": "Please review.", "ask": true}),
+    );
+    let objection = format!("Blocking: {}", "detail ".repeat(420));
+    let follow_up = call(
+        &mut s,
+        "worker",
+        "annotate",
+        json!({"id": asked["card"]["id"], "kind": "objection", "body": objection}),
+    )["follow_up"]
+        .clone();
+    assert_eq!(follow_up["assignee"], "lead");
+    let it = item(&call(&mut s, "lead", "inbox", json!({})), &follow_up["id"]);
+    assert_eq!(it["card"]["summary"], objection);
+    assert_eq!(it["full_text"], true);
+    // In excerpt mode the long objection is honestly flagged.
+    let page = call(&mut s, "lead", "inbox", json!({"full_text_budget": 0}));
+    assert_eq!(
+        item(&page, &follow_up["id"])["card"]["summary_truncated"],
+        true
+    );
+}
