@@ -11,7 +11,7 @@ mod driver;
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("FRAY_BUILD"), ")"),
     about = "Live, state-first coordination for local coding agents"
 )]
 struct Cli {

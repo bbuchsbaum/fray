@@ -14,10 +14,14 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
         }
     };
     report["store_id"] = daemon["store_id"].clone();
-    report["daemon"] = json!({"reachable":true,"version":daemon["version"],"protocol_version":daemon["protocol_version"],"capabilities":daemon["capabilities"],"capacity":daemon["capacity"]});
+    report["client_build"] = json!(BUILD);
+    report["daemon"] = json!({"reachable":true,"version":daemon["version"],"build":daemon["build"],"protocol_version":daemon["protocol_version"],"capabilities":daemon["capabilities"],"capacity":daemon["capacity"]});
     if daemon["protocol_version"].as_u64() != Some(PROTOCOL_VERSION.into()) {
         add(&mut report, "protocol_mismatch", "error", "Client and daemon protocols differ; no operational request was sent. Coordinate an upgrade with the owner.");
         return Ok(finish(report));
+    }
+    if let Some((code, message)) = build_check(daemon["build"].as_str(), BUILD) {
+        add(&mut report, code, "warning", message);
     }
     let missing: Vec<_> = [
         "attention_stream",
@@ -146,4 +150,20 @@ fn finish(mut report: Value) -> Value {
         "needs_attention"
     });
     report
+}
+
+/// Whether a reachable, protocol-compatible daemon is the same build as this
+/// client. A different build can still lack newer behavior.
+pub fn build_check(daemon: Option<&str>, client: &str) -> Option<(&'static str, &'static str)> {
+    match daemon {
+        Some(build) if build == client => None,
+        Some(_) => Some((
+            "daemon_build_mismatch",
+            "The daemon runs a different build than this client, so newer behavior may be missing. Install the main build on PATH, then restart the daemon after announcing it on the board.",
+        )),
+        None => Some((
+            "daemon_build_unknown",
+            "The daemon predates build reporting; it is older than this client. Install the main build on PATH, then restart the daemon after announcing it on the board.",
+        )),
+    }
 }

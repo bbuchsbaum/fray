@@ -98,6 +98,8 @@ pub fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+/// The source commit this binary was built from (`<sha>` or `<sha>-dirty`).
+pub const BUILD: &str = env!("FRAY_BUILD");
 pub fn random_key() -> Result<String> {
     use io::Read;
     let mut bytes = [0u8; 16];

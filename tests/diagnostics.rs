@@ -28,3 +28,34 @@ fn stale_and_managed_presence_remain_distinct() {
     assert_eq!(status["state"], "waiting");
     assert_eq!(status["model_response_guaranteed"], false);
 }
+
+#[test]
+fn doctor_names_a_stale_or_different_daemon_build() {
+    use fray::diagnostics::build_check;
+    assert_eq!(build_check(Some("abc123"), "abc123"), None);
+    assert_eq!(
+        build_check(Some("abc123"), "def456").unwrap().0,
+        "daemon_build_mismatch"
+    );
+    assert_eq!(
+        build_check(Some("abc123-dirty"), "abc123").unwrap().0,
+        "daemon_build_mismatch"
+    );
+    let (code, fix) = build_check(None, "abc123").unwrap();
+    assert_eq!(code, "daemon_build_unknown");
+    assert!(fix.contains("restart the daemon"));
+}
+
+#[test]
+fn ping_reports_the_daemon_build() {
+    use fray::{
+        model::{Request, BUILD},
+        store::Store,
+    };
+    let mut store = Store::memory().unwrap();
+    let ping = store
+        .execute_at(&Request::new("ping", "", serde_json::json!({})), 0)
+        .unwrap();
+    assert_eq!(ping["build"], BUILD);
+    assert!(!BUILD.is_empty());
+}

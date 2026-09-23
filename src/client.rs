@@ -151,7 +151,22 @@ fn compatible(home: &Path, daemon: &Value) -> Result<()> {
 fn handshake(reader: &mut BufReader<UnixStream>, home: &Path) -> Result<Value> {
     let daemon = exchange(reader, &Request::new("ping", "", json!({})))?;
     compatible(home, &daemon)?;
+    warn_build_mismatch(home, &daemon);
     Ok(daemon)
+}
+/// A compatible daemon from a different build can still lack newer behavior.
+/// Say so once per process, on stderr only (stdout may carry attention).
+fn warn_build_mismatch(home: &Path, daemon: &Value) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if let Some(build) = daemon["build"].as_str() {
+        if build != BUILD && !WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "fray: note: daemon build {build} differs from this client build {BUILD} ({}); run `fray doctor`",
+                home.display()
+            );
+        }
+    }
 }
 pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     rpc_inner(home, req, timeout).map_err(|error| {
