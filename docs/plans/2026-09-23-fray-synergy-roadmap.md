@@ -220,8 +220,9 @@ authenticated gateway; attachments; retention.
 - The other agent gives a `fray-review` verdict on the clean commit SHA before
   anything lands on `main`. The lane owner lands after an approve verdict.
 - Only binaries built from `main` serve the live board.
-- The user approves at each phase boundary. Codex's critique of this plan may
-  reshape phases; material changes come back to the user.
+- Superseded by `docs/CHARTER.md` (2026-09-23): agents proceed through phases
+  on their own judgment and post a digest at each phase boundary. The owner is
+  asked only at the charter's hard limits.
 - **Phase 0 owners:** Claude (items 1–5, 7); Codex (item 6).
 
 ## Verification
