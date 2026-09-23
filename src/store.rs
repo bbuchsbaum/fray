@@ -947,8 +947,20 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "ack" => {
-            if let Some(batch) = a.get("batch") {
-                check_fields(a, &["batch", "ids"])?;
+            let last = if boolean(a, "last", false)? {
+                check_fields(a, &["last", "ids"])?;
+                Some(last_batch(conn, actor, req.session.as_deref(), now)?)
+            } else {
+                None
+            };
+            if let Some(batch) = last
+                .as_ref()
+                .map(|b| json!(b))
+                .or_else(|| a.get("batch").cloned())
+            {
+                if last.is_none() {
+                    check_fields(a, &["batch", "ids"])?;
+                }
                 let batch = batch
                     .as_str()
                     .ok_or_else(|| Error::invalid("batch must be a string"))?;
@@ -1087,8 +1099,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             let batch = random_key()?;
             conn.execute(
-                "INSERT INTO presented_batches(batch,agent,session,source,created_ms) VALUES(?,?,NULL,?,?)",
-                params![batch, actor, source, now],
+                "INSERT INTO presented_batches(batch,agent,session,source,created_ms) VALUES(?,?,?,?,?)",
+                params![batch, actor, req.session, source, now],
             )?;
             for (id, through) in &items {
                 conn.execute(
@@ -1169,7 +1181,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1632,6 +1644,31 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
 }
 
 const BATCH_TTL_MS: i64 = 86_400_000;
+
+/// The newest batch this session explicitly pulled (inbox, wait or thread).
+/// Attention packets arrive asynchronously, so they are excluded: acking the
+/// "last" one could consume a packet that arrived after what was read.
+/// Without a session there is no safe notion of "last": fail closed.
+fn last_batch(conn: &Connection, actor: &str, session: Option<&str>, now: i64) -> Result<String> {
+    let session = session.ok_or_else(|| {
+        Error::new(
+            "session_required",
+            "ack --last needs a host session (Claude/Codex sessions are detected automatically; else set FRAY_SESSION); use ack --batch ID",
+        )
+    })?;
+    conn.query_row(
+        "SELECT batch FROM presented_batches WHERE agent=? AND session=? AND source IN ('inbox','wait','thread') AND created_ms>=? ORDER BY created_ms DESC,rowid DESC LIMIT 1",
+        params![actor, session, now - BATCH_TTL_MS],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| {
+        Error::new(
+            "batch_unknown",
+            "this session has no presented inbox/wait/thread batch to acknowledge; nothing was acknowledged",
+        )
+    })
+}
 
 /// The exact (card, through_seq) pairs one presented batch showed this actor.
 fn batch_items(conn: &Connection, actor: &str, batch: &str, now: i64) -> Result<Vec<(i64, i64)>> {

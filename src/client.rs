@@ -197,6 +197,7 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             }
             "mute" | "unmute" => Some(("mute", "thread muting")),
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
+            "ack" if req.args.get("last").is_some() => Some(("ack_last", "ack --last")),
             "ack" if req.args.get("batch").is_some() => {
                 Some(("read_batches", "batch acknowledgments"))
             }

@@ -276,18 +276,22 @@ enum Cmd {
     },
     /// Mark only the delivery version you actually handled; this does not close work.
     Ack {
-        #[arg(required_unless_present_any = ["receipts", "batch"], conflicts_with_all = ["receipts", "batch"])]
+        #[arg(required_unless_present_any = ["receipts", "batch", "last"], conflicts_with_all = ["receipts", "batch", "last"])]
         id: Option<i64>,
-        #[arg(long, requires = "id", required_unless_present_any = ["receipts", "batch"])]
+        #[arg(long, requires = "id", required_unless_present_any = ["receipts", "batch", "last"])]
         through: Option<i64>,
         /// JSON receipt array, or '-' for stdin. Copy receipts from the packet you handled.
-        #[arg(long, conflicts_with_all = ["id", "through", "batch"])]
+        #[arg(long, conflicts_with_all = ["id", "through", "batch", "last"])]
         receipts: Option<String>,
         /// Acknowledge exactly what an inbox/wait/thread batch showed you.
-        #[arg(long, conflicts_with_all = ["id", "through"])]
+        #[arg(long, conflicts_with_all = ["id", "through", "last"])]
         batch: Option<String>,
-        /// With --batch: only these card IDs from that batch.
-        #[arg(long, requires = "batch", value_delimiter = ',')]
+        /// Acknowledge the batch this session's latest inbox/wait/thread showed
+        /// you (never a fresh read, never an attention packet).
+        #[arg(long)]
+        last: bool,
+        /// With --batch or --last: only these card IDs from that batch.
+        #[arg(long, value_delimiter = ',')]
         ids: Vec<i64>,
     },
     /// Show the exact receipts a presented batch covers. Never acknowledges.
@@ -901,10 +905,17 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             through,
             receipts,
             batch,
+            last,
             ids,
         } => {
-            let args = if let Some(batch) = batch {
-                let mut args = json!({"batch":batch});
+            if !ids.is_empty() && batch.is_none() && !last {
+                return Err(Error::invalid("--ids requires --batch or --last"));
+            }
+            let args = if batch.is_some() || last {
+                let mut args = match batch {
+                    Some(batch) => json!({"batch":batch}),
+                    None => json!({"last":true}),
+                };
                 if !ids.is_empty() {
                     args["ids"] = json!(ids);
                 }
