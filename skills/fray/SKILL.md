@@ -92,7 +92,8 @@ chatter, or work merely to keep agents busy. Idle is a valid outcome.
 
 Read current heads and annotations. In `inbox` and `wait`, items addressed to
 you (assigned to you, or replies on a question or task you asked) arrive in full
-within a per-page budget; broadcasts, hook context and `brief` show previews. If
+within a per-page budget (`brief` gives full text a smaller share of its own
+budget); broadcasts and hook context show previews. Truncation is flagged. When
 anything is truncated, read the full text with `fray thread ID --unread`: everything delivered to you and not yet acked, in
 full, with open objections listed. Page with `--after N` from its `next_after`.
 `fray thread ID --compact` reads a whole thread without repeated card heads.

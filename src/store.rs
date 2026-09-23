@@ -2000,27 +2000,36 @@ fn inbox(
         let mut full = false;
         if addressed {
             // A long send keeps only a bounded head on the card; the whole
-            // message lives in its creation event.
-            let original: Option<String> = conn
+            // message lives in its creation event. Use it only while the card
+            // still shows that original head: after a patch, the current
+            // summary is the truth, never the superseded original.
+            let original: Option<(Option<String>, Option<String>)> = conn
                 .query_row(
-                    "SELECT json_extract(payload,'$.detail.body') FROM events WHERE card_id=? AND op='post' ORDER BY seq LIMIT 1",
+                    "SELECT json_extract(payload,'$.detail.body'),json_extract(payload,'$.card.summary') FROM events WHERE card_id=? AND op='post' ORDER BY seq LIMIT 1",
                     [id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .optional()?
-                .flatten();
-            let text = original
-                .filter(|body| body.len() > card.summary.len())
-                .unwrap_or_else(|| card.summary.clone());
+                .optional()?;
+            let text = match original {
+                Some((Some(body), Some(head)))
+                    if head == card.summary && body.len() > card.summary.len() =>
+                {
+                    body
+                }
+                _ => card.summary.clone(),
+            };
             let cost = encoded(&text);
             if cost <= full_budget {
                 full_budget -= cost;
                 compact["summary"] = json!(text);
                 compact["summary_truncated"] = json!(false);
                 full = true;
-            } else {
+            } else if text.len() > card.summary.len() {
+                // The preview is of a head that itself omits the full message.
                 compact["summary_truncated"] = json!(true);
             }
+            // Otherwise keep compact()'s own flag: a short ask shown whole is
+            // not truncated just because full text was not requested.
         }
         let mut annotations = Vec::new();
         for (seq, who, kind, body, follow_up) in raw {

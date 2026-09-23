@@ -241,3 +241,58 @@ fn own_broadcasts_are_not_treated_as_requests() {
     assert_eq!(it["addressed"], false);
     assert_eq!(it["annotations"][0]["full"], false);
 }
+
+#[test]
+fn a_corrected_request_never_resurfaces_its_superseded_original() {
+    // Review BLOCK at 8fd281e: the creation body was shown as "full" text even
+    // after the author patched the summary with a correction.
+    for size in [1_500, 5_000] {
+        let mut s = board();
+        let original = format!("ORIGINAL {}", "o".repeat(size));
+        let asked = call(
+            &mut s,
+            "lead",
+            "send",
+            json!({"to": "worker", "body": original, "ask": true, "priority": 1}),
+        );
+        let id = asked["card"]["id"].clone();
+        let corrected = "CORRECTED: ignore previous, do X";
+        call(
+            &mut s,
+            "lead",
+            "patch",
+            json!({"id": id, "expect": asked["card"]["rev"], "summary": corrected}),
+        );
+        let it = item(&call(&mut s, "worker", "inbox", json!({})), &id);
+        assert_eq!(it["card"]["summary"], corrected, "size {size}");
+        assert_eq!(it["full_text"], true);
+    }
+}
+
+#[test]
+fn a_short_request_in_excerpt_mode_is_not_flagged_truncated() {
+    let mut s = board();
+    let asked = call(
+        &mut s,
+        "lead",
+        "send",
+        json!({"to": "worker", "body": "short ask?", "ask": true}),
+    );
+    let id = asked["card"]["id"].clone();
+    let page = call(&mut s, "worker", "inbox", json!({"full_text_budget": 0}));
+    let it = item(&page, &id);
+    assert_eq!(it["card"]["summary"], "short ask?");
+    assert_eq!(it["card"]["summary_truncated"], false);
+    // But a long send in excerpt mode is honestly flagged.
+    let long = call(
+        &mut s,
+        "lead",
+        "send",
+        json!({"to": "worker", "body": "L".repeat(5_000), "ask": true}),
+    );
+    let page = call(&mut s, "worker", "inbox", json!({"full_text_budget": 0}));
+    assert_eq!(
+        item(&page, &long["card"]["id"])["card"]["summary_truncated"],
+        true
+    );
+}
