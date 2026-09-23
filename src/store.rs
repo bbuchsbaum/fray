@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use std::{path::Path, time::Duration};
 
 const COLS:&str="id,rev,kind,topic,title,summary,status,priority,pinned,tags,author,assignee,lease_owner,lease_until_ms,fence,created_ms,updated_ms,last_seq";
+/// The reserved identity for the project owner (see owner-authority design).
+pub const OWNER: &str = "owner";
 const ACTIVE: &str = "c.status NOT IN ('resolved','superseded','withdrawn')";
 // Topic scope is an attention filter, not a visibility/security boundary.
 const RELEVANT:&str="(c.pinned=1 OR c.topic='*' OR c.author=? OR c.assignee=? OR c.lease_owner=? OR EXISTS(SELECT 1 FROM agents a WHERE a.name=? AND (a.role='steward' OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=c.id) OR (c.kind IN ('task','question') AND c.assignee IS NULL) OR EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=c.topic OR (t.value='*' AND substr(c.topic,1,1)<>'@')))))";
@@ -251,6 +253,8 @@ impl Store {
                 | "mute"
                 | "unmute"
                 | "controller"
+                | "owner_decide"
+                | "owner_answer"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -260,6 +264,16 @@ impl Store {
         if !valid_name(&req.actor) {
             return Err(Error::invalid(
                 "set --as/FRAY_AGENT to a unique terminal identity (1-80 name characters)",
+            ));
+        }
+        // The owner identity writes only through owner operations, and owner
+        // operations only as the owner. Collision prevention against accidents
+        // and injected text, not authentication (docs/design/owner-authority.md).
+        let owner_op = req.op.starts_with("owner_");
+        if (req.actor == OWNER) != owner_op {
+            return Err(Error::new(
+                "reserved_owner",
+                "the owner identity is used only through `fray owner ...` from the owner's interactive terminal",
             ));
         }
         if let Some(key) = &req.key {
@@ -289,7 +303,12 @@ impl Store {
                 return Ok(serde_json::from_str(&response)?);
             }
         }
-        if req.op != "join" {
+        if owner_op {
+            tx.execute(
+                "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
+                params![OWNER, "[]", now],
+            )?;
+        } else if req.op != "join" {
             registered(&tx, &req.actor)?;
         }
         let replaced = bind_session(&tx, req, now)?;
@@ -649,11 +668,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let id = integer(a, "id")?;
             let card = get_card(conn, id)?;
             if req.op == "mute" {
-                if card.kind == "question"
-                    && !card.terminal()
-                    && card.assignee.as_deref() == Some(actor)
-                {
-                    return Err(Error::new("cannot_mute_assigned_request", "an open question or objection assigned to you cannot be muted; resolve it or arrange a handoff"));
+                // Consistent with the delivery exemption: a request assigned to
+                // you is never muted, open or closed, so a mute is never accepted
+                // and then silently ignored (#19 review FU-1).
+                if card.kind == "question" && card.assignee.as_deref() == Some(actor) {
+                    return Err(Error::new("cannot_mute_assigned_request", "a question or objection assigned to you cannot be muted (its outcome must reach you); resolve it or arrange a handoff"));
                 }
                 conn.execute(
                     "INSERT OR IGNORE INTO muted_cards(agent,card_id) VALUES(?,?)",
@@ -668,11 +687,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     // Unmute restores eligible routing; it is not an implicit
                     // follow. Retain missed peer updates even if the actor wrote
                     // the latest event, without manufacturing an own-event receipt.
-                    // Only for cards already routed to the actor or that directly
-                    // involve it: topic relevance alone never creates a receipt
-                    // (#19 FU-B).
-                    let sql = "INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id)) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)";
-                    conn.execute(sql, params![actor, id])?;
+                    // Only for cards already routed to the actor, that directly
+                    // involve it, or that a rejoin would seed (active and
+                    // relevant): a closed card never routed gets no receipt
+                    // (#19 FU-B), and unmute agrees with join (FU-2).
+                    let sql = format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR ({ACTIVE} AND {RELEVANT})) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
+                    conn.execute(&sql, params![actor, id, actor, actor, actor, actor])?;
                 }
             }
             Ok(json!({"id":id,"muted":req.op=="mute","read_is_not_ack":true}))
@@ -1130,6 +1150,60 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )?;
             Ok(json!({"id":id,"ack_seq":acked,"pending_seq":pending,"still_pending":acked<pending}))
         }
+        "owner_decide" => {
+            // A standing owner decision (e.g. the charter), pinned for everyone.
+            check_fields(a, &["title", "summary", "pin"])?;
+            create_card(
+                conn,
+                OWNER,
+                &json!({
+                    "kind":"decision","topic":"*","title":string(a,"title")?,
+                    "summary":string(a,"summary")?,"pinned":boolean(a,"pin",true)?,
+                    "tags":["authority:owner"]
+                }),
+                Value::Null,
+                now,
+            )
+        }
+        "owner_answer" => {
+            // The owner answers a request from the owner queue. The asker is
+            // routed the answer like any reply; approve/decline also close it.
+            check_fields(a, &["id", "verdict", "body"])?;
+            let id = integer(a, "id")?;
+            let verdict = string(a, "verdict")?;
+            if !["approve", "decline", "answer"].contains(&verdict) {
+                return Err(Error::invalid("verdict: approve|decline|answer"));
+            }
+            let body = string(a, "body")?;
+            let text = match verdict {
+                "approve" => format!("APPROVED by the owner. {body}"),
+                "decline" => format!("DECLINED by the owner. {body}"),
+                _ => body.to_owned(),
+            };
+            let mut result = mutate(
+                conn,
+                &Request::new(
+                    "annotate",
+                    OWNER,
+                    json!({"id":id,"kind":"answer","body":text.trim_end()}),
+                ),
+                now,
+            )?;
+            let card = get_card(conn, id)?;
+            if verdict != "answer" && !card.terminal() {
+                result = mutate(
+                    conn,
+                    &Request::new(
+                        "patch",
+                        OWNER,
+                        json!({"id":id,"expect":card.rev,"status":"resolved","over_objection":"The owner decided this request."}),
+                    ),
+                    now,
+                )?;
+            }
+            result["verdict"] = json!(verdict);
+            Ok(result)
+        }
         "present" => {
             // Records exactly what a CLI showed. Presentation is exposure, never ACK.
             check_fields(a, &["source", "receipts"])?;
@@ -1257,7 +1331,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
