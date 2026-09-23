@@ -40,6 +40,15 @@ fn overlap_semantics() {
     assert!(paths_overlap("src/", "src/a/"));
     assert!(!paths_overlap("src/", "srcx/a.rs"));
     assert!(!paths_overlap("docs/", "src/store.rs"));
+    // Review of 58daa7a: spellings that must overlap.
+    assert!(paths_overlap("./src/x", "src/x"));
+    assert!(paths_overlap("src", "src/x"));
+    assert!(paths_overlap("src//x", "src/x"));
+    assert!(paths_overlap("src/*.rs", "src/store.rs"));
+    assert!(paths_overlap("Src/X", "src/x"));
+    assert!(paths_overlap("docs/", "docs/my file.md"));
+    // Unparseable input is never reported clear.
+    assert!(paths_overlap("../outside", "src/x"));
 }
 
 #[test]
@@ -179,7 +188,7 @@ fn status_is_one_line_per_agent_updated_in_place() {
 #[test]
 fn bad_lane_paths_are_refused() {
     let mut s = board();
-    for bad in ["/etc/passwd", "../outside", "a/../b", "has space", ""] {
+    for bad in ["/etc/passwd", "../outside", "a/../b", "tab\there", ""] {
         assert_eq!(
             take(&mut s, "claude", &[bad], false).unwrap_err(),
             "invalid",
@@ -269,6 +278,24 @@ fn preflight_sees_declared_lanes_and_real_edits_in_other_worktrees() {
         &["lane", "take", "main.rs", "--purpose", "refactor"],
     );
     let report = fray("me", &["preflight", "store.rs", "main.rs"]);
+    // Review: paths typed relative to a subdirectory, or absolute, resolve to
+    // the repository; quoted names and both sides of a rename are observed.
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(peer.join("my file.md"), "x\n").unwrap();
+    git(&peer, &["mv", "main.rs", "renamed.rs"]);
+    let sub = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_fray"))
+            .current_dir(repo.join("src"))
+            .args(["--home", home.to_str().unwrap(), "--as", "me", "--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null)
+    };
+    let from_sub = sub(&["preflight", "../store.rs"]);
+    let absolute = sub(&["preflight", repo.join("my file.md").to_str().unwrap()]);
+    let renamed_from = sub(&["preflight", "../main.rs"]);
+    let outside = sub(&["preflight", "/etc/hosts"]);
     fray("me", &["stop"]);
     let _ = fs::remove_dir_all(&root);
     assert_eq!(report["clear"], false, "{report}");
@@ -280,4 +307,152 @@ fn preflight_sees_declared_lanes_and_real_edits_in_other_worktrees() {
         "{report}"
     );
     assert_eq!(report["observed"][0]["branch"], "peer");
+    assert_eq!(from_sub["clear"], false, "{from_sub}");
+    assert_eq!(from_sub["paths"], json!(["store.rs"]));
+    assert_eq!(absolute["clear"], false, "{absolute}");
+    assert_eq!(absolute["observed"][0]["paths"], json!(["my file.md"]));
+    assert!(
+        renamed_from["observed"][0]["paths"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("main.rs")),
+        "{renamed_from}"
+    );
+    assert_eq!(outside["error"]["code"], "invalid", "{outside}");
+}
+
+#[test]
+fn review_a_handed_over_queued_lane_stays_queued_and_queues_are_fifo() {
+    let mut s = board();
+    run(&mut s, "extra", "join", json!({}), NOW).unwrap();
+    let held = take(&mut s, "claude", &["src/x"], false).unwrap();
+    let queued = take(&mut s, "codex", &["src/x"], true).unwrap();
+    // BLOCK: handing over a queued lane must not make it held.
+    let handed = run(
+        &mut s,
+        "codex",
+        "lane_release",
+        json!({"id": queued["lane"]["id"], "to": "deepseek"}),
+        NOW,
+    )
+    .unwrap();
+    let lanes = run(&mut s, "claude", "lanes", json!({}), NOW).unwrap()["lanes"].clone();
+    let moved = lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == handed["handed_to_lane"])
+        .unwrap()
+        .clone();
+    assert_eq!(moved["state"], "queued");
+    // FIFO: a later take overlapping the queued lane waits behind it.
+    let later = take(&mut s, "extra", &["src/"], true).unwrap();
+    assert_eq!(later["lane"]["state"], "queued");
+    run(
+        &mut s,
+        "claude",
+        "lane_release",
+        json!({"id": held["lane"]["id"]}),
+        NOW,
+    )
+    .unwrap();
+    let lanes = run(&mut s, "claude", "lanes", json!({}), NOW).unwrap()["lanes"].clone();
+    let state = |id: &Value| {
+        lanes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| &l["id"] == id)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state(&handed["handed_to_lane"]), "held");
+    assert_eq!(state(&later["lane"]["id"]), "queued");
+}
+
+#[test]
+fn review_handover_needs_a_joined_recipient_and_stale_holders_are_told() {
+    let mut s = board();
+    run(
+        &mut s,
+        "claude",
+        "send",
+        json!({"to": "ghost", "body": "hi", "pending": true}),
+        NOW,
+    )
+    .unwrap();
+    let held = take(&mut s, "claude", &["docs/"], false).unwrap();
+    assert_eq!(
+        run(
+            &mut s,
+            "claude",
+            "lane_release",
+            json!({"id": held["lane"]["id"], "to": "ghost"}),
+            NOW
+        )
+        .unwrap_err(),
+        "unknown_agent"
+    );
+    let later = NOW + IDENTITY_TTL_MS + 1;
+    run(&mut s, "codex", "heartbeat", json!({}), later).unwrap();
+    run(
+        &mut s,
+        "codex",
+        "lane_release",
+        json!({"id": held["lane"]["id"]}),
+        later,
+    )
+    .unwrap();
+    let inbox = run(&mut s, "claude", "inbox", json!({}), later).unwrap();
+    assert!(inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["card"]["title"] == "Your stale lane was released"));
+}
+
+#[test]
+fn review_reading_keeps_an_agent_present() {
+    let mut s = board();
+    let held = take(&mut s, "claude", &["src/"], false).unwrap();
+    // Claude only reads (inbox + the CLI's presentation) for longer than the
+    // identity TTL: it must not become stale.
+    run(
+        &mut s,
+        "codex",
+        "send",
+        json!({"to": "claude", "body": "ping"}),
+        NOW,
+    )
+    .unwrap();
+    let mut at = NOW;
+    for _ in 0..6 {
+        at += IDENTITY_TTL_MS / 4;
+        let page = run(&mut s, "claude", "inbox", json!({}), at).unwrap();
+        let receipts: Vec<Value> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["receipt"].clone())
+            .collect();
+        if !receipts.is_empty() {
+            run(
+                &mut s,
+                "claude",
+                "present",
+                json!({"source": "inbox", "receipts": receipts}),
+                at,
+            )
+            .unwrap();
+        }
+    }
+    let lanes = run(&mut s, "codex", "lanes", json!({}), at).unwrap()["lanes"].clone();
+    let lane = lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == held["lane"]["id"])
+        .unwrap()
+        .clone();
+    assert_eq!(lane["stale"], false);
 }

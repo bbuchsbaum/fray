@@ -156,7 +156,7 @@ pub fn render_request(thread: &Value, truncated: bool) -> String {
         .take(ACTOR)
         .collect();
     out.push_str(&format!(
-        "\n==== DECIDING #{id} revision {rev} ({status}) ====\nFROM: {author}\nTITLE:\n"
+        "\n==== DECIDING #{id} rev {rev} ({status}) ====\nFROM: {author}\nTITLE:\n"
     ));
     let title = quote_rows(head["title"].as_str().unwrap_or(""));
     let body = quote_rows(text);

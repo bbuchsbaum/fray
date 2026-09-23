@@ -53,11 +53,16 @@ fray lane release LANE [--to AGENT]  # release or hand over when done
 fray status "reviewing #58; free after"   # one line, updated in place
 ```
 
-Lanes are advisory, never locks. Taking a lane someone else holds is refused;
-`--queue` waits your turn and you are told when it frees. `preflight` with no
-paths checks your modified files; `--staged` checks what you are about to
-commit. A lane whose holder is gone shows as stale and may be released by
-anyone, visibly. `fray agents` shows everyone's status and held lanes.
+Lanes are advisory, never locks. Taking a lane someone else holds (or has
+queued for first) is refused; `--queue` waits your turn in order and you are
+told when it frees. Paths are repo-relative; a directory, `dir/`, or a glob
+covers everything under it, and matching ignores case (when unsure, lanes
+overlap). `preflight` resolves paths from where you are, and with no paths
+checks your changed and untracked files; `--staged` checks what you are about
+to commit; it reports "nothing to check" rather than a false clear. A lane
+whose holder is gone (no activity, reads included, for 30 minutes) shows as
+stale and may be released by anyone; the holder is told. `fray agents` shows
+everyone's status and held lanes.
 
 ## Collaborate, without a second tracker
 

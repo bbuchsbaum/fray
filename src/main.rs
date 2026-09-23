@@ -602,36 +602,118 @@ fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Paths from `git status --porcelain` lines (renames keep the new path).
-fn porcelain_paths(lines: Vec<String>) -> Vec<String> {
-    lines
-        .into_iter()
-        .filter(|l| l.len() > 3)
-        .map(|l| {
-            let path = &l[3..];
-            path.rsplit(" -> ")
-                .next()
-                .unwrap_or(path)
-                .trim_matches('"')
-                .to_owned()
-        })
-        .collect()
+/// Paths git reports as changed in a worktree, from `status --porcelain -z`
+/// (so quoted names are exact): tracked changes, both sides of a rename, and
+/// untracked files, which may be new work too.
+fn changed_paths(dir: &Path) -> Vec<String> {
+    let out = Process::new("git")
+        .current_dir(dir)
+        .args(["status", "--porcelain", "-z", "--untracked-files=normal"])
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        paths.push(entry[3..].to_owned());
+        // A rename or copy is followed by its original path.
+        if matches!(&entry[..1], "R" | "C") {
+            if let Some(from) = fields.next() {
+                paths.push(from.to_owned());
+            }
+        }
+    }
+    paths
+}
+
+/// Resolve a path the user typed (relative to where they are, or absolute)
+/// to a repo-relative path. Symlinks are resolved through the longest
+/// existing ancestor (the file itself may not exist yet). A path outside the
+/// repository is an error, never silently "clear".
+fn repo_relative(top: &Path, prefix: &str, typed: &str) -> Result<String> {
+    let joined = if Path::new(typed).is_absolute() {
+        PathBuf::from(typed)
+    } else {
+        top.join(prefix).join(typed)
+    };
+    // Lexically normalize . and .. first.
+    let mut lexical = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                lexical.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => lexical.push(other.as_os_str()),
+        }
+    }
+    // Canonicalize the longest existing ancestor, then re-append the rest.
+    let mut existing = lexical.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let resolved = loop {
+        if let Ok(real) = std::fs::canonicalize(&existing) {
+            break rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (
+            existing.file_name().map(|n| n.to_owned()),
+            existing.parent(),
+        ) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => break lexical.clone(),
+        }
+    };
+    let root = std::fs::canonicalize(top).unwrap_or_else(|_| top.to_path_buf());
+    match resolved.strip_prefix(&root) {
+        Ok(rel) if rel.as_os_str().is_empty() => Ok(".".to_owned()),
+        Ok(rel) => Ok(rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")),
+        Err(_) => Err(Error::invalid(format!(
+            "{typed:?} is outside this repository ({})",
+            root.display()
+        ))),
+    }
 }
 
 /// Declared lanes plus observed edits in every other worktree of this repo.
-fn preflight(home: &Path, actor: &str, mut paths: Vec<String>, staged: bool) -> Result<Value> {
+fn preflight(home: &Path, actor: &str, typed: Vec<String>, staged: bool) -> Result<Value> {
     let here = std::env::current_dir()?;
-    let top = git_lines(&here, &["rev-parse", "--show-toplevel"])
+    let Some(top) = git_lines(&here, &["rev-parse", "--show-toplevel"])
         .pop()
         .map(PathBuf::from)
-        .unwrap_or(here.clone());
-    if staged {
-        paths = git_lines(&top, &["diff", "--cached", "--name-only"]);
-    } else if paths.is_empty() {
-        paths = porcelain_paths(git_lines(
-            &top,
-            &["status", "--porcelain", "--untracked-files=no"],
+    else {
+        return Err(Error::invalid(
+            "preflight needs a git repository (run it inside the project)",
         ));
+    };
+    let prefix = git_lines(&here, &["rev-parse", "--show-prefix"])
+        .pop()
+        .unwrap_or_default();
+    let paths: Vec<String> = if staged {
+        git_lines(&top, &["diff", "--cached", "--name-only"])
+    } else if typed.is_empty() {
+        changed_paths(&top)
+    } else {
+        typed
+            .iter()
+            .map(|p| repo_relative(&top, &prefix, p))
+            .collect::<Result<_>>()?
+    };
+    if paths.is_empty() {
+        return Ok(
+            json!({"paths":[],"declared":[],"observed":[],"clear":true,"nothing_checked":true,
+            "note":"nothing to check: no paths given and no changed or staged files"}),
+        );
     }
     let overlaps = |theirs: &str| {
         paths
@@ -646,7 +728,7 @@ fn preflight(home: &Path, actor: &str, mut paths: Vec<String>, staged: bool) -> 
         .into_iter()
         .filter(|l| l["agent"] != actor)
         .collect();
-    // Observed: what other worktrees have actually modified, declared or not.
+    // Observed: what other worktrees have actually changed, declared or not.
     let mut observed = Vec::new();
     let mut worktree: Option<PathBuf> = None;
     let mut branch = String::new();
@@ -659,15 +741,11 @@ fn preflight(home: &Path, actor: &str, mut paths: Vec<String>, staged: bool) -> 
             branch = b.trim_start_matches("refs/heads/").to_owned();
         } else if line.is_empty() {
             if let Some(wt) = worktree.take() {
-                let same = fs_same(&wt, &top);
-                if !same {
-                    let touched: Vec<String> = porcelain_paths(git_lines(
-                        &wt,
-                        &["status", "--porcelain", "--untracked-files=no"],
-                    ))
-                    .into_iter()
-                    .filter(|p| overlaps(p))
-                    .collect();
+                if !fs_same(&wt, &top) {
+                    let touched: Vec<String> = changed_paths(&wt)
+                        .into_iter()
+                        .filter(|p| overlaps(p))
+                        .collect();
                     if !touched.is_empty() {
                         observed.push(json!({"worktree":wt,"branch":branch,"paths":touched}));
                     }
@@ -677,7 +755,9 @@ fn preflight(home: &Path, actor: &str, mut paths: Vec<String>, staged: bool) -> 
         }
     }
     let clear = declared.is_empty() && observed.is_empty();
-    Ok(json!({"paths":paths,"declared":declared,"observed":observed,"clear":clear}))
+    Ok(
+        json!({"paths":paths,"declared":declared,"observed":observed,"clear":clear,"nothing_checked":false}),
+    )
 }
 
 fn fs_same(a: &Path, b: &Path) -> bool {
@@ -887,7 +967,9 @@ fn send(
             Ok(v)
         }
         Err(e) => {
-            if mutation {
+            // Only a transport failure is worth retrying with the same key;
+            // a refusal will be refused again.
+            if mutation && matches!(e.code.as_str(), "io" | "unavailable" | "protocol") {
                 eprintln!("Mutation request key: {}. For an ambiguous transport failure, retry the identical command with --key {}.",req.key.as_deref().unwrap_or(""),req.key.as_deref().unwrap_or(""));
             }
             Err(e)
