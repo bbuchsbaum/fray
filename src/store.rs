@@ -1953,6 +1953,21 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         }
         out["budget_truncated"] = json!(true);
         if !removed {
+            // Readiness metadata can itself exhaust a small budget (e.g. with
+            // the maximum agent name). Keep the warning and arm command while
+            // dropping optional explanation/diagnostics after all rows are gone.
+            for key in ["arm_guidance", "listening"] {
+                if out["idle_readiness"]
+                    .as_object_mut()
+                    .is_some_and(|readiness| readiness.remove(key).is_some())
+                {
+                    out["idle_readiness"]["details_omitted"] = json!(true);
+                    removed = true;
+                    break;
+                }
+            }
+        }
+        if !removed {
             break;
         }
     }

@@ -215,3 +215,23 @@ fn wake_warning_distinguishes_connected_expired_filtered_and_armed() {
         false
     );
 }
+
+#[test]
+fn readiness_warning_with_maximum_identity_fits_the_minimum_brief_budget() {
+    let mut s = board();
+    let actor = "a".repeat(80);
+    call(&mut s, &actor, "join", json!({}));
+    call(
+        &mut s,
+        &actor,
+        "send",
+        json!({"to":"reviewer","ask":true,"body":"Review requested"}),
+    );
+    let brief = call(&mut s, &actor, "brief", json!({"budget":2000}));
+    assert!(serde_json::to_vec(&brief).unwrap().len() <= 2000);
+    assert!(brief["idle_readiness"]["warning"].is_string());
+    assert!(brief["idle_readiness"]["arm_command"].is_string());
+    assert_eq!(brief["idle_readiness"]["open_requests_awaiting_others"], 1);
+    assert_eq!(brief["idle_readiness"]["details_omitted"], true);
+    assert_eq!(brief["budget_truncated"], true);
+}

@@ -3,15 +3,15 @@
 ## Phase 1 client and attention candidate (2026-09-23)
 
 At source manifest
-`641552e43b67b793f2fb1a623f1b9b4ad6948a5350c98bedcd521192fac440c0`,
-formatting, locked check, strict Clippy, **130 Rust tests** and locked build pass.
-A frozen binary (`061df82e8eaae95a95297f1450add97cd88ffa08f6d1bec9192bb6e570816ea5`)
+`28f4c5de5a65b49fe9246f9149d92767faa159736f9a3cb09459dbd44b1286b2`,
+formatting, locked check, strict Clippy, **131 Rust tests** and locked build pass.
+A frozen binary (`5be756aa1cf644410cc435ced072045908625a73cb944960ca7ca1c43464fe61`)
 passes **73 IPC tests**: 10 new Phase 1, 32 legacy, 24 attention and 7 reliability.
 Python resource warnings are errors. SQL validation prepares 76 static statements
 and passes 22 checks; bundled skill and Claude plugin validation pass.
 
-Evidence is `/tmp/fray-phase1-candidate/` (frozen binary, 46-file source manifest,
-IPC logs and exit metadata), `/tmp/fray-phase1-cargo-final.log`, and
+Evidence is `/tmp/fray-phase1-candidate-v2/` (frozen binary, 46-file source manifest,
+IPC logs and exit metadata), `/tmp/fray-phase1-cargo-v2.log`, and
 `/tmp/fray-phase1-sql-final.log`. The manifest includes source, tests, scripts,
 integrations and bundled skills. Validation documentation itself is excluded.
 
@@ -22,7 +22,11 @@ unrelated-traffic isolation, mute/unmute with exact unread receipts, direct link
 objections remaining visible, and no routing after leave. Hook payload tests cover
 PreToolUse/PostToolUse ordering, FRAY_SELECTION, no implicit rejoin, and one-shot
 Stop warnings. Store tests distinguish manual/boundary, expired, filtered and
-armed activation, including controller expiry and the brief byte budget.
+armed activation, including controller expiry and the brief byte budget. A post-gate edge probe
+found the first candidate returned 2,042 bytes for a 2,000-byte brief with an
+80-character actor name. The corrected candidate adds a regression and drops
+optional readiness detail after exhausting rows, retaining the warning and arm
+command. All Cargo and IPC gates above were rerun on that correction.
 
 These are local macOS tests with synthetic host payloads and ordinary Python
 children. New native host hook installation, automatic idle wake across every
