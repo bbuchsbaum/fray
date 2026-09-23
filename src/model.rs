@@ -226,6 +226,10 @@ impl Card {
         v["summary"] = json!(clip(&self.summary, 240));
         v["summary_truncated"] = json!(self.summary.chars().count() > 240);
         v["lease_live"] = json!(self.lease_owner.is_some() && self.lease_until_ms > now);
+        if self.author == "owner" {
+            // Written only through `fray owner`; unsigned (Tier 1).
+            v["authority"] = json!("owner (unsigned)");
+        }
         v
     }
 }

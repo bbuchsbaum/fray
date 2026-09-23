@@ -7,13 +7,64 @@ use serde_json::{json, Value};
 use std::{path::Path, time::Duration};
 
 const COLS:&str="id,rev,kind,topic,title,summary,status,priority,pinned,tags,author,assignee,lease_owner,lease_until_ms,fence,created_ms,updated_ms,last_seq";
+/// The reserved identity for the project owner (see owner-authority design).
+pub const OWNER: &str = "owner";
+
+/// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
+/// owner1 …): case, separators and a numeric suffix are ignored.
+fn owner_lookalike(name: &str) -> bool {
+    let folded: String = name
+        .to_lowercase()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| if c == '0' { 'o' } else { c })
+        .collect();
+    folded.trim_end_matches(|c: char| c.is_ascii_digit()) == OWNER
+}
+
+/// Marks an ask card the owner approved or declined; set only by the owner.
+const DECIDED: &str = "authority:decided";
+
+fn decided_tags(c: &Card) -> Vec<String> {
+    let mut tags = c.tags.clone();
+    if !tags.iter().any(|t| t == DECIDED) {
+        tags.push(DECIDED.to_owned());
+    }
+    tags.retain(|t| !t.is_empty());
+    tags
+}
+
+/// Cards only the owner may change: the owner's own, and requests the owner
+/// has decided (so a decision can never be moved onto different content).
+fn owner_controlled(c: &Card) -> bool {
+    c.author == OWNER || c.tags.iter().any(|t| t == DECIDED)
+}
+
+/// Only the owner may use `authority` tags (in any case or spelling), so a
+/// tag can never read as owner authority on an agent's card.
+fn reserve_authority_tags(actor: &str, tags: &[String]) -> Result<()> {
+    let reserved = |t: &String| {
+        t.to_lowercase()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .starts_with("authority")
+    };
+    if actor != OWNER && tags.iter().any(reserved) {
+        return Err(Error::new(
+            "reserved_owner",
+            "authority: tags are reserved for the owner",
+        ));
+    }
+    Ok(())
+}
 const ACTIVE: &str = "c.status NOT IN ('resolved','superseded','withdrawn')";
 // Topic scope is an attention filter, not a visibility/security boundary.
 const RELEVANT:&str="(c.pinned=1 OR c.topic='*' OR c.author=? OR c.assignee=? OR c.lease_owner=? OR EXISTS(SELECT 1 FROM agents a WHERE a.name=? AND (a.role='steward' OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=a.name AND p.card_id=c.id) OR (c.kind IN ('task','question') AND c.assignee IS NULL) OR EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=c.topic OR (t.value='*' AND substr(c.topic,1,1)<>'@')))))";
 // One predicate for selected inboxes, blocking waits, runner packets and progress checks.
 const INVOLVED: &str = "(c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM agents a,json_each(a.topics) t WHERE a.name=?1 AND t.value<>'*' AND t.value=c.topic))";
 // An old mute must not hide a question subsequently assigned to this actor.
-const UNMUTED: &str = "(NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) OR (c.kind='question' AND c.assignee=?1 AND c.status NOT IN ('resolved','superseded','withdrawn')))";
+const UNMUTED: &str = "(NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id) OR (c.kind='question' AND c.assignee=?1))";
 
 pub fn selection(args: &Value) -> Result<&str> {
     let value = args
@@ -251,6 +302,8 @@ impl Store {
                 | "mute"
                 | "unmute"
                 | "controller"
+                | "owner_decide"
+                | "owner_answer"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -260,6 +313,22 @@ impl Store {
         if !valid_name(&req.actor) {
             return Err(Error::invalid(
                 "set --as/FRAY_AGENT to a unique terminal identity (1-80 name characters)",
+            ));
+        }
+        // The owner identity writes only through owner operations, and owner
+        // operations only as the owner. Collision prevention against accidents
+        // and injected text, not authentication (docs/design/owner-authority.md).
+        let owner_op = req.op.starts_with("owner_");
+        if req.actor != OWNER && req.op == "join" && owner_lookalike(&req.actor) {
+            return Err(Error::new(
+                "reserved_owner",
+                "that name could be mistaken for the owner; choose another",
+            ));
+        }
+        if (req.actor == OWNER) != owner_op {
+            return Err(Error::new(
+                "reserved_owner",
+                "the owner identity is used only through `fray owner ...` from the owner's interactive terminal",
             ));
         }
         if let Some(key) = &req.key {
@@ -289,7 +358,12 @@ impl Store {
                 return Ok(serde_json::from_str(&response)?);
             }
         }
-        if req.op != "join" {
+        if owner_op {
+            tx.execute(
+                "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
+                params![OWNER, "[]", now],
+            )?;
+        } else if req.op != "join" {
             registered(&tx, &req.actor)?;
         }
         let replaced = bind_session(&tx, req, now)?;
@@ -560,7 +634,8 @@ fn emit(
     )?;
     if notify {
         // Fan-out and head update commit together. Leave suppresses every route.
-        // Mute suppresses a card unless it is an open request assigned to the recipient.
+        // Mute suppresses a card unless it is a request assigned to the recipient,
+        // open or closed: its final outcome must reach them (#19 FU-A).
         conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq)
           SELECT a.name,?1,?2 FROM agents a WHERE a.name<>?3 AND a.enabled=1
             AND (NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=a.name AND m.card_id=?1)
@@ -570,7 +645,7 @@ fn emit(
             ?4=1 OR ?5='*' OR ?9=1 OR a.role='steward' OR
               EXISTS(SELECT 1 FROM json_each(a.topics) t WHERE t.value=?5 OR (t.value='*' AND substr(?5,1,1)<>'@')))
           ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=excluded.pending_seq",
-          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none(),card.kind=="question" && !card.terminal()])?;
+          params![id,seq,actor,card.pinned,card.topic,card.author,card.assignee,card.lease_owner,op=="post" && matches!(card.kind.as_str(),"task"|"question") && card.assignee.is_none(),card.kind=="question"])?;
         conn.execute(
             "INSERT OR IGNORE INTO participants(agent,card_id) VALUES(?,?)",
             params![actor, id],
@@ -592,6 +667,7 @@ fn create_card(
     )?;
     apply_fields(&mut card, args)?;
     validate_card(&card)?;
+    reserve_authority_tags(actor, &card.tags)?;
     assignee_known(conn, &card.assignee)?;
     conn.execute("INSERT INTO cards(kind,topic,title,summary,status,priority,pinned,tags,author,assignee,created_ms,updated_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![card.kind,card.topic,card.title,card.summary,card.status,card.priority,card.pinned,serde_json::to_string(&card.tags)?,actor,card.assignee,now,now])?;
     emit(
@@ -648,11 +724,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let id = integer(a, "id")?;
             let card = get_card(conn, id)?;
             if req.op == "mute" {
-                if card.kind == "question"
-                    && !card.terminal()
-                    && card.assignee.as_deref() == Some(actor)
-                {
-                    return Err(Error::new("cannot_mute_assigned_request", "an open question or objection assigned to you cannot be muted; resolve it or arrange a handoff"));
+                // Consistent with the delivery exemption: a request assigned to
+                // you is never muted, open or closed, so a mute is never accepted
+                // and then silently ignored (#19 review FU-1).
+                if card.kind == "question" && card.assignee.as_deref() == Some(actor) {
+                    return Err(Error::new("cannot_mute_assigned_request", "a question or objection assigned to you cannot be muted (its outcome must reach you); resolve it or arrange a handoff"));
                 }
                 conn.execute(
                     "INSERT OR IGNORE INTO muted_cards(agent,card_id) VALUES(?,?)",
@@ -667,7 +743,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     // Unmute restores eligible routing; it is not an implicit
                     // follow. Retain missed peer updates even if the actor wrote
                     // the latest event, without manufacturing an own-event receipt.
-                    let sql = format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR {RELEVANT}) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
+                    // Only for cards already routed to the actor, that directly
+                    // involve it, or that a rejoin would seed (active and
+                    // relevant): a closed card never routed gets no receipt
+                    // (#19 FU-B), and unmute agrees with join (FU-2).
+                    let sql = format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,(SELECT max(e.seq) FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') FROM cards c WHERE c.id=?2 AND (EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id) OR c.author=?1 OR c.assignee=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR ({ACTIVE} AND {RELEVANT})) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor<>?1 AND e.op<>'renew') ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
                     conn.execute(&sql, params![actor, id, actor, actor, actor, actor])?;
                 }
             }
@@ -761,6 +841,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // Explicitly leave mail for an agent that has not joined yet: it
             // is registered disabled and receives the message when it joins.
             // Only on request, so a typo still fails with suggestions.
+            if boolean(a, "pending", false)? && target != OWNER && owner_lookalike(target) {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "that name could be mistaken for the owner; choose another",
+                ));
+            }
             if boolean(a, "pending", false)? {
                 conn.execute(
                     "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
@@ -833,6 +919,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     format!("card {} is revision {}; read before retrying", c.id, c.rev),
                 ));
             }
+            // Authority follows the author, so only the owner may change an
+            // owner card; others can reply to it, never rewrite it.
+            if owner_controlled(&c) && actor != OWNER {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "owner cards and owner-decided requests can only be changed by the owner; reply instead",
+                ));
+            }
             if c.lease_owner.is_some() {
                 check_lease(&c, actor, integer(a, "fence")?, now, false)?;
             }
@@ -846,6 +940,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             apply_fields(&mut c, a)?;
             validate_card(&c)?;
+            reserve_authority_tags(actor, &c.tags)?;
             assignee_known(conn, &c.assignee)?;
             // Resolving past an open objection must be deliberate and visible.
             // Superseding or withdrawing is not a claim that the work is right.
@@ -893,12 +988,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ));
             }
             let refs = a.get("refs").map(tags).transpose()?.unwrap_or_default();
+            reserve_authority_tags(actor, &refs)?;
             let mut merged = c.tags.clone();
             merged.extend(refs.iter().cloned());
             merged.sort();
             merged.dedup();
             let merged = tags(&json!(merged))?;
-            if merged != c.tags {
+            // A reply never changes an owner card: its refs stay on the reply.
+            if merged != c.tags && (!owner_controlled(&c) || actor == OWNER) {
                 conn.execute(
                     "UPDATE cards SET tags=?,rev=rev+1,updated_ms=? WHERE id=?",
                     params![serde_json::to_string(&merged)?, now, c.id],
@@ -978,6 +1075,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "claim" | "renew" | "release" => {
             check_fields(a, &["id", "fence", "ttl"])?;
             let c = get_card(conn, integer(a, "id")?)?;
+            // Leasing an owner card would edit it and redirect objections to
+            // the leaseholder instead of the owner.
+            if owner_controlled(&c) && actor != OWNER && req.op != "release" {
+                return Err(Error::new(
+                    "reserved_owner",
+                    "owner cards cannot be claimed; reply to it instead",
+                ));
+            }
             let ttl = bounded(a, "ttl", 900, 1, 86400)?;
             match req.op.as_str() {
                 "claim" => {
@@ -1126,6 +1231,94 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )?;
             Ok(json!({"id":id,"ack_seq":acked,"pending_seq":pending,"still_pending":acked<pending}))
         }
+        "owner_decide" => {
+            // A standing owner decision (e.g. the charter), pinned for everyone.
+            check_fields(a, &["title", "summary", "pin"])?;
+            create_card(
+                conn,
+                OWNER,
+                &json!({
+                    "kind":"decision","topic":"*","title":string(a,"title")?,
+                    "summary":string(a,"summary")?,"pinned":boolean(a,"pin",true)?,
+                    "tags":["authority:owner"]
+                }),
+                Value::Null,
+                now,
+            )
+        }
+        "owner_answer" => {
+            // The owner answers a request from the owner queue. The asker is
+            // routed the answer like any reply; approve/decline also close it.
+            check_fields(a, &["id", "verdict", "body", "expect"])?;
+            let id = integer(a, "id")?;
+            let verdict = string(a, "verdict")?;
+            if !["approve", "decline", "answer"].contains(&verdict) {
+                return Err(Error::invalid("verdict: approve|decline|answer"));
+            }
+            let body = string(a, "body")?;
+            // A decision binds to exactly the version the owner saw: if the
+            // request changed since it was displayed, nothing is recorded.
+            let shown = get_card(conn, id)?;
+            if verdict != "answer" && shown.terminal() {
+                // A closed request cannot be decided (or decided twice).
+                return Err(Error::new(
+                    "already_closed",
+                    format!(
+                        "request #{id} is already {}; nothing was recorded",
+                        shown.status
+                    ),
+                ));
+            }
+            if verdict != "answer" && integer(a, "expect")? != shown.rev {
+                return Err(Error::new(
+                    "conflict",
+                    format!(
+                        "request #{id} changed since it was shown (now revision {}); review it again",
+                        shown.rev
+                    ),
+                ));
+            }
+            let what = format!("revision {}: {:?}", shown.rev, shown.title);
+            let text = match verdict {
+                "approve" => format!("APPROVED by the owner ({what}). {body}"),
+                "decline" => format!("DECLINED by the owner ({what}). {body}"),
+                // A reply records which version it answers, so a later edit
+                // of the request cannot borrow it.
+                _ => format!("{body}\n(Owner reply to {what}.)"),
+            };
+            let mut result = mutate(
+                conn,
+                &Request::new(
+                    "annotate",
+                    OWNER,
+                    json!({"id":id,"kind":"answer","body":text.trim_end()}),
+                ),
+                now,
+            )?;
+            let card = get_card(conn, id)?;
+            if verdict != "answer" && !card.terminal() {
+                // An agent's lease on the request never blocks the owner's
+                // decision: clear it (and advance the fence) first.
+                if card.lease_owner.is_some() {
+                    conn.execute(
+                        "UPDATE cards SET lease_owner=NULL,lease_until_ms=0,fence=fence+1 WHERE id=?",
+                        [id],
+                    )?;
+                }
+                let card = get_card(conn, id)?;
+                result = mutate(
+                    conn,
+                    &Request::new(
+                        "patch",
+                        OWNER,
+                        json!({"id":id,"expect":card.rev,"status":if verdict == "approve" {"resolved"} else {"withdrawn"},"tags":decided_tags(&card),"over_objection":"The owner decided this request."}),
+                    ),
+                    now,
+                )?;
+            }
+            result["verdict"] = json!(verdict);
+            Ok(result)
+        }
         "present" => {
             // Records exactly what a CLI showed. Presentation is exposure, never ACK.
             check_fields(a, &["source", "receipts"])?;
@@ -1253,7 +1446,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1277,6 +1470,10 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let compact = boolean(a, "compact", false)?;
             let c = get_card(conn, integer(a, "id")?)?;
             let mut v = json!({"card":c,"cursor":highwater(conn)?});
+            if c.author == OWNER {
+                v["card"]["authority"] = json!("owner (unsigned)");
+            }
+            v["full_text"] = json!(full_text(conn, &c)?);
             open_follow_ups(conn, c.id, &mut v)?;
             if boolean(a, "unread", false)? {
                 // Unread = this reader's delivered-but-unacknowledged range. The
@@ -1793,6 +1990,9 @@ fn compact_event(e: &Value, previous: Option<&Value>) -> Value {
     let detail = &e["payload"]["detail"];
     let card = &e["payload"]["card"];
     let mut out = json!({"seq":e["seq"],"ts_ms":e["ts_ms"],"actor":e["actor"],"op":e["op"]});
+    if e["actor"] == OWNER {
+        out["authority"] = json!("owner (unsigned)");
+    }
     if let Some(kind) = detail["kind"].as_str() {
         out["kind"] = json!(kind);
     }
@@ -1851,6 +2051,34 @@ fn compact_events(events: &[Value]) -> Vec<Value> {
 
 const FOLLOW_UP_LIMIT: usize = 50;
 
+/// The complete current text of a card. A long send keeps only a bounded
+/// head on the card; the whole message lives in its creation event, or, for
+/// a linked question/objection card, in the annotation that raised it. The
+/// original is used exactly while the card still shows its creation head and
+/// that head is not the original itself (it was clipped, or had a pointer
+/// line added); after a patch the current summary is the truth. No lengths.
+fn full_text(conn: &Connection, card: &Card) -> Result<String> {
+    let original: Option<(Option<String>, Option<String>, bool)> = conn
+        .query_row(
+            "SELECT coalesce(json_extract(e.payload,'$.detail.body'),(SELECT json_extract(a.payload,'$.detail.body') FROM events a WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate')),json_extract(e.payload,'$.card.summary'),json_extract(e.payload,'$.detail.annotation_seq') IS NOT NULL FROM events e WHERE e.card_id=? AND e.op='post' ORDER BY e.seq LIMIT 1",
+            [card.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match original {
+        Some((Some(body), Some(head), linked)) if head == card.summary && body != head => {
+            match head.lines().last().filter(|_| linked) {
+                // Keep a linked card's pointer and "resolve" instruction.
+                Some(pointer) if pointer.starts_with("Full context:") => {
+                    format!("{body}\n{pointer}")
+                }
+                _ => body,
+            }
+        }
+        _ => card.summary.clone(),
+    })
+}
+
 /// Open follow-ups on `card` that originated as objections (not questions).
 fn open_objections(conn: &Connection, card: i64) -> Result<Vec<i64>> {
     let mut s = conn.prepare(&format!(
@@ -1866,11 +2094,11 @@ fn open_objections(conn: &Connection, card: i64) -> Result<Vec<i64>> {
 /// Never silently truncated: an omission is flagged with a continuation.
 fn open_follow_ups(conn: &Connection, card: i64, v: &mut Value) -> Result<()> {
     let mut s = conn.prepare(&format!(
-        "SELECT c.id,c.title,c.status,c.assignee,c.author FROM cards c WHERE {ACTIVE} AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value=?) ORDER BY c.id LIMIT {}",
+        "SELECT c.id,c.title,c.status,c.assignee,c.author FROM cards c WHERE {ACTIVE} AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value=?1) AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.op='post' AND json_extract(e.payload,'$.detail.parent_card')=?2) ORDER BY c.id LIMIT {}",
         FOLLOW_UP_LIMIT + 1
     ))?;
     let mut rows = s
-        .query_map([format!("parent:{card}")], |r| {
+        .query_map(params![format!("parent:{card}"), card], |r| {
             Ok(json!({"id":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"author":r.get::<_,String>(4)?}))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1999,34 +2227,7 @@ fn inbox(
         let mut compact = card.compact(now);
         let mut full = false;
         if addressed {
-            // A long send keeps only a bounded head on the card; the whole
-            // message lives in its creation event, or, for a linked
-            // question/objection card, in the annotation that raised it. Use
-            // it only while the card still shows that original head: after a
-            // patch, the current summary is the truth, never the superseded
-            // original.
-            let original: Option<(Option<String>, Option<String>, bool)> = conn
-                .query_row(
-                    "SELECT coalesce(json_extract(e.payload,'$.detail.body'),(SELECT json_extract(a.payload,'$.detail.body') FROM events a WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate')),json_extract(e.payload,'$.card.summary'),json_extract(e.payload,'$.detail.annotation_seq') IS NOT NULL FROM events e WHERE e.card_id=? AND e.op='post' ORDER BY e.seq LIMIT 1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            // The original is the full truth exactly when the card still shows
-            // its creation head and that head is not the original itself
-            // (it was clipped, or had a pointer line added). No length test.
-            let text = match original {
-                Some((Some(body), Some(head), linked)) if head == card.summary && body != head => {
-                    match head.lines().last().filter(|_| linked) {
-                        // Keep a linked card's pointer and "resolve" instruction.
-                        Some(pointer) if pointer.starts_with("Full context:") => {
-                            format!("{body}\n{pointer}")
-                        }
-                        _ => body,
-                    }
-                }
-                _ => card.summary.clone(),
-            };
+            let text = full_text(conn, &card)?;
             let cost = encoded(&text);
             if cost <= full_budget {
                 full_budget -= cost;
@@ -2052,7 +2253,8 @@ fn inbox(
             } else {
                 clip(&body, 200)
             };
-            annotations.push(json!({"seq":seq,"actor":who,"kind":kind,"excerpt":excerpt,"excerpt_truncated":!whole && body.chars().count()>200,"full":whole,"follow_up_id":follow_up}));
+            let authority = (who == OWNER).then_some("owner (unsigned)");
+            annotations.push(json!({"seq":seq,"actor":who,"authority":authority,"kind":kind,"excerpt":excerpt,"excerpt_truncated":!whole && body.chars().count()>200,"full":whole,"follow_up_id":follow_up}));
         }
         items.push(json!({"card":compact,"addressed":addressed,"full_text":full,"through_seq":pending,"ack_seq":ack,"receipt":{"store_id":store_id,"agent":actor,"id":id,"through_seq":pending},"annotations":annotations,"annotation_count":count,"annotations_omitted":(count-2).max(0)}));
     }
