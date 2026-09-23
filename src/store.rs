@@ -13,13 +13,25 @@ pub const OWNER: &str = "owner";
 /// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
 /// owner1 …): case, separators and a numeric suffix are ignored.
 fn owner_lookalike(name: &str) -> bool {
-    let folded: String = name
+    let alnum: String = name
         .to_lowercase()
         .chars()
         .filter(char::is_ascii_alphanumeric)
-        .map(|c| if c == '0' { 'o' } else { c })
         .collect();
-    folded.trim_end_matches(|c: char| c.is_ascii_digit()) == OWNER
+    // A numeric suffix first (owner1), then common character substitutions
+    // (0wner, own3r, 0vvner).
+    let folded: String = alnum
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .chars()
+        .map(|c| match c {
+            '0' => 'o',
+            '3' => 'e',
+            '1' => 'l',
+            _ => c,
+        })
+        .collect::<String>()
+        .replace("vv", "w");
+    folded == OWNER
 }
 
 /// Marks an ask card the owner approved or declined; set only by the owner.
