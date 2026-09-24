@@ -479,7 +479,8 @@ fn wait(
     };
     let limit = bounded(&req.args, "limit", 12, 1, 100)?;
     let mut store = shared.store.lock().map_err(|_| poisoned())?;
-    if after > store.highwater()? {
+    let start = store.highwater()?;
+    if after > start {
         return Err(Error::new(
             "cursor_ahead",
             "cursor exceeds this store; rejoin rather than skip data",
@@ -509,6 +510,20 @@ fn wait(
         if has_items || expired {
             page["store_id"] = json!(store.identity()?);
             page["timed_out"] = json!(expired && !has_items);
+            // Returning at once on items that were already pending looks like
+            // a wait that does not wait; say why and how to wait for new ones.
+            let old = page["items"].as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|i| i["through_seq"].as_i64().is_some_and(|s| s <= start))
+            });
+            if old {
+                page["note"] = json!(format!(
+                    "returned at once: {} item(s) were already pending in this selection. Handle and ack them (fray ack --last), or wait only for new activity with --new, or on one conversation with --card N",
+                    page["total"]
+                ));
+            }
             return Ok(page);
         }
         // The condition check and wait use the SAME mutex as commits: no lost wake-up.

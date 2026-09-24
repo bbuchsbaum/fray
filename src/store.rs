@@ -700,7 +700,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
     let actor = req.actor.as_str();
     match req.op.as_str() {
         "join" => {
-            check_fields(a, &["role", "topics", "takeover"])?;
+            check_fields(a, &["role", "topics", "takeover", "continued"])?;
             let existing: Option<(String, String, bool)> = conn
                 .query_row(
                     "SELECT role,topics,enabled FROM agents WHERE name=?",
@@ -885,7 +885,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     clip(body, 400)
                 )
             };
-            create_card(
+            let mut result = create_card(
                 conn,
                 actor,
                 &json!({
@@ -895,7 +895,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 }),
                 json!({"body":body}),
                 now,
-            )
+            )?;
+            if let Some(notice) = absence_notice(conn, target, actor, now)? {
+                result["notice"] = json!(notice);
+            }
+            Ok(result)
         }
         "post" => {
             check_fields(
@@ -1017,20 +1021,50 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 )?;
             }
             // An actionable annotation becomes a durable question, not a buried reply.
+            let mut routed_absent = None;
             let follow_up = if matches!(kind, "question" | "objection") {
-                // Route to whoever must respond: the first responsible party who
-                // is not the one raising it. An assignee objecting to its own
-                // card reaches the author, not itself.
+                // Route to the conversation partner. The author's question goes
+                // to whoever is working the card (lease owner, then assignee);
+                // anyone else's goes to a live claim holder, else to the
+                // author, who asked, not to a merely assigned party. An
+                // assignee objecting to its own card reaches the author.
                 let lease_owner = if c.lease_until_ms > now {
                     c.lease_owner.clone()
                 } else {
                     None
                 };
-                let target = [lease_owner, c.assignee.clone(), Some(c.author.clone())]
+                let parties = [lease_owner.clone(), c.assignee.clone()];
+                let order = if actor == c.author || parties.iter().flatten().any(|who| who == actor)
+                {
+                    vec![lease_owner, c.assignee.clone(), Some(c.author.clone())]
+                } else {
+                    vec![lease_owner, Some(c.author.clone()), c.assignee.clone()]
+                };
+                let candidates: Vec<String> = order
                     .into_iter()
                     .flatten()
-                    .find(|who| who != actor)
-                    .unwrap_or_else(|| actor.to_string());
+                    .filter(|who| who != actor)
+                    .collect();
+                // Prefer a party who is present; if none is, keep the first
+                // and say so, rather than leave the question with nobody.
+                let mut target = None;
+                for who in &candidates {
+                    if who == OWNER || agent_live(conn, who, now)? {
+                        target = Some(who.clone());
+                        break;
+                    }
+                }
+                let target = match target {
+                    Some(who) => who,
+                    None => {
+                        let who = candidates
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| actor.to_string());
+                        routed_absent = Some(who.clone());
+                        who
+                    }
+                };
                 // Name the concern, not the parent: nested parent titles are unreadable.
                 let first_line = body
                     .lines()
@@ -1084,6 +1118,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 )?;
                 result["follow_up"] = child["card"].clone();
                 result["cursor"] = child["event_seq"].clone();
+                if let Some(who) = routed_absent {
+                    if let Some(notice) = absence_notice(conn, &who, actor, now)? {
+                        result["notice"] = json!(format!(
+                            "{notice} Reroute with: fray patch {id} --expect 1 --assignee NAME"
+                        ));
+                    }
+                }
             }
             Ok(result)
         }
@@ -1433,6 +1474,29 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     format!("only {holder} can hand over lane {id}; release it, then take (or --queue) it yourself so earlier queuers keep their turn"),
                 ));
             }
+            if to == Some(holder.as_str()) {
+                return Err(Error::invalid(format!("lane {id} is already {holder}'s")));
+            }
+            if let (Some(to), true) = (to, lane["state"] == "held") {
+                // Handing over a held lane must not leave two agents holding
+                // overlapping paths (e.g. the giver's narrower lane inside it).
+                let others: Vec<Value> = lanes.iter().filter(|l| l["id"] != id).cloned().collect();
+                let paths: Vec<String> = serde_json::from_value(lane["paths"].clone())?;
+                let clash: Vec<String> = lane_conflicts(&others, to, &paths, None)
+                    .iter()
+                    .filter(|l| l["state"] == "held")
+                    .map(|l| format!("lane {} by {}", l["id"], l["agent"].as_str().unwrap_or("")))
+                    .collect();
+                if !clash.is_empty() {
+                    return Err(Error::new(
+                        "lane_busy",
+                        format!(
+                            "handing over lane {id} would overlap {}; release or hand over those first. Nothing was changed",
+                            clash.join(", ")
+                        ),
+                    ));
+                }
+            }
             if let Some(to) = to {
                 let joined: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM agents WHERE name=? AND enabled=1)",
@@ -1679,7 +1743,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2108,6 +2172,17 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
     }
     let actor = &req.actor;
     let takeover = req.op == "join" && boolean(&req.args, "takeover", false)?;
+    // Set by the host hook when a new session continues the same window
+    // (Claude Code's /clear): recorded as such, not as a hostile takeover.
+    let continued = if req.op == "join" {
+        match req.args.get("continued").and_then(Value::as_str) {
+            None => None,
+            Some(s @ ("clear" | "compact")) => Some(s),
+            Some(_) => return Err(Error::invalid("continued: clear|compact")),
+        }
+    } else {
+        None
+    };
     let bound: Option<(String, i64)> = conn
         .query_row(
             "SELECT session,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1",
@@ -2127,14 +2202,16 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
             return Err(Error::new(
                 "identity_busy",
                 format!(
-                    "{actor:?} is in use by another live session ({}, last seen {}s ago). Choose a distinct --as NAME; use join --takeover only if that session is gone",
+                    "{actor:?} is in use by another live session ({}, last seen {}s ago). Choose a distinct --as NAME; use join --takeover only if that session is gone (for example, you ran /clear and that was you)",
                     session_label(&held),
                     (now - seen) / 1000
                 ),
             ));
         }
         Some((held, seen)) => {
-            let reason = if now - seen < IDENTITY_TTL_MS {
+            let reason = if let Some(how) = continued {
+                format!("continued after /{how} by {}", session_label(session))
+            } else if now - seen < IDENTITY_TTL_MS {
                 format!("takeover by {}", session_label(session))
             } else {
                 format!("stale; replaced by {}", session_label(session))
@@ -2178,7 +2255,7 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
 }
 
 /// A lane path, normalized for comparison: repo-relative, no `..`, no
-/// control characters, no blank segments (Unicode names are fine). `./` and repeated or trailing slashes are dropped;
+/// control or invisible characters, no blank segments. `./` and repeated or trailing slashes are dropped;
 /// a glob (`*`, `?`, `[`) stands for its whole directory; comparison is
 /// case-insensitive. Deliberately conservative: when unsure, paths overlap.
 /// Returns the prefix ("" means the whole repository).
@@ -2187,7 +2264,7 @@ fn lane_path(p: &str) -> Result<String> {
         || p.len() > 200
         || p.starts_with('/')
         || p.split('/').any(|seg| seg == "..")
-        || p.chars().any(char::is_control)
+        || p.chars().any(|c| c.is_control() || invisible(c))
         || p.split('/')
             .any(|seg| !seg.is_empty() && seg.trim().is_empty())
     {
@@ -2199,10 +2276,25 @@ fn lane_path(p: &str) -> Result<String> {
         .split('/')
         .filter(|s| !s.is_empty() && *s != ".")
         .collect();
-    if let Some(glob) = parts.iter().position(|s| s.contains(['*', '?', '['])) {
-        parts.truncate(glob);
+    // A glob stands for its directory. So does a non-ASCII name: the same
+    // name can arrive precomposed or decomposed (NFC/NFD), and without
+    // Unicode tables the safe comparison is the whole enclosing directory.
+    if let Some(cut) = parts
+        .iter()
+        .position(|s| s.contains(['*', '?', '[']) || !s.is_ascii())
+    {
+        parts.truncate(cut);
     }
-    Ok(parts.join("/").to_lowercase())
+    Ok(parts.join("/").to_ascii_lowercase())
+}
+
+/// Characters that render as nothing or reorder text: zero-width, bidi
+/// controls, word joiners, BOM, variation selectors and tag characters.
+fn invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+        | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFFB | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
 }
 
 /// Whether two lane paths could touch the same file: equal, or one is a
@@ -2231,6 +2323,44 @@ fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(seen.is_some_and(|seen| now - seen < IDENTITY_TTL_MS))
+}
+
+/// A note for a sender when the recipient is not present, naming who is.
+/// None when the recipient is present, is the owner, or is the sender.
+fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result<Option<String>> {
+    if who == OWNER || who == actor || agent_live(conn, who, now)? {
+        return Ok(None);
+    }
+    let seen: i64 = conn
+        .query_row("SELECT last_seen_ms FROM agents WHERE name=?", [who], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or(0);
+    let when = if seen <= 0 {
+        "has not been active yet".to_owned()
+    } else {
+        format!("was last active {} min ago", (now - seen).max(0) / 60_000)
+    };
+    let mut s =
+        conn.prepare("SELECT name FROM agents WHERE enabled=1 ORDER BY last_seen_ms DESC")?;
+    let names = s
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut present = Vec::new();
+    for name in names {
+        if name != who && name != actor && name != OWNER && agent_live(conn, &name, now)? {
+            present.push(name);
+        }
+    }
+    let present = if present.is_empty() {
+        "nobody else is present".to_owned()
+    } else {
+        format!("present now: {}", present.join(", "))
+    };
+    Ok(Some(format!(
+        "{who} {when} and has no armed wait; it will see this when it next reads ({present})."
+    )))
 }
 
 /// Live (unreleased) lanes, with a stale flag for holders no longer present.
@@ -2286,6 +2416,17 @@ fn lane_conflicts(
         .filter(|l| l["agent"] == actor && l["state"] == "held")
         .map(lane_paths)
         .collect();
+    // The exemption covers work strictly inside what the queuer waits for,
+    // never retaking the whole of it, so a holder cannot starve the queue.
+    let covers = |p: &str, q: &str| match (lane_path(p), lane_path(q)) {
+        (Ok(p), Ok(q)) => p.is_empty() || p == q || q.starts_with(&format!("{p}/")),
+        _ => true,
+    };
+    let exempt = |l: &Value| {
+        let theirs = lane_paths(l);
+        mine.iter().any(|m| overlap(m, &theirs))
+            && !paths.iter().any(|p| theirs.iter().any(|q| covers(p, q)))
+    };
     lanes
         .iter()
         .filter(|l| l["agent"] != actor)
@@ -2293,7 +2434,7 @@ fn lane_conflicts(
             l["state"] == "held"
                 || (l["state"] == "queued"
                     && before.is_none_or(|b| l["id"].as_i64().is_some_and(|id| id < b))
-                    && !mine.iter().any(|m| overlap(m, &lane_paths(l))))
+                    && !exempt(l))
         })
         .filter(|l| overlap(&lane_paths(l), paths))
         .cloned()

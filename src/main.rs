@@ -381,8 +381,11 @@ enum Cmd {
     Wait {
         #[command(flatten)]
         filters: AttentionFilters,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, conflicts_with = "new")]
         after: i64,
+        /// Wake only for activity after now, not for items already pending.
+        #[arg(long)]
+        new: bool,
         /// Seconds (0..86400), or none to wait until selected attention arrives.
         #[arg(long, default_value = "300")]
         timeout: WaitTimeout,
@@ -418,8 +421,12 @@ enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Claude Code command hook. Reads the host hook JSON from stdin.
-    Hook,
+    /// Claude Code or Codex command hook. Reads the host hook JSON from stdin.
+    Hook {
+        /// Which host is calling: names the default identity and session.
+        #[arg(long, default_value = "claude", value_parser = ["claude", "codex"])]
+        host: String,
+    },
     /// Run a noninteractive agent only for selected attention (or explicit --bootstrap).
     Drive {
         #[command(flatten)]
@@ -1051,7 +1058,7 @@ fn main() {
     }
 }
 fn run(cli: Cli) -> Result<Option<Value>> {
-    if !matches!(&cli.command, Cmd::Hook) {
+    if !matches!(&cli.command, Cmd::Hook { .. }) {
         fray::session::configure(
             cli.session.as_deref(),
             None,
@@ -1415,6 +1422,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Wait {
             filters,
             after,
+            new,
             timeout: secs,
             limit,
             selection,
@@ -1422,6 +1430,15 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             unresolved,
         } => {
             timeout = secs.0.map(|secs| secs.saturating_add(5)).unwrap_or(5);
+            // --new: wake only for activity after this moment, not for items
+            // already pending. Anything committed after the ping is newer.
+            let after = if new {
+                send(&home, &actor, "ping", json!({}), None, 10)?["cursor"]
+                    .as_i64()
+                    .unwrap_or(0)
+            } else {
+                after
+            };
             let mut args =
                 json!({"after":after,"timeout":secs.0,"limit":limit,"selection":selection});
             filters.apply(&mut args);
@@ -1482,8 +1499,8 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             return Ok(None);
         }
-        Cmd::Hook => {
-            hook(&home, &actor, cli.session.as_deref())?;
+        Cmd::Hook { host } => {
+            hook(&home, &actor, cli.session.as_deref(), &host)?;
             return Ok(None);
         }
         Cmd::Drive { options } => {
@@ -1816,6 +1833,9 @@ fn human(v: &Value, out: &mut String) {
         if let Some(cursor) = v.get("cursor") {
             out.push_str(&format!("cursor={cursor}\n"));
         }
+        if let Some(note) = v["note"].as_str() {
+            out.push_str(&format!("Note: {}\n", clean(note)));
+        }
         if let Some(batch) = v["batch"].as_str() {
             out.push_str(&format!(
                 "batch={batch}  after handling: fray ack --batch {batch} [--ids N,M]\n"
@@ -1834,6 +1854,9 @@ fn human(v: &Value, out: &mut String) {
             out.push_str("Actionable annotation created a persistent question:\n");
             out.push_str(&card_text(f));
             out.push('\n');
+        }
+        if let Some(notice) = v["notice"].as_str() {
+            out.push_str(&format!("Note: {}\n", clean(notice)));
         }
         if let Some(r) = v.get("receipts") {
             out.push_str(&format!(
@@ -1865,7 +1888,12 @@ fn output(v: &Value, as_json: bool) -> Result<()> {
         Ok(())
     }
 }
-fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Result<()> {
+fn hook(
+    home: &Path,
+    explicit_actor: &str,
+    explicit_session: Option<&str>,
+    host: &str,
+) -> Result<()> {
     let input: Value = serde_json::from_str(&input_text("-".into(), server::REQUEST_LIMIT)?)?;
     let event = input["hook_event_name"]
         .as_str()
@@ -1879,6 +1907,12 @@ fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Re
     ]
     .contains(&event)
     {
+        // Codex has more lifecycle events than Fray uses; a hook registered
+        // on one of them is a no-op, never a failure the host reports.
+        if host == "codex" {
+            server::write_frame(&mut io::stdout().lock(), &json!({}))?;
+            return Ok(());
+        }
         return Err(Error::invalid("unsupported hook event"));
     }
     // The demand-driven runner supplies the bounded packet and owns presence.
@@ -1891,12 +1925,20 @@ fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Re
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
-    fray::session::configure(explicit_session, input["session_id"].as_str(), false)?;
+    // A Codex hook's session_id names a Codex thread, not a Claude session.
+    let codex_session = (host == "codex" && explicit_session.is_none())
+        .then(|| input["session_id"].as_str().map(|id| format!("codex:{id}")))
+        .flatten();
+    fray::session::configure(
+        explicit_session.or(codex_session.as_deref()),
+        input["session_id"].as_str().filter(|_| host == "claude"),
+        false,
+    )?;
     let actor = if explicit_actor.is_empty() {
         let session = input["session_id"]
             .as_str()
             .ok_or_else(|| Error::invalid("FRAY_AGENT or hook session_id required"))?;
-        let name = format!("claude-{session}");
+        let name = format!("{host}-{session}");
         if !valid_name(&name) {
             return Err(Error::invalid("set FRAY_AGENT for this session"));
         }
@@ -1909,7 +1951,15 @@ fn hook(home: &Path, explicit_actor: &str, explicit_session: Option<&str>) -> Re
     // Only SessionStart is a join. Mid-turn hooks must never undo an explicit
     // leave or silently take over another host's identity after a failed write.
     let brief = if event == "SessionStart" {
-        send(home, &actor, "join", json!({}), None, 5)?
+        // /clear (and compaction) start a new host session in the same
+        // conversation window: continuing the identity is not a collision.
+        let source = input["source"].as_str().unwrap_or("");
+        let args = if matches!(source, "clear" | "compact") {
+            json!({"takeover":true,"continued":source})
+        } else {
+            json!({})
+        };
+        send(home, &actor, "join", args, None, 5)?
     } else {
         let brief = match send(home, &actor, "brief", json!({"budget":2000}), None, 5) {
             Ok(brief) => brief,
