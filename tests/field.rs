@@ -302,3 +302,90 @@ fn the_codex_hook_joins_with_a_codex_session_and_ignores_other_events() {
     let (who, code) = d.cli("codex-pair", &["brief"], &[("CODEX_THREAD_ID", "t2")]);
     assert_eq!(code, 0, "{who}");
 }
+
+#[test]
+fn review_an_objection_to_an_ask_owner_request_stays_with_the_owner() {
+    let mut s = board();
+    let asked = run(
+        &mut s,
+        "codex",
+        "send",
+        json!({"to": "owner", "body": "Restart the daemon?", "ask": true, "pending": true, "refs": ["ask-owner"]}),
+        LATER,
+    )
+    .unwrap();
+    assert!(asked["notice"].is_null(), "{asked}");
+    let o = run(
+        &mut s,
+        "release",
+        "annotate",
+        json!({"id":asked["card"]["id"],"kind":"objection","body":"Not now: my gate is running"}),
+        LATER,
+    )
+    .unwrap();
+    assert_eq!(o["follow_up"]["assignee"], "owner");
+}
+
+#[test]
+fn review_continued_sessions_show_as_takeovers_and_waiting_is_presence() {
+    let mut s = Store::memory().unwrap();
+    in_session(&mut s, "release", "claude:old", "join", json!({}), NOW).unwrap();
+    in_session(
+        &mut s,
+        "release",
+        "claude:new",
+        "join",
+        json!({"takeover":true,"continued":"clear"}),
+        NOW + 1,
+    )
+    .unwrap();
+    let roster = run(&mut s, "release", "agents", json!({}), NOW + 2).unwrap();
+    let me = roster["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "release")
+        .unwrap()
+        .clone();
+    assert!(me["session"]["recent_takeover"].is_object(), "{me}");
+    // A plain wait refreshes presence: a lane held by a waiting agent is not
+    // stale, and a message to it carries no absence notice.
+    run(&mut s, "codex", "join", json!({}), NOW).unwrap();
+    run(
+        &mut s,
+        "release",
+        "lane_take",
+        json!({"paths":["docs/"],"purpose":"w"}),
+        NOW + 3,
+    )
+    .unwrap();
+    s.touch("release", LATER).unwrap();
+    run(&mut s, "codex", "heartbeat", json!({}), LATER).unwrap();
+    let lanes = run(&mut s, "codex", "lanes", json!({}), LATER).unwrap();
+    assert_eq!(lanes["lanes"][0]["stale"], false, "{lanes}");
+    let sent = run(
+        &mut s,
+        "codex",
+        "send",
+        json!({"to":"release","body":"hi"}),
+        LATER,
+    )
+    .unwrap();
+    assert!(sent["notice"].is_null(), "{sent}");
+    // Mail for an agent that has not joined says so.
+    let pending = run(
+        &mut s,
+        "codex",
+        "send",
+        json!({"to":"later","body":"hi","pending":true}),
+        LATER,
+    )
+    .unwrap();
+    assert!(
+        pending["notice"]
+            .as_str()
+            .unwrap()
+            .contains("when it joins"),
+        "{pending}"
+    );
+}

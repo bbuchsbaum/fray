@@ -280,6 +280,14 @@ impl Store {
     pub fn highwater(&self) -> Result<i64> {
         highwater(&self.conn)
     }
+    /// A plain `wait` is presence: the waiting agent will hear what arrives.
+    pub fn touch(&self, actor: &str, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE agents SET last_seen_ms=max(last_seen_ms,?) WHERE name=? AND enabled=1",
+            params![now, actor],
+        )?;
+        Ok(())
+    }
     pub fn identity(&self) -> Result<String> {
         Ok(self
             .conn
@@ -1034,8 +1042,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     None
                 };
                 let parties = [lease_owner.clone(), c.assignee.clone()];
-                let order = if actor == c.author || parties.iter().flatten().any(|who| who == actor)
-                {
+                let order = if c.assignee.as_deref() == Some(OWNER) && actor != OWNER {
+                    // A request waiting on the owner stays with the owner: an
+                    // objection to it is for the one deciding.
+                    vec![Some(OWNER.to_owned()), lease_owner, Some(c.author.clone())]
+                } else if actor == c.author || parties.iter().flatten().any(|who| who == actor) {
                     vec![lease_owner, c.assignee.clone(), Some(c.author.clone())]
                 } else {
                     vec![lease_owner, Some(c.author.clone()), c.assignee.clone()]
@@ -2246,7 +2257,7 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
         .optional()?;
     let takeover = conn
         .query_row(
-            "SELECT session,ended_ms,ended_reason FROM sessions WHERE agent=? AND ended_reason LIKE 'takeover%' AND ended_ms>? ORDER BY ended_ms DESC LIMIT 1",
+            "SELECT session,ended_ms,ended_reason FROM sessions WHERE agent=? AND (ended_reason LIKE 'takeover%' OR ended_reason LIKE 'continued%') AND ended_ms>? ORDER BY ended_ms DESC LIMIT 1",
             params![agent, now - IDENTITY_TTL_MS],
             |r| Ok(json!({"displaced":session_label(&r.get::<_,String>(0)?),"at_ms":r.get::<_,i64>(1)?,"reason":r.get::<_,String>(2)?})),
         )
@@ -2293,7 +2304,7 @@ fn lane_path(p: &str) -> Result<String> {
 fn invisible(c: char) -> bool {
     matches!(c as u32,
         0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
-        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+        | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
         | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFFB | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
 }
 
@@ -2337,10 +2348,19 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
         })
         .optional()?
         .unwrap_or(0);
-    let when = if seen <= 0 {
-        "has not been active yet".to_owned()
+    let enabled: bool = conn
+        .query_row("SELECT enabled FROM agents WHERE name=?", [who], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or(false);
+    let when = if !enabled && seen <= 0 {
+        "has not joined yet; it will see this when it joins".to_owned()
     } else {
-        format!("was last active {} min ago", (now - seen).max(0) / 60_000)
+        format!(
+            "was last active {} min ago and is not waiting; it will see this when it next reads",
+            (now - seen).max(0) / 60_000
+        )
     };
     let mut s =
         conn.prepare("SELECT name FROM agents WHERE enabled=1 ORDER BY last_seen_ms DESC")?;
@@ -2358,9 +2378,7 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
     } else {
         format!("present now: {}", present.join(", "))
     };
-    Ok(Some(format!(
-        "{who} {when} and has no armed wait; it will see this when it next reads ({present})."
-    )))
+    Ok(Some(format!("{who} {when} ({present}).")))
 }
 
 /// Live (unreleased) lanes, with a stale flag for holders no longer present.

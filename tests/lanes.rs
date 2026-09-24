@@ -637,7 +637,12 @@ fn review3_unicode_names_compare_conservatively() {
     // An ASCII sibling is still distinct.
     assert!(!paths_overlap("docs/caf\u{e9}.md", "src/x.rs"));
     let mut s = board();
-    for bad in ["src/a\u{200b}b", "src/\u{202e}x", "src/x\u{fe0f}"] {
+    for bad in [
+        "src/a\u{200b}b",
+        "src/\u{202e}x",
+        "src/x\u{fe0f}",
+        "\u{2028}",
+    ] {
         assert_eq!(
             take(&mut s, "claude", &[bad], false).unwrap_err(),
             "invalid",

@@ -480,6 +480,10 @@ fn wait(
     let limit = bounded(&req.args, "limit", 12, 1, 100)?;
     let mut store = shared.store.lock().map_err(|_| poisoned())?;
     let start = store.highwater()?;
+    // Waiting counts as presence; refresh it while the wait lasts.
+    const TOUCH: Duration = Duration::from_secs(60);
+    store.touch(&req.actor, now_ms())?;
+    let mut touched = Instant::now();
     if after > start {
         return Err(Error::new(
             "cursor_ahead",
@@ -526,16 +530,18 @@ fn wait(
             }
             return Ok(page);
         }
-        // The condition check and wait use the SAME mutex as commits: no lost wake-up.
-        store = if let Some(remaining) = remaining {
-            shared
-                .changed
-                .wait_timeout(store, remaining)
-                .map_err(|_| poisoned())?
-                .0
-        } else {
-            shared.changed.wait(store).map_err(|_| poisoned())?
-        };
+        if touched.elapsed() >= TOUCH {
+            store.touch(&req.actor, now_ms())?;
+            touched = Instant::now();
+        }
+        // The condition check and wait use the SAME mutex as commits: no lost
+        // wake-up. Wake at least every TOUCH to refresh presence.
+        let slice = remaining.map_or(TOUCH, |r| r.min(TOUCH));
+        store = shared
+            .changed
+            .wait_timeout(store, slice)
+            .map_err(|_| poisoned())?
+            .0;
     }
 }
 
