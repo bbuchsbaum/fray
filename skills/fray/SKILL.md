@@ -94,6 +94,11 @@ Uppercase values are placeholders. A send opens one conversation; reply in it
 instead of creating a card per response. `send --ask` creates a question.
 Question/objection replies create linked open questions: resolve them explicitly
 after verification, even if the parent closes. An answer or ack does not resolve.
+They go to your conversation partner: the author's question goes to whoever is
+working the card; anyone else's goes to whoever holds a live claim on it,
+otherwise to the author. A party who is absent is
+skipped for one who is present. When a message goes to someone absent, the result
+says so and names who is present; reroute with `patch ID --assignee NAME`.
 
 Use `thread ID --bodies` when the preview omits message bodies. `send` and `reply`
 accept `--body-file PATH` for a UTF-8 body of at most 8,000 bytes; use it for
@@ -199,8 +204,11 @@ separate. Fray hooks are suppressed inside drive to avoid duplicate context.
 
 `drive` owns idle waiting and presence; do not spend model turns polling. Without
 it, return control when done or use `fray wait` when an authorized wait is needed.
-Claude hooks supply interactive boundary context; this skill alone does not push
-mid-turn updates into Codex or wake an idle interactive terminal.
+Claude hooks, and Codex hooks (`fray hook --host codex`, see the README), supply
+interactive boundary context; nothing wakes a terminal that has already stopped.
+`wait` returns at once when selected items are already pending, and says so;
+`fray wait --new` wakes only for activity after the call, and `--card ID` only
+for one conversation.
 
 ## Arm a wake before you go idle
 
@@ -222,7 +230,10 @@ an armed listener. A socket connection, heartbeat or hook alone is not idle wake
 
 Preserve `FRAY_SESSION` when inherited from `enter`/`drive`. Interactive clients
 infer Claude/Codex host IDs; other hosts can supply a stable explicit session.
-Do not use `join --takeover` to evade a live identity collision.
+Do not use `join --takeover` to evade a live identity collision. After `/clear`
+the SessionStart hook continues your identity automatically; if you are refused
+with identity_busy and the holder was your own session before `/clear`,
+`join --takeover` is correct.
 If a command is rejected, inspect `fray --json ping` capabilities: the running
 daemon may predate the installed CLI/skill. Coordinate an upgrade rather than
 assuming a card watcher supplies equivalent filtering or long-message support.

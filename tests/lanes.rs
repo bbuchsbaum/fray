@@ -559,3 +559,94 @@ fn review_a_whole_repository_lane_is_warned() {
     let narrow = take(&mut s, "codex", &["docs/"], true).unwrap();
     assert!(narrow["warning"].is_null());
 }
+
+#[test]
+fn review3_handover_never_creates_overlapping_holds() {
+    let mut s = board();
+    take(&mut s, "claude", &["y/a"], false).unwrap();
+    let wide = take(&mut s, "claude", &["y"], false).unwrap();
+    assert_eq!(
+        run(
+            &mut s,
+            "claude",
+            "lane_release",
+            json!({"id": wide["lane"]["id"], "to": "codex"}),
+            NOW
+        )
+        .unwrap_err(),
+        "lane_busy"
+    );
+    // Handing over to yourself is a mistake, not a release.
+    assert_eq!(
+        run(
+            &mut s,
+            "claude",
+            "lane_release",
+            json!({"id": wide["lane"]["id"], "to": "claude"}),
+            NOW
+        )
+        .unwrap_err(),
+        "invalid"
+    );
+    // Nothing changed: claude still holds both.
+    let lanes = run(&mut s, "codex", "lanes", json!({}), NOW).unwrap()["lanes"].clone();
+    assert!(lanes
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|l| l["agent"] == "claude" && l["state"] == "held"));
+}
+
+#[test]
+fn review3_a_holder_cannot_retake_what_a_queuer_waits_for() {
+    let mut s = board();
+    take(&mut s, "claude", &["x/child"], false).unwrap();
+    let whole = take(&mut s, "claude", &["x/other"], false).unwrap();
+    assert_eq!(
+        take(&mut s, "codex", &["x"], true).unwrap()["lane"]["state"],
+        "queued"
+    );
+    run(
+        &mut s,
+        "claude",
+        "lane_release",
+        json!({"id": whole["lane"]["id"]}),
+        NOW,
+    )
+    .unwrap();
+    // Work strictly inside is fine; retaking the whole of x is not.
+    assert_eq!(
+        take(&mut s, "claude", &["x/more"], false).unwrap()["lane"]["state"],
+        "held"
+    );
+    assert_eq!(
+        take(&mut s, "claude", &["x"], false).unwrap_err(),
+        "lane_busy"
+    );
+    assert_eq!(
+        take(&mut s, "claude", &["."], false).unwrap_err(),
+        "lane_busy"
+    );
+}
+
+#[test]
+fn review3_unicode_names_compare_conservatively() {
+    // NFC and NFD spellings of the same directory overlap.
+    assert!(paths_overlap("caf\u{e9}/", "cafe\u{301}/x.md"));
+    assert!(paths_overlap("docs/caf\u{e9}.md", "docs/cafe\u{301}.md"));
+    // An ASCII sibling is still distinct.
+    assert!(!paths_overlap("docs/caf\u{e9}.md", "src/x.rs"));
+    let mut s = board();
+    for bad in [
+        "src/a\u{200b}b",
+        "src/\u{202e}x",
+        "src/x\u{fe0f}",
+        "\u{2028}",
+    ] {
+        assert_eq!(
+            take(&mut s, "claude", &[bad], false).unwrap_err(),
+            "invalid",
+            "{bad:?}"
+        );
+    }
+}

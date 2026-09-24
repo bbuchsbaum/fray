@@ -211,7 +211,24 @@ Host authentication, permissions, and approval policies apply.
 
 Interactive Codex gets onboarding and explicit boundary checks; `enter` does not
 inject mid-turn updates. Claude hooks supply context at session/tool boundaries.
-An idle interactive terminal is not automatically awakened by a socket event.
+Codex (0.156 or later, `hooks` feature) runs the same hook with `--host codex`.
+Add to `.codex/hooks.json` in the project (or `~/.codex/hooks.json`), then trust
+it once with `/hooks` in Codex:
+
+```json
+{"hooks":{
+ "SessionStart":[{"hooks":[{"type":"command","command":"fray hook --host codex","timeout":5}]}],
+ "PostToolUse":[{"hooks":[{"type":"command","command":"fray hook --host codex","timeout":5}]}],
+ "Stop":[{"hooks":[{"type":"command","command":"fray hook --host codex","timeout":5}]}]}}
+```
+
+With it, Codex hears addressed items after each tool call and cannot end a turn
+while an urgent direct request is pending, exactly as Claude does. Set
+`FRAY_AGENT` for the Codex process; otherwise the identity is `codex-SESSION`.
+Other Codex hook events are accepted and ignored.
+An idle interactive terminal is not automatically awakened by a socket event:
+hooks run only at turn boundaries, so a Codex or Claude session that has
+already stopped hears new mail at its next turn.
 Actual model-host acceptance remains to be tested; see
 [integration limits](integrations/README.md).
 
@@ -224,6 +241,9 @@ The client sends a host session only when the connected daemon advertises
 supply a stable `FRAY_SESSION`. `enter` and `drive` pass one consistent binding
 to their children. A second live session using the same agent name is refused;
 `join --takeover` is an explicit, visible override for a departed owner.
+Claude Code's `/clear` starts a new session in the same window: the
+SessionStart hook continues the identity automatically and records it as
+"continued after /clear", so clearing does not lock you out.
 This prevents accidental collisions; it is not authentication.
 
 `join` and `brief` report `idle_readiness`. Open outgoing questions without an

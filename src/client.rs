@@ -199,8 +199,22 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
                 args.remove("full_text_budget");
             }
         }
-        let capability = match req.op.as_str() {
-            "join" if req.args.get("takeover").is_some() => Some(("sessions", "join --takeover")),
+        // A hook continuing its identity after /clear degrades to a plain
+        // join on a daemon that cannot record it, rather than failing.
+        if req.args.get("continued").is_some()
+            && !daemon["capabilities"]
+                .as_array()
+                .is_some_and(|caps| caps.iter().any(|c| c == "session_continue"))
+        {
+            if let Some(args) = wire_request.args.as_object_mut() {
+                args.remove("continued");
+                args.remove("takeover");
+            }
+        }
+        let capability = match wire_request.op.as_str() {
+            "join" if wire_request.args.get("takeover").is_some() => {
+                Some(("sessions", "join --takeover"))
+            }
             "patch" if req.args.get("over_objection").is_some() => {
                 Some(("objection_gate", "patch --over-objection"))
             }

@@ -479,7 +479,12 @@ fn wait(
     };
     let limit = bounded(&req.args, "limit", 12, 1, 100)?;
     let mut store = shared.store.lock().map_err(|_| poisoned())?;
-    if after > store.highwater()? {
+    let start = store.highwater()?;
+    // Waiting counts as presence; refresh it while the wait lasts.
+    const TOUCH: Duration = Duration::from_secs(60);
+    store.touch(&req.actor, now_ms())?;
+    let mut touched = Instant::now();
+    if after > start {
         return Err(Error::new(
             "cursor_ahead",
             "cursor exceeds this store; rejoin rather than skip data",
@@ -509,18 +514,34 @@ fn wait(
         if has_items || expired {
             page["store_id"] = json!(store.identity()?);
             page["timed_out"] = json!(expired && !has_items);
+            // Returning at once on items that were already pending looks like
+            // a wait that does not wait; say why and how to wait for new ones.
+            let old = page["items"].as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|i| i["through_seq"].as_i64().is_some_and(|s| s <= start))
+            });
+            if old {
+                page["note"] = json!(format!(
+                    "returned at once: {} item(s) were already pending in this selection. Handle and ack them (fray ack --last), or wait only for new activity with --new, or on one conversation with --card N",
+                    page["total"]
+                ));
+            }
             return Ok(page);
         }
-        // The condition check and wait use the SAME mutex as commits: no lost wake-up.
-        store = if let Some(remaining) = remaining {
-            shared
-                .changed
-                .wait_timeout(store, remaining)
-                .map_err(|_| poisoned())?
-                .0
-        } else {
-            shared.changed.wait(store).map_err(|_| poisoned())?
-        };
+        if touched.elapsed() >= TOUCH {
+            store.touch(&req.actor, now_ms())?;
+            touched = Instant::now();
+        }
+        // The condition check and wait use the SAME mutex as commits: no lost
+        // wake-up. Wake at least every TOUCH to refresh presence.
+        let slice = remaining.map_or(TOUCH, |r| r.min(TOUCH));
+        store = shared
+            .changed
+            .wait_timeout(store, slice)
+            .map_err(|_| poisoned())?
+            .0;
     }
 }
 
