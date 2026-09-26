@@ -321,8 +321,10 @@ fn check_attention_filters(daemon: &Value, args: &Value) -> Result<()> {
 /// by (store_id, agent, id, through_seq), never by a global stream cursor.
 pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: bool) -> Result<()> {
     let notification = boolean(&args, "notification", false)?;
+    let include_control = boolean(&args, "include_control", false)?;
     if let Some(args) = args.as_object_mut() {
         args.remove("notification");
+        args.remove("include_control");
     }
     let mut selection_args = args.clone();
     let activation = crate::notification::take_activation(&mut selection_args)?;
@@ -453,7 +455,14 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                     Some("timeout") => {
                         return Err(Error::new("wait_timeout", "attention deadline expired"))
                     }
-                    Some("ready" | "heartbeat") => {}
+                    Some("ready" | "heartbeat") => {
+                        if include_control {
+                            data["control_version"] = json!(1);
+                            data["agent"] = json!(actor);
+                            write_frame(&mut std::io::stdout().lock(), &data)
+                                .map_err(|e| Error::new("output_closed", e.message))?;
+                        }
+                    }
                     _ => return Err(Error::new("protocol", "unexpected attention frame")),
                 }
             }
@@ -468,6 +477,11 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                     ) =>
             {
                 if !disconnected {
+                    if include_control {
+                        let frame = json!({"type":"disconnected","control_version":1,"agent":actor,"store_id":expected_store,"reason":e.code});
+                        write_frame(&mut std::io::stdout().lock(), &frame)
+                            .map_err(|e| Error::new("output_closed", e.message))?;
+                    }
                     eprintln!("fray attention: {e}; reconnecting with backoff");
                     disconnected = true;
                 }

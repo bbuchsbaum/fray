@@ -18,6 +18,9 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
       - run: cargo build --locked
+      - run: python3 -m venv /tmp/fray-wake-venv
+      - run: /tmp/fray-wake-venv/bin/pip install -r integrations/codex-wake/requirements.txt
+      - run: /tmp/fray-wake-venv/bin/python -m unittest discover -s integrations/codex-wake -v
       - run: python3 scripts/integration.py target/debug/fray
       - run: python3 scripts/attention_integration.py target/debug/fray
       - run: python3 scripts/reliability_integration.py target/debug/fray

@@ -137,6 +137,14 @@ those messages. Bodies are full when the budget permits. `context_truncated`,
 `messages_omitted`, `body_truncated`, `summary_truncated`, `items_omitted` and `more`
 make missing context explicit; fetch it with `thread ID --bodies` before handling.
 
+Supervising adapters may opt into `--include-control` to receive `ready`,
+`heartbeat`, and `disconnected` NDJSON frames as well. Control frames carry
+`control_version: 1`, `agent`, and `store_id` (null for a disconnect before the
+first connection). `ready` follows successful listener registration;
+`disconnected` precedes reconnect backoff. These frames describe transport
+readiness, not model responsiveness. This option cannot be combined with
+`--notification`; ordinary consumers keep the attention-only output above.
+
 The default `--budget 4000` covers serialized UTF-8 bytes **including newline**.
 `--limit 12` limits conversations per packet. Backlog continues in later packets;
 an oversized minimal receipt fails visibly instead of spinning or acknowledging.
@@ -333,18 +341,20 @@ route unanswered questions, and reconcile decisions with evidence. Workers can
 ask each other directly. Do not send acknowledgment chatter or launch new work
 solely to keep the team running.
 
-## Interactive Codex: current limitation
+## Interactive Codex: existing-chat adapter
 
 `fray enter -- codex` sets the shared identity/environment but does not pipe later
 socket updates into the already-running Codex model. The supplied project
-instructions cover onboarding and explicit boundary checks only. For automatic
-wake-up, use `drive` above.
+instructions cover onboarding and explicit boundary checks only. `drive` above
+runs a separate manager. To keep an existing chat, see the optional experimental
+[Codex wake adapter](codex-wake/README.md).
 
-A native adapter can own a Codex App Server session, translate pending attention
-into `turn/steer` for the expected active turn, and use `turn/start` while idle.
-It must also mediate approvals, cancellation, sandbox policy, reconnects, turn races,
-and burst coalescing. That is a separate host adapter, not implemented or claimed
-as working here. Never substitute terminal keystroke injection and call it reliable.
+The Python adapter translates Fray attention into `turn/steer` for the expected
+active turn and `turn/start` while idle, through the existing local App Server.
+It preserves the target thread and its policies, defers during approval/input
+waits, journals exact receipts, and stops on uncertain delivery. Its README
+describes host requirements, bounded lifecycle, recovery, and qualification.
+The ordinary `enter` command does not install or start this adapter.
 
 ## Primary documentation checked during design
 
