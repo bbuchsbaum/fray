@@ -143,6 +143,34 @@ class Attention(unittest.TestCase):
             self.assertEqual(len(packet['items']),1)
             self.assertEqual(packet['items'][0]['messages'][0]['body'], 'After recovery')
 
+    def test_opt_in_control_frames_fence_disconnect_and_reconnect(self):
+        with self.watch('--include-control', '--reconnect') as (_, lines):
+            ready = lines.get(timeout=3)
+            self.assertEqual((ready['type'], ready['agent'], ready['control_version']),
+                             ('ready', 'bob', 1))
+            self.send()
+            first = lines.get(timeout=3)
+            self.assertEqual(first['type'], 'attention')
+            self.server.kill()
+            self.server.wait()
+            disconnected = lines.get(timeout=3)
+            self.assertEqual(disconnected['type'], 'disconnected')
+            self.assertEqual(disconnected['store_id'], ready['store_id'])
+            self.launch()
+            rearmed = lines.get(timeout=5)
+            self.assertEqual(rearmed, ready)
+            replay = lines.get(timeout=3)
+            self.assertEqual(replay['items'][0]['receipt'], first['items'][0]['receipt'])
+
+    def test_control_readiness_is_not_emitted_for_a_left_identity(self):
+        self.call('leave', 'bob')
+        result = subprocess.run([str(BINARY), '--home', self.home, '--as', 'bob',
+                                 'watch', '--attention', '--include-control'],
+                                capture_output=True, text=True, timeout=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('not_joined', result.stderr)
+
     def test_reconnect_rejects_replaced_database(self):
         self.send()
         with self.watch('--reconnect') as (process, lines):

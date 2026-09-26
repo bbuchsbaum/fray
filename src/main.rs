@@ -508,6 +508,9 @@ struct WakeArgs {
     /// Emit one small host notification per exact receipt instead of full packets.
     #[arg(long, requires = "attention")]
     notification: bool,
+    /// Include ready, heartbeat and disconnected frames for supervising adapters.
+    #[arg(long, requires = "attention", conflicts_with = "notification")]
+    include_control: bool,
     /// How this listener wakes its host, declared by the adapter for diagnostics.
     #[arg(long, requires = "attention", value_parser = ["manual", "boundary", "managed", "native-monitor", "background-completion"])]
     activation: Option<String>,
@@ -532,6 +535,9 @@ impl WakeArgs {
         }
         if self.notification {
             args["notification"] = json!(true);
+        }
+        if self.include_control {
+            args["include_control"] = json!(true);
         }
         if let Some(activation) = self.activation {
             args["activation"] = json!(activation);

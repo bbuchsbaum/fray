@@ -137,6 +137,14 @@ those messages. Bodies are full when the budget permits. `context_truncated`,
 `messages_omitted`, `body_truncated`, `summary_truncated`, `items_omitted` and `more`
 make missing context explicit; fetch it with `thread ID --bodies` before handling.
 
+Supervising adapters may opt into `--include-control` to receive `ready`,
+`heartbeat`, and `disconnected` NDJSON frames as well. Control frames carry
+`control_version: 1`, `agent`, and `store_id` (null for a disconnect before the
+first connection). `ready` follows successful listener registration;
+`disconnected` precedes reconnect backoff. These frames describe transport
+readiness, not model responsiveness. This option cannot be combined with
+`--notification`; ordinary consumers keep the attention-only output above.
+
 The default `--budget 4000` covers serialized UTF-8 bytes **including newline**.
 `--limit 12` limits conversations per packet. Backlog continues in later packets;
 an oversized minimal receipt fails visibly instead of spinning or acknowledging.

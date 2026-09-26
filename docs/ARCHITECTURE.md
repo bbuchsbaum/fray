@@ -289,8 +289,10 @@ The optional experimental `integrations/codex-wake` adapter attaches to an exist
 App Server thread. It retains the expected active turn ID for `turn/steer` and uses
 `turn/start` when idle. Explicit turn rejection rereads host state; uncertain
 delivery stops for inspection. Exact receipt journaling prevents replay after
-reconnect without acknowledging work. The existing host retains approval and
-sandbox control; approval/input waits defer delivery. Its bounded process owns
+reconnect without acknowledging work. Bounded exact receipts in the wake message
+remain usable after batch-token expiry. Opt-in stream control frames gate dispatch
+on listener readiness and stop it on disconnect or listener failure. The existing
+host retains approval and sandbox control; approval/input waits defer delivery. Its bounded process owns
 and reaps only its Fray watcher. See the adapter README for host requirements and
 live qualification limits. An MCP resource-change notification alone still does
 not guarantee model wake-up.

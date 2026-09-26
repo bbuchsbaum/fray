@@ -10,7 +10,7 @@ import unittest
 from websockets.asyncio.server import unix_serve
 from websockets.asyncio.client import unix_connect
 
-from wake import Journal, Rejected, Rpc, deliver, target, run
+from wake import MAX_RECEIPTS, Journal, Rejected, Rpc, deliver, target, run
 
 
 def packet(seq=10, batch="b" * 32):
@@ -40,7 +40,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "state.json"
-        self.config = SimpleNamespace(thread="thread", cwd="/tmp", home="/tmp/fray", agent="manager")
+        self.config = SimpleNamespace(thread="thread", cwd="/tmp", home="/tmp/fray", agent="manager",
+                                      fray="fray", session="session")
         self.journal = Journal(self.path, {"thread": "thread"})
         self.journal.add(packet(), "manager")
         self.delivery = self.journal.pending()
@@ -48,6 +49,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.journal.lock.close()
         self.temp.cleanup()
+
+    async def deliver(self, rpc, is_ready=lambda: True):
+        return await deliver(rpc, self.config, self.journal, self.delivery, is_ready)
 
     def test_reconnect_dedup_uses_receipts_not_batches(self):
         self.assertFalse(self.journal.add(packet(batch="c" * 32), "manager"))
@@ -61,23 +65,41 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "identity"):
             self.journal.add(packet(), "other-agent")
 
-    async def test_backlog_combines_batches_without_merging_inflight_delivery(self):
+    async def test_backlog_combines_exact_receipts_without_merging_delivered_entries(self):
         self.journal.add(packet(seq=11, batch="c" * 32), "manager")
         self.journal.add(packet(seq=12, batch="d" * 32), "manager")
         self.assertEqual(len(self.journal.data["deliveries"]), 1)
         rpc = FakeRpc()
-        await deliver(rpc, self.config, self.journal, self.delivery)
+        await self.deliver(rpc)
         prompt = rpc.calls[-1][1]["input"][0]["text"]
+        for seq in (10, 11, 12):
+            self.assertIn(f'"through_seq":{seq}', prompt)
         for batch in ("b" * 32, "c" * 32, "d" * 32):
-            self.assertIn(batch, prompt)
+            self.assertNotIn(batch, prompt)
         self.journal.add(packet(seq=13, batch="e" * 32), "manager")
         self.assertEqual(len(self.journal.data["deliveries"]), 2)
         self.assertEqual(len(self.delivery["keys"]), 3)
 
-    def test_backlog_prompt_batches_are_bounded(self):
-        for i in range(1, 10):
+    def test_backlog_prompt_receipts_are_bounded(self):
+        for i in range(1, MAX_RECEIPTS + 2):
             self.journal.add(packet(seq=10+i, batch=f"{i:032x}"), "manager")
-        self.assertEqual([len(d["batches"]) for d in self.journal.data["deliveries"]], [8, 2])
+        self.assertEqual([len(d["keys"]) for d in self.journal.data["deliveries"]], [MAX_RECEIPTS, 2])
+
+    def test_legacy_pending_journal_is_split_without_redelivering_completed_entries(self):
+        for seq in range(11, 80):
+            self.journal.add(packet(seq=seq), "manager")
+        deliveries = self.journal.data["deliveries"]
+        keys = [key for d in deliveries for key in d["keys"]]
+        legacy = {**deliveries[0], "keys": keys, "batch": "b" * 32}
+        delivered = {"keys": [], "status": "delivered", "id": "retain-completed-id"}
+        self.journal.data["deliveries"] = [delivered, legacy]
+        self.journal.save()
+        self.journal.lock.close()
+        self.journal = Journal(self.path, {"thread": "thread"})
+        migrated = self.journal.data["deliveries"]
+        self.assertEqual(migrated[0], delivered)
+        self.assertEqual([key for d in migrated[1:] for key in d["keys"]], keys)
+        self.assertTrue(all(len(d["keys"]) <= MAX_RECEIPTS for d in migrated[1:]))
 
     def test_lock_prevents_second_adapter(self):
         with self.assertRaises(BlockingIOError):
@@ -85,7 +107,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_idle_starts_same_thread_without_policy_overrides(self):
         rpc = FakeRpc()
-        self.assertTrue(await deliver(rpc, self.config, self.journal, self.delivery))
+        self.assertTrue(await self.deliver(rpc))
         method, params = rpc.calls[-1]
         self.assertEqual(method, "turn/start")
         self.assertEqual(set(params), {"threadId", "input", "clientUserMessageId"})
@@ -94,7 +116,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_active_steers_expected_turn_only(self):
         rpc = FakeRpc("active")
-        await deliver(rpc, self.config, self.journal, self.delivery)
+        await self.deliver(rpc)
         method, params = rpc.calls[-1]
         self.assertEqual(method, "turn/steer")
         self.assertEqual(params["expectedTurnId"], "turn")
@@ -102,36 +124,35 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_and_input_waits_remain_pending(self):
         for flag in ("waitingOnApproval", "waitingOnUserInput"):
             rpc = FakeRpc("active", [flag])
-            self.assertFalse(await deliver(rpc, self.config, self.journal, self.delivery))
+            self.assertFalse(await self.deliver(rpc))
             self.assertEqual(len(rpc.calls), 1)
             self.assertEqual(self.delivery["status"], "pending")
 
     async def test_explicit_turn_race_can_reread_then_start(self):
         rpc = FakeRpc("active", failure=Rejected("turn changed"))
         with self.assertRaises(Rejected):
-            await deliver(rpc, self.config, self.journal, self.delivery)
+            await self.deliver(rpc)
         self.assertEqual(self.delivery["status"], "pending")
         rpc.status, rpc.failure = {"type": "idle"}, None
-        await deliver(rpc, self.config, self.journal, self.delivery)
+        await self.deliver(rpc)
         self.assertEqual(rpc.calls[-1][0], "turn/start")
 
     async def test_turn_completed_between_reads_sends_nothing(self):
         rpc = FakeRpc("active", turn_status="completed")
         with self.assertRaises(Rejected):
-            await deliver(rpc, self.config, self.journal, self.delivery)
+            await self.deliver(rpc)
         self.assertFalse(any(m.startswith("turn/") for m, _ in rpc.calls))
 
     async def test_lost_response_blocks_restart_not_duplicate_delivery(self):
         with self.assertRaises(ConnectionError):
-            await deliver(FakeRpc(failure=ConnectionError("lost response")),
-                          self.config, self.journal, self.delivery)
+            await self.deliver(FakeRpc(failure=ConnectionError("lost response")))
         self.assertEqual(json.loads(self.path.read_text())["deliveries"][0]["status"], "sending")
         self.journal.lock.close()
         with self.assertRaisesRegex(ValueError, "uncertain delivery"):
             Journal(self.path, {"thread": "thread"})
 
     async def test_success_survives_restart_and_new_batch(self):
-        await deliver(FakeRpc(), self.config, self.journal, self.delivery)
+        await self.deliver(FakeRpc())
         self.journal.lock.close()
         self.journal = Journal(self.path, {"thread": "thread"})
         self.assertFalse(self.journal.add(packet(batch="e" * 32), "manager"))
@@ -147,8 +168,24 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_unloaded_thread_never_created_or_resumed(self):
         rpc = FakeRpc("notLoaded")
         with self.assertRaisesRegex(ValueError, "already be loaded"):
-            await deliver(rpc, self.config, self.journal, self.delivery)
+            await self.deliver(rpc)
         self.assertEqual(len(rpc.calls), 1)
+
+    async def test_disconnect_during_host_reads_prevents_start_and_steer(self):
+        for state in ("idle", "active"):
+            rpc = FakeRpc(state)
+            self.assertFalse(await self.deliver(rpc, lambda: not rpc.calls))
+            self.assertFalse(any(method.startswith("turn/") for method, _ in rpc.calls))
+            self.assertEqual(self.delivery["status"], "pending")
+
+    async def test_wake_uses_configured_binary_and_session_for_receipt_commands(self):
+        self.config.fray = "/path with spaces/fray"
+        rpc = FakeRpc()
+        await self.deliver(rpc)
+        prompt = rpc.calls[-1][1]["input"][0]["text"]
+        self.assertIn("'/path with spaces/fray'", prompt)
+        self.assertIn("--session session", prompt)
+        self.assertIn("ack --receipts JSON", prompt)
 
     async def test_real_unix_websocket_routes_responses_ignores_approval(self):
         socket = str(Path(self.temp.name) / "rpc.sock")
@@ -176,11 +213,11 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         executable = Path(self.temp.name) / "fake-fray"
         executable.write_text(f"#!{sys.executable}\nimport os,time\n"
                               f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+                              f"print({json.dumps({'type': 'ready', 'control_version': 1, 'agent': 'manager', 'store_id': 'a' * 32})!r}, flush=True)\n"
                               f"print({json.dumps(packet())!r}, flush=True)\ntime.sleep(60)\n")
         executable.chmod(0o700)
-        config = SimpleNamespace(**vars(self.config), socket=socket, session="session",
-                                 fray=str(executable), selection="all", lifetime=15,
-                                 max_deliveries=1, probe=False)
+        config = SimpleNamespace(**{**vars(self.config), "socket": socket, "fray": str(executable),
+                                    "selection": "all", "lifetime": 15, "max_deliveries": 1, "probe": False})
         connections, calls = [], []
         waiting = True
         async def server(ws):

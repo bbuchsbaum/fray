@@ -12,6 +12,9 @@ The initial development target is Codex 0.157.1 on macOS; other versions and hos
 must be qualified before relying on unattended wakeups. The protocol's
 experimental API is enabled for paginated turn inspection. The Codex host must
 remain running, with the target thread loaded and its approval UI available.
+Build Fray from this checkout and select it with `--fray` (or put it on PATH).
+The adapter requires the client's `watch --attention --include-control` flag;
+older clients fail closed before sending a wake.
 
 ## Configure and run
 
@@ -50,14 +53,20 @@ There is no auto-install, login service, or unbounded automatic restart.
 
 ## Delivery and recovery contract
 
-- `watch --attention --reconnect` supplies complete exact receipts. Only batch
-  references reach the chat; peer titles/bodies are not copied into instructions.
-  Fray batches receipts, and the adapter coalesces host event bursts for 200 ms,
-  combining up to eight pending batch references in one wake message.
+- `watch --attention --reconnect --include-control` supplies exact receipts and
+  listener state. No wake is sent until Fray confirms listener readiness. A
+  disconnect defers queued delivery until readiness returns; listener rejection
+  or exit stops dispatch, including when it happens during a Codex status read.
+- Wake messages contain at most 32 exact receipt objects, independent of Fray's
+  batch-token retention and expiry. Peer titles/bodies are not copied into
+  instructions. Host event bursts coalesce for 200 ms. Existing journals retain
+  their deduplication history; oversized unsent entries split into bounded groups.
 - Deduplication uses `(store_id, agent, id, through_seq)`, not the transient batch
   ID. Newer versions remain eligible. A changed store or target fails closed.
 - Delivery acceptance is recorded durably and **never acknowledges Fray**. The
-  manager reads the batch and acknowledges only after considering its contents.
+  manager reads each receipt's thread and acknowledges only exact handled
+  receipts. Later unread updates remain pending. Receipt commands preserve the
+  configured Fray binary, home, agent and session.
   Ignored delivered receipts do not repeatedly start costly turns. Inspect the
   journal and Fray inbox when progress stops.
 - Approval/user-input waits defer delivery until a host event changes the state.
@@ -76,12 +85,16 @@ There is no auto-install, login service, or unbounded automatic restart.
 ## Verification
 
 ```sh
+cargo build --locked
 /tmp/fray-codex-venv/bin/python -m unittest discover -s integrations/codex-wake -v
 ```
 
+The integration tests use `target/debug/fray`; set `FRAY_WAKE_TEST_BINARY` to test
+another build. They start isolated synthetic boards and reap their own daemons.
 Tests include a real Unix WebSocket mock, reconnection, approval deferral,
 same-thread start/steer, exact-receipt deduplication after restart, lost-response
-fail-stop, identity mismatches, and watcher cleanup. A live read-only probe does
+fail-stop, identity mismatches, watcher cleanup, departure before/during delivery,
+and expired batches with a later update left unacknowledged. A live read-only probe does
 not prove delivery. Qualify both an active `turn/steer` and an actual idle
 `turn/start`, retaining delivery IDs, turn IDs, and the resumed model's receipt.
 
