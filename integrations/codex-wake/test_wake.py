@@ -61,6 +61,24 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "identity"):
             self.journal.add(packet(), "other-agent")
 
+    async def test_backlog_combines_batches_without_merging_inflight_delivery(self):
+        self.journal.add(packet(seq=11, batch="c" * 32), "manager")
+        self.journal.add(packet(seq=12, batch="d" * 32), "manager")
+        self.assertEqual(len(self.journal.data["deliveries"]), 1)
+        rpc = FakeRpc()
+        await deliver(rpc, self.config, self.journal, self.delivery)
+        prompt = rpc.calls[-1][1]["input"][0]["text"]
+        for batch in ("b" * 32, "c" * 32, "d" * 32):
+            self.assertIn(batch, prompt)
+        self.journal.add(packet(seq=13, batch="e" * 32), "manager")
+        self.assertEqual(len(self.journal.data["deliveries"]), 2)
+        self.assertEqual(len(self.delivery["keys"]), 3)
+
+    def test_backlog_prompt_batches_are_bounded(self):
+        for i in range(1, 10):
+            self.journal.add(packet(seq=10+i, batch=f"{i:032x}"), "manager")
+        self.assertEqual([len(d["batches"]) for d in self.journal.data["deliveries"]], [8, 2])
+
     def test_lock_prevents_second_adapter(self):
         with self.assertRaises(BlockingIOError):
             Journal(self.path, {"thread": "thread"})

@@ -52,7 +52,8 @@ There is no auto-install, login service, or unbounded automatic restart.
 
 - `watch --attention --reconnect` supplies complete exact receipts. Only batch
   references reach the chat; peer titles/bodies are not copied into instructions.
-  Fray batches receipts, and the adapter coalesces host event bursts for 200 ms.
+  Fray batches receipts, and the adapter coalesces host event bursts for 200 ms,
+  combining up to eight pending batch references in one wake message.
 - Deduplication uses `(store_id, agent, id, through_seq)`, not the transient batch
   ID. Newer versions remain eligible. A changed store or target fails closed.
 - Delivery acceptance is recorded durably and **never acknowledges Fray**. The
