@@ -285,13 +285,15 @@ Fray hooks detect the runner's `FRAY_DRIVE=1` and emit empty context, preserving
 packet budget. Stderr JSON records prompt bytes, receipts, duration and exit reason;
 provider usage is unknown/null, not estimated from prompt length.
 
-A future native Codex adapter should own an App Server thread, retain the active
-turn ID, batch relevant pending cards into `turn/steer` with the expected turn ID,
-and use `turn/start` when idle. Turn races require rereading host state before retry;
-accepted input is exposure, never automatic work acknowledgment. Approval requests,
-sandbox controls, turn completion, cancellation, stdout/stderr, and reconnection
-must be handled explicitly. **This adapter is not included.** Likewise, an MCP
-resource-change notification by itself is not a guarantee of model wake-up.
+The optional experimental `integrations/codex-wake` adapter attaches to an existing
+App Server thread. It retains the expected active turn ID for `turn/steer` and uses
+`turn/start` when idle. Explicit turn rejection rereads host state; uncertain
+delivery stops for inspection. Exact receipt journaling prevents replay after
+reconnect without acknowledging work. The existing host retains approval and
+sandbox control; approval/input waits defer delivery. Its bounded process owns
+and reaps only its Fray watcher. See the adapter README for host requirements and
+live qualification limits. An MCP resource-change notification alone still does
+not guarantee model wake-up.
 
 ## 7. Why not add a chief agent to fix the board?
 
