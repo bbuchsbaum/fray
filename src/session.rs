@@ -30,14 +30,41 @@ pub fn resolve(
 }
 
 fn from_host(explicit: Option<&str>, hook_session: Option<&str>) -> Result<Option<String>> {
+    let claude = env::var("CLAUDE_CODE_SESSION_ID").ok();
+    let codex = env::var("CODEX_THREAD_ID").ok();
+    // One host started inside the other inherits the outer host's variable.
+    // The caller is the nearer host in the process tree.
+    let claude = match (&claude, &codex) {
+        (Some(_), Some(_)) if nearer_host() == Some("codex") => None,
+        _ => claude,
+    };
     resolve(
         explicit.or(env::var("FRAY_SESSION").ok().as_deref()),
-        env::var("CLAUDE_CODE_SESSION_ID")
-            .ok()
-            .as_deref()
-            .or(hook_session),
-        env::var("CODEX_THREAD_ID").ok().as_deref(),
+        claude.as_deref().or(hook_session),
+        codex.as_deref(),
     )
+}
+
+/// The nearest Claude Code or Codex process among this process's ancestors.
+fn nearer_host() -> Option<&'static str> {
+    let mut pid = std::process::id();
+    for _ in 0..32 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let (ppid, comm) = line.split_once(char::is_whitespace)?;
+        let name = comm.trim().rsplit('/').next().unwrap_or("");
+        if name.starts_with("codex") {
+            return Some("codex");
+        }
+        if name.starts_with("claude") {
+            return Some("claude");
+        }
+        pid = ppid.trim().parse().ok().filter(|p| *p > 1)?;
+    }
+    None
 }
 
 /// Called once by the CLI before any RPC. Managed children inherit the exact

@@ -280,12 +280,22 @@ impl Store {
     pub fn highwater(&self) -> Result<i64> {
         highwater(&self.conn)
     }
-    /// A plain `wait` is presence: the waiting agent will hear what arrives.
-    pub fn touch(&self, actor: &str, now: i64) -> Result<()> {
+    /// A wait in progress: the agent is reachable (it will hear what
+    /// arrives), which is not the same as active. Within WAIT_HOLD_MS of real
+    /// activity it also keeps the waiting session bound.
+    pub fn touch(&self, actor: &str, session: Option<&str>, now: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE agents SET last_seen_ms=max(last_seen_ms,?) WHERE name=? AND enabled=1",
-            params![now, actor],
+            "INSERT INTO agent_waits(agent,refreshed_ms) SELECT name,?2 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
+            params![actor, now],
         )?;
+        if let Some(session) = session {
+            if last_active(&self.conn, actor)?.is_some_and(|t| now - t < WAIT_HOLD_MS) {
+                self.conn.execute(
+                    "UPDATE sessions SET last_seen_ms=max(last_seen_ms,?3) WHERE agent=?1 AND session=?2 AND ended_ms IS NULL",
+                    params![actor, session, now],
+                )?;
+            }
+        }
         Ok(())
     }
     pub fn identity(&self) -> Result<String> {
@@ -1060,7 +1070,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 // and say so, rather than leave the question with nobody.
                 let mut target = None;
                 for who in &candidates {
-                    if who == OWNER || agent_live(conn, who, now)? {
+                    if who == OWNER || agent_reachable(conn, who, now)? {
                         target = Some(who.clone());
                         break;
                     }
@@ -1409,7 +1419,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 get_card(conn, card)?;
             }
             let queue = boolean(a, "queue", false)?;
-            let conflicts = lane_conflicts(&live_lanes(conn, now)?, actor, &paths, None);
+            let lanes = live_lanes(conn, now)?;
+            let conflicts = lane_conflicts(&lanes, actor, &paths, None, now);
             if !conflicts.is_empty() && !queue {
                 let holders: Vec<String> = conflicts
                     .iter()
@@ -1448,6 +1459,31 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 "INSERT INTO lanes(agent,paths,purpose,card_id,state,created_ms) VALUES(?,?,?,?,?,?)",
                 params![actor, serde_json::to_string(&paths)?, purpose, card, state, now],
             )?;
+            // Taking paths inside a region someone queued for is allowed for a
+            // while (it may be how the holder finishes); they are told.
+            if state == "held" {
+                for l in lanes.iter().filter(|l| {
+                    l["state"] == "queued"
+                        && l["agent"] != actor
+                        && lane_values(l)
+                            .iter()
+                            .any(|q| paths.iter().any(|p| paths_overlap(q, p)))
+                }) {
+                    lane_notice(
+                        conn,
+                        actor,
+                        l["agent"].as_str().unwrap_or(""),
+                        "Work continues inside your queued lane",
+                        &format!(
+                            "{actor} took {} inside lane {} you are queued for, while finishing its held work. After {} min of queueing, new takes wait behind you.",
+                            paths.join(", "),
+                            l["id"],
+                            LANE_PATIENCE_MS / 60_000
+                        ),
+                        now,
+                    )?;
+                }
+            }
             let id = conn.last_insert_rowid();
             let mut result = json!({"lane":{"id":id,"agent":actor,"paths":paths,"purpose":purpose,"card":card,"state":state},"waiting_on":conflicts});
             if paths
@@ -1493,7 +1529,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 // overlapping paths (e.g. the giver's narrower lane inside it).
                 let others: Vec<Value> = lanes.iter().filter(|l| l["id"] != id).cloned().collect();
                 let paths: Vec<String> = serde_json::from_value(lane["paths"].clone())?;
-                let clash: Vec<String> = lane_conflicts(&others, to, &paths, None)
+                let clash: Vec<String> = lane_conflicts(&others, to, &paths, None, now)
                     .iter()
                     .filter(|l| l["state"] == "held")
                     .map(|l| format!("lane {} by {}", l["id"], l["agent"].as_str().unwrap_or("")))
@@ -1588,6 +1624,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     &agent,
                     &qpaths,
                     queued["id"].as_i64(),
+                    now,
                 )
                 .is_empty()
                 {
@@ -2158,6 +2195,14 @@ fn query(conn: &Connection, a: &Value, actor: &str, now: i64) -> Result<Value> {
 }
 /// How long a session's binding to a name survives without activity.
 pub const IDENTITY_TTL_MS: i64 = 30 * 60_000;
+/// How long a queued lane lets its holder keep taking paths inside it. After
+/// that the queue comes first: the holder finishes, releases, and waits its turn.
+pub const LANE_PATIENCE_MS: i64 = 10 * 60_000;
+/// How long waiting (an armed wait or listener) keeps an otherwise idle agent
+/// holding its lanes. Waiting always counts as reachable for routing.
+pub const WAIT_HOLD_MS: i64 = 4 * 60 * 60_000;
+/// A wait refreshes its row every minute; older rows are not waiting.
+const WAIT_FRESH_MS: i64 = 150_000;
 
 fn session_label(session: &str) -> String {
     clip(session, 20)
@@ -2328,18 +2373,47 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 /// thread or hook). Polling an empty inbox is not recorded; arm a wait or set
 /// a status instead.
 fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
-    let seen: Option<i64> = conn.query_row(
-        "SELECT max(t) FROM (SELECT last_seen_ms AS t FROM sessions WHERE agent=?1 AND ended_ms IS NULL UNION ALL SELECT last_seen_ms FROM agents WHERE name=?1 AND enabled=1 UNION ALL SELECT updated_ms FROM listeners WHERE agent=?1 AND connected=1 UNION ALL SELECT updated_ms FROM controllers WHERE agent=?1 AND state IN ('waiting','running') UNION ALL SELECT max(created_ms) FROM presented_batches WHERE agent=?1 UNION ALL SELECT max(shown_at_ms) FROM deliveries WHERE agent=?1)",
+    let last = last_active(conn, agent)?;
+    let active = last.is_some_and(|t| now - t < IDENTITY_TTL_MS);
+    Ok(
+        active
+            || (agent_waiting(conn, agent, now)? && last.is_some_and(|t| now - t < WAIT_HOLD_MS)),
+    )
+}
+
+/// The agent's last deliberate activity: a live session, a write, a running
+/// drive loop, or receipts shown to it. Waiting is not activity.
+fn last_active(conn: &Connection, agent: &str) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT max(t) FROM (SELECT last_seen_ms AS t FROM sessions WHERE agent=?1 AND ended_ms IS NULL UNION ALL SELECT last_seen_ms FROM agents WHERE name=?1 AND enabled=1 UNION ALL SELECT updated_ms FROM controllers WHERE agent=?1 AND state IN ('waiting','running') UNION ALL SELECT max(created_ms) FROM presented_batches WHERE agent=?1 UNION ALL SELECT max(shown_at_ms) FROM deliveries WHERE agent=?1)",
         [agent],
         |r| r.get(0),
-    )?;
-    Ok(seen.is_some_and(|seen| now - seen < IDENTITY_TTL_MS))
+    )?)
+}
+
+/// Whether something is armed to hear the agent's mail right now: a connected
+/// listener or a wait in progress.
+fn agent_waiting(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM listeners WHERE agent=?1 AND connected=1) OR EXISTS(SELECT 1 FROM agent_waits WHERE agent=?1 AND refreshed_ms>?2)",
+        params![agent, now - WAIT_FRESH_MS],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether a message to the agent will be heard soon: active, or waiting
+/// (however long it has been idle). Used for routing, not for lanes.
+fn agent_reachable(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+    Ok(
+        last_active(conn, agent)?.is_some_and(|t| now - t < IDENTITY_TTL_MS)
+            || agent_waiting(conn, agent, now)?,
+    )
 }
 
 /// A note for a sender when the recipient is not present, naming who is.
 /// None when the recipient is present, is the owner, or is the sender.
 fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result<Option<String>> {
-    if who == OWNER || who == actor || agent_live(conn, who, now)? {
+    if who == OWNER || who == actor || agent_reachable(conn, who, now)? {
         return Ok(None);
     }
     let seen: i64 = conn
@@ -2369,7 +2443,7 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut present = Vec::new();
     for name in names {
-        if name != who && name != actor && name != OWNER && agent_live(conn, &name, now)? {
+        if name != who && name != actor && name != OWNER && agent_reachable(conn, &name, now)? {
             present.push(name);
         }
     }
@@ -2413,20 +2487,23 @@ fn live_lanes(conn: &Connection, now: i64) -> Result<Vec<Value>> {
 /// A queued lane that is itself waiting on one of the actor's held lanes does
 /// not block the actor: it is waiting for the actor to finish, and blocking
 /// the actor would deadlock both.
+fn lane_values(l: &Value) -> Vec<String> {
+    l["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect()
+}
+
 fn lane_conflicts(
     lanes: &[Value],
     actor: &str,
     paths: &[String],
     before: Option<i64>,
+    now: i64,
 ) -> Vec<Value> {
-    let lane_paths = |l: &Value| -> Vec<String> {
-        l["paths"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p.as_str().map(str::to_owned))
-            .collect()
-    };
+    let lane_paths = lane_values;
     let overlap =
         |a: &[String], b: &[String]| a.iter().any(|x| b.iter().any(|y| paths_overlap(x, y)));
     let mine: Vec<Vec<String>> = lanes
@@ -2442,7 +2519,10 @@ fn lane_conflicts(
     };
     let exempt = |l: &Value| {
         let theirs = lane_paths(l);
-        mine.iter().any(|m| overlap(m, &theirs))
+        l["created_ms"]
+            .as_i64()
+            .is_some_and(|since| now - since < LANE_PATIENCE_MS)
+            && mine.iter().any(|m| overlap(m, &theirs))
             && !paths.iter().any(|p| theirs.iter().any(|q| covers(p, q)))
     };
     lanes

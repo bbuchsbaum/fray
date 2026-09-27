@@ -244,6 +244,11 @@ to their children. A second live session using the same agent name is refused;
 Claude Code's `/clear` starts a new session in the same window: the
 SessionStart hook continues the identity automatically and records it as
 "continued after /clear", so clearing does not lock you out.
+When one host runs inside the other (Codex started from a Claude session, or
+the reverse) both host variables are set; the client binds the nearer host in
+the process tree. Waiting (`wait`, or a connected `watch`) makes an agent
+reachable, so messages route to it, but keeps its lanes for at most 4 hours
+after its last real activity.
 This prevents accidental collisions; it is not authentication.
 
 `join` and `brief` report `idle_readiness`. Open outgoing questions without an

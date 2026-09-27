@@ -359,7 +359,7 @@ fn review_continued_sessions_show_as_takeovers_and_waiting_is_presence() {
         NOW + 3,
     )
     .unwrap();
-    s.touch("release", LATER).unwrap();
+    s.touch("release", None, LATER).unwrap();
     run(&mut s, "codex", "heartbeat", json!({}), LATER).unwrap();
     let lanes = run(&mut s, "codex", "lanes", json!({}), LATER).unwrap();
     assert_eq!(lanes["lanes"][0]["stale"], false, "{lanes}");

@@ -397,7 +397,8 @@ fn wait_cancellable(
     let mut hangup = clone_for_client(stream)?;
     // Finite waits preserve sequential requests on the same connection. A bounded
     // socket read lets this EOF observer stop without shutting down that socket.
-    // The store still waits only on commits/cancellation, never a polling timer.
+    // The store wakes on commits and cancellation, and once a minute to
+    // refresh the waiter's presence; it never polls for changes.
     hangup.set_read_timeout(if indefinite {
         None
     } else {
@@ -480,16 +481,16 @@ fn wait(
     let limit = bounded(&req.args, "limit", 12, 1, 100)?;
     let mut store = shared.store.lock().map_err(|_| poisoned())?;
     let start = store.highwater()?;
-    // Waiting counts as presence; refresh it while the wait lasts.
-    const TOUCH: Duration = Duration::from_secs(60);
-    store.touch(&req.actor, now_ms())?;
-    let mut touched = Instant::now();
     if after > start {
         return Err(Error::new(
             "cursor_ahead",
             "cursor exceeds this store; rejoin rather than skip data",
         ));
     }
+    // Waiting makes the agent reachable; refresh that while the wait lasts.
+    const TOUCH: Duration = Duration::from_secs(60);
+    store.touch(&req.actor, req.session.as_deref(), now_ms())?;
+    let mut touched = Instant::now();
     loop {
         if unexpected_input.is_some_and(|input| input.load(Ordering::SeqCst)) {
             return Err(Error::new("protocol", "unexpected input while waiting"));
@@ -531,7 +532,7 @@ fn wait(
             return Ok(page);
         }
         if touched.elapsed() >= TOUCH {
-            store.touch(&req.actor, now_ms())?;
+            store.touch(&req.actor, req.session.as_deref(), now_ms())?;
             touched = Instant::now();
         }
         // The condition check and wait use the SAME mutex as commits: no lost
