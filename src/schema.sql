@@ -176,4 +176,10 @@ CREATE TABLE IF NOT EXISTS review_verdicts(
     verdict TEXT NOT NULL CHECK(verdict IN ('approve','object','blocked'))
 );
 CREATE INDEX IF NOT EXISTS review_verdicts_card ON review_verdicts(card_id,event_seq);
+-- A wait in progress, refreshed every minute: reachability, not activity.
+CREATE TABLE IF NOT EXISTS agent_waits(
+    agent TEXT PRIMARY KEY,
+    session TEXT,
+    refreshed_ms INTEGER NOT NULL
+);
 PRAGMA user_version = 3;

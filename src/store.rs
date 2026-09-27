@@ -281,11 +281,13 @@ impl Store {
     pub fn highwater(&self) -> Result<i64> {
         highwater(&self.conn)
     }
-    /// A plain `wait` is presence: the waiting agent will hear what arrives.
-    pub fn touch(&self, actor: &str, now: i64) -> Result<()> {
+    /// A wait in progress: the agent is reachable (it will hear what
+    /// arrives), which is not the same as active. It never touches the
+    /// activity timestamps, so the WAIT_HOLD_MS window cannot renew itself.
+    pub fn touch(&self, actor: &str, session: Option<&str>, now: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE agents SET last_seen_ms=max(last_seen_ms,?) WHERE name=? AND enabled=1",
-            params![now, actor],
+            "INSERT INTO agent_waits(agent,session,refreshed_ms) SELECT name,?2,?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET session=excluded.session,refreshed_ms=excluded.refreshed_ms",
+            params![actor, session, now],
         )?;
         Ok(())
     }
@@ -803,6 +805,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 params![req.op != "leave", now, actor],
             )?;
             if req.op == "leave" {
+                conn.execute("DELETE FROM agent_waits WHERE agent=?", [actor])?;
                 conn.execute("UPDATE controllers SET state='stopped',updated_ms=?,reason='left' WHERE agent=?", params![now,actor])?;
                 conn.execute("UPDATE listeners SET connected=0 WHERE agent=?", [actor])?;
             }
@@ -1220,7 +1223,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 // and say so, rather than leave the question with nobody.
                 let mut target = None;
                 for who in &candidates {
-                    if who == OWNER || agent_live(conn, who, now)? {
+                    if who == OWNER || agent_reachable(conn, who, now)? {
                         target = Some(who.clone());
                         break;
                     }
@@ -1590,7 +1593,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 get_card(conn, card)?;
             }
             let queue = boolean(a, "queue", false)?;
-            let conflicts = lane_conflicts(&live_lanes(conn, now)?, actor, &paths, None);
+            let lanes = live_lanes(conn, now)?;
+            let conflicts = lane_conflicts(&lanes, actor, &paths, None, now);
             if !conflicts.is_empty() && !queue {
                 let holders: Vec<String> = conflicts
                     .iter()
@@ -1612,10 +1616,33 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         )
                     })
                     .collect();
+                // If a queue is waiting on the actor's own held lane, the way
+                // forward is to finish and release it.
+                let mine: Vec<String> = lanes
+                    .iter()
+                    .filter(|l| l["agent"] == actor && l["state"] == "held")
+                    .filter(|l| {
+                        conflicts.iter().any(|c| {
+                            c["state"] == "queued"
+                                && lane_values(c)
+                                    .iter()
+                                    .any(|q| lane_values(l).iter().any(|m| paths_overlap(q, m)))
+                        })
+                    })
+                    .map(|l| l["id"].to_string())
+                    .collect();
+                let release = if mine.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " They are queued behind your held lane {}: finish and release it to let the queue proceed.",
+                        mine.join(", ")
+                    )
+                };
                 return Err(Error::new(
                     "lane_busy",
                     format!(
-                        "overlaps {}. Ask them, or rerun the same `fray lane take` with --queue to be told when it frees",
+                        "overlaps {}.{release} Ask them, or rerun the same `fray lane take` with --queue to be told when it frees",
                         holders.join("; ")
                     ),
                 ));
@@ -1629,6 +1656,41 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 "INSERT INTO lanes(agent,paths,purpose,card_id,state,created_ms) VALUES(?,?,?,?,?,?)",
                 params![actor, serde_json::to_string(&paths)?, purpose, card, state, now],
             )?;
+            // Taking paths inside a region someone queued for is allowed for a
+            // while (it may be how the holder finishes); they are told.
+            if state == "held" {
+                for l in lanes.iter().filter(|l| {
+                    l["state"] == "queued"
+                        && l["agent"] != actor
+                        && lane_values(l)
+                            .iter()
+                            .any(|q| paths.iter().any(|p| paths_overlap(q, p)))
+                }) {
+                    // Once per queued lane, not once per take.
+                    let told: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM cards c, json_each(c.tags) t WHERE c.assignee=? AND t.value=?)",
+                        params![l["agent"].as_str().unwrap_or(""), format!("lane-inside:{}", l["id"])],
+                        |r| r.get(0),
+                    )?;
+                    if told {
+                        continue;
+                    }
+                    lane_notice_tagged(
+                        conn,
+                        actor,
+                        l["agent"].as_str().unwrap_or(""),
+                        &format!("lane-inside:{}", l["id"]),
+                        "Work continues inside your queued lane",
+                        &format!(
+                            "{actor} took {} inside lane {} you are queued for, while finishing its held work. After {} min of queueing, new takes wait behind you.",
+                            paths.join(", "),
+                            l["id"],
+                            LANE_PATIENCE_MS / 60_000
+                        ),
+                        now,
+                    )?;
+                }
+            }
             let id = conn.last_insert_rowid();
             let mut result = json!({"lane":{"id":id,"agent":actor,"paths":paths,"purpose":purpose,"card":card,"state":state},"waiting_on":conflicts});
             if paths
@@ -1674,7 +1736,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 // overlapping paths (e.g. the giver's narrower lane inside it).
                 let others: Vec<Value> = lanes.iter().filter(|l| l["id"] != id).cloned().collect();
                 let paths: Vec<String> = serde_json::from_value(lane["paths"].clone())?;
-                let clash: Vec<String> = lane_conflicts(&others, to, &paths, None)
+                let clash: Vec<String> = lane_conflicts(&others, to, &paths, None, now)
                     .iter()
                     .filter(|l| l["state"] == "held")
                     .map(|l| format!("lane {} by {}", l["id"], l["agent"].as_str().unwrap_or("")))
@@ -1769,6 +1831,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     &agent,
                     &qpaths,
                     queued["id"].as_i64(),
+                    now,
                 )
                 .is_empty()
                 {
@@ -2349,6 +2412,14 @@ fn query(conn: &Connection, a: &Value, actor: &str, now: i64) -> Result<Value> {
 }
 /// How long a session's binding to a name survives without activity.
 pub const IDENTITY_TTL_MS: i64 = 30 * 60_000;
+/// How long a queued lane lets its holder keep taking paths inside it. After
+/// that the queue comes first: the holder finishes, releases, and waits its turn.
+pub const LANE_PATIENCE_MS: i64 = 10 * 60_000;
+/// How long waiting (an armed wait or listener) keeps an otherwise idle agent
+/// holding its lanes. Waiting always counts as reachable for routing.
+pub const WAIT_HOLD_MS: i64 = 4 * 60 * 60_000;
+/// A wait refreshes its row every minute; older rows are not waiting.
+const WAIT_FRESH_MS: i64 = 150_000;
 
 fn session_label(session: &str) -> String {
     clip(session, 20)
@@ -2400,7 +2471,10 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
             )?;
             return Ok(None);
         }
-        Some((held, seen)) if now - seen < IDENTITY_TTL_MS && !takeover => {
+        Some((held, seen))
+            if now - session_seen(conn, actor, &held, seen, now)? < IDENTITY_TTL_MS
+                && !takeover =>
+        {
             return Err(Error::new(
                 "identity_busy",
                 format!(
@@ -2433,6 +2507,22 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
     Ok(replaced)
 }
 
+/// When a bound session was last seen, counting its own wait in progress
+/// within WAIT_HOLD_MS of the session's last real activity.
+fn session_seen(conn: &Connection, agent: &str, session: &str, seen: i64, now: i64) -> Result<i64> {
+    let waiting: Option<i64> = conn
+        .query_row(
+            "SELECT refreshed_ms FROM agent_waits WHERE agent=? AND session=? AND refreshed_ms>?",
+            params![agent, session, now - WAIT_FRESH_MS],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match waiting {
+        Some(t) if now - seen < WAIT_HOLD_MS => t.max(seen),
+        _ => seen,
+    })
+}
+
 /// The live binding for `roster`, plus a recent takeover so a displaced
 /// session can see what happened.
 fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
@@ -2440,12 +2530,14 @@ fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
         .query_row(
             "SELECT session,started_ms,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1",
             [agent],
-            |r| {
-                let seen: i64 = r.get(2)?;
-                Ok(json!({"session":session_label(&r.get::<_,String>(0)?),"since_ms":r.get::<_,i64>(1)?,"last_seen_ms":seen,"live":now-seen<IDENTITY_TTL_MS}))
-            },
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
         )
-        .optional()?;
+        .optional()?
+        .map(|(session, since, seen)| -> Result<Value> {
+            let live = now - session_seen(conn, agent, &session, seen, now)? < IDENTITY_TTL_MS;
+            Ok(json!({"session":session_label(&session),"since_ms":since,"last_seen_ms":seen,"live":live}))
+        })
+        .transpose()?;
     let takeover = conn
         .query_row(
             "SELECT session,ended_ms,ended_reason FROM sessions WHERE agent=? AND (ended_reason LIKE 'takeover%' OR ended_reason LIKE 'continued%') AND ended_ms>? ORDER BY ended_ms DESC LIMIT 1",
@@ -2519,18 +2611,47 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 /// thread or hook). Polling an empty inbox is not recorded; arm a wait or set
 /// a status instead.
 fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
-    let seen: Option<i64> = conn.query_row(
-        "SELECT max(t) FROM (SELECT last_seen_ms AS t FROM sessions WHERE agent=?1 AND ended_ms IS NULL UNION ALL SELECT last_seen_ms FROM agents WHERE name=?1 AND enabled=1 UNION ALL SELECT updated_ms FROM listeners WHERE agent=?1 AND connected=1 UNION ALL SELECT updated_ms FROM controllers WHERE agent=?1 AND state IN ('waiting','running') UNION ALL SELECT max(created_ms) FROM presented_batches WHERE agent=?1 UNION ALL SELECT max(shown_at_ms) FROM deliveries WHERE agent=?1)",
+    let last = last_active(conn, agent)?;
+    let active = last.is_some_and(|t| now - t < IDENTITY_TTL_MS);
+    Ok(
+        active
+            || (agent_waiting(conn, agent, now)? && last.is_some_and(|t| now - t < WAIT_HOLD_MS)),
+    )
+}
+
+/// The agent's last deliberate activity: a live session, a write, a running
+/// drive loop, or receipts shown to it. Waiting is not activity.
+fn last_active(conn: &Connection, agent: &str) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT max(t) FROM (SELECT last_seen_ms AS t FROM sessions WHERE agent=?1 AND ended_ms IS NULL UNION ALL SELECT last_seen_ms FROM agents WHERE name=?1 AND enabled=1 UNION ALL SELECT updated_ms FROM controllers WHERE agent=?1 AND state IN ('waiting','running') UNION ALL SELECT max(created_ms) FROM presented_batches WHERE agent=?1 UNION ALL SELECT max(shown_at_ms) FROM deliveries WHERE agent=?1)",
         [agent],
         |r| r.get(0),
-    )?;
-    Ok(seen.is_some_and(|seen| now - seen < IDENTITY_TTL_MS))
+    )?)
+}
+
+/// Whether something is armed to hear the agent's mail right now: a connected
+/// listener or a wait in progress.
+fn agent_waiting(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM listeners WHERE agent=?1 AND connected=1) OR EXISTS(SELECT 1 FROM agent_waits WHERE agent=?1 AND refreshed_ms>?2)",
+        params![agent, now - WAIT_FRESH_MS],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether a message to the agent will be heard soon: active, or waiting
+/// (however long it has been idle). Used for routing, not for lanes.
+fn agent_reachable(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+    Ok(
+        last_active(conn, agent)?.is_some_and(|t| now - t < IDENTITY_TTL_MS)
+            || agent_waiting(conn, agent, now)?,
+    )
 }
 
 /// A note for a sender when the recipient is not present, naming who is.
 /// None when the recipient is present, is the owner, or is the sender.
 fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result<Option<String>> {
-    if who == OWNER || who == actor || agent_live(conn, who, now)? {
+    if who == OWNER || who == actor || agent_reachable(conn, who, now)? {
         return Ok(None);
     }
     let seen: i64 = conn
@@ -2560,7 +2681,7 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut present = Vec::new();
     for name in names {
-        if name != who && name != actor && name != OWNER && agent_live(conn, &name, now)? {
+        if name != who && name != actor && name != OWNER && agent_reachable(conn, &name, now)? {
             present.push(name);
         }
     }
@@ -2598,26 +2719,30 @@ fn live_lanes(conn: &Connection, now: i64) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+fn lane_values(l: &Value) -> Vec<String> {
+    l["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// Other agents' lanes that block `paths`: any overlapping held lane, and any
 /// overlapping queued lane that was there first (queues are first come,
 /// first served). `before` is the queued lane's own id, or None for a new take.
 /// A queued lane that is itself waiting on one of the actor's held lanes does
 /// not block the actor: it is waiting for the actor to finish, and blocking
-/// the actor would deadlock both.
+/// the actor would deadlock both. That exemption lasts LANE_PATIENCE_MS
+/// from the queued lane's creation (a handover keeps it).
 fn lane_conflicts(
     lanes: &[Value],
     actor: &str,
     paths: &[String],
     before: Option<i64>,
+    now: i64,
 ) -> Vec<Value> {
-    let lane_paths = |l: &Value| -> Vec<String> {
-        l["paths"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p.as_str().map(str::to_owned))
-            .collect()
-    };
+    let lane_paths = lane_values;
     let overlap =
         |a: &[String], b: &[String]| a.iter().any(|x| b.iter().any(|y| paths_overlap(x, y)));
     let mine: Vec<Vec<String>> = lanes
@@ -2633,7 +2758,10 @@ fn lane_conflicts(
     };
     let exempt = |l: &Value| {
         let theirs = lane_paths(l);
-        mine.iter().any(|m| overlap(m, &theirs))
+        l["created_ms"]
+            .as_i64()
+            .is_some_and(|since| now - since < LANE_PATIENCE_MS)
+            && mine.iter().any(|m| overlap(m, &theirs))
             && !paths.iter().any(|p| theirs.iter().any(|q| covers(p, q)))
     };
     lanes
@@ -2659,13 +2787,27 @@ fn lane_notice(
     text: &str,
     now: i64,
 ) -> Result<()> {
+    lane_notice_tagged(conn, actor, to, "lane", title, text, now)
+}
+
+fn lane_notice_tagged(
+    conn: &Connection,
+    actor: &str,
+    to: &str,
+    tag: &str,
+    title: &str,
+    text: &str,
+    now: i64,
+) -> Result<()> {
     if to == actor {
         return Ok(());
     }
+    let mut tags = vec!["lane".to_owned(), tag.to_owned()];
+    tags.dedup();
     create_card(
         conn,
         actor,
-        &json!({"kind":"note","topic":format!("@{to}"),"title":title,"summary":text,"assignee":to,"tags":["lane"]}),
+        &json!({"kind":"note","topic":format!("@{to}"),"title":title,"summary":text,"assignee":to,"tags":tags}),
         json!({"body":text}),
         now,
     )?;
@@ -3107,7 +3249,7 @@ fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && now-last<120000,"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && (now-last<120000 || agent_waiting(conn,&name,now)?),"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?}));
     }
     Ok(json!({"items":items,"more":more}))
 }
