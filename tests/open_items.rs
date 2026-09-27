@@ -145,3 +145,95 @@ fn codex_inside_claude_binds_the_codex_session() {
     assert!(text.contains("codex:inner"), "{text}");
     assert!(!text.contains("claude:outer"), "{text}");
 }
+
+fn in_session(
+    s: &mut Store,
+    actor: &str,
+    session: &str,
+    op: &str,
+    args: Value,
+    at: i64,
+) -> Result<Value, String> {
+    s.execute_at(
+        &Request::new(op, actor, args).with_session(Some(session.to_owned())),
+        at,
+    )
+    .map_err(|e| e.code)
+}
+
+#[test]
+fn review_a_session_bound_wait_cannot_renew_its_own_hold() {
+    let mut s = Store::memory().unwrap();
+    in_session(&mut s, "claude", "claude:s1", "join", json!({}), NOW).unwrap();
+    run(&mut s, "codex", "join", json!({}), NOW).unwrap();
+    in_session(
+        &mut s,
+        "claude",
+        "claude:s1",
+        "lane_take",
+        json!({"paths":["docs/"],"purpose":"w"}),
+        NOW,
+    )
+    .unwrap();
+    // A wait from s1, refreshed every minute for 2 hours: still held, and a
+    // new session is refused (s1 is alive and waiting).
+    let mut t = NOW;
+    while t < NOW + 2 * 60 * 60_000 {
+        t += 60_000;
+        s.touch("claude", Some("claude:s1"), t).unwrap();
+    }
+    run(&mut s, "codex", "heartbeat", json!({}), t).unwrap();
+    assert_eq!(
+        run(&mut s, "codex", "lanes", json!({}), t).unwrap()["lanes"][0]["stale"],
+        false
+    );
+    assert_eq!(
+        in_session(&mut s, "claude", "claude:s2", "join", json!({}), t).unwrap_err(),
+        "identity_busy"
+    );
+    // Keep refreshing past the hold window: it does not renew itself.
+    while t < NOW + WAIT_HOLD_MS + 5 * 60_000 {
+        t += 60_000;
+        s.touch("claude", Some("claude:s1"), t).unwrap();
+    }
+    run(&mut s, "codex", "heartbeat", json!({}), t).unwrap();
+    assert_eq!(
+        run(&mut s, "codex", "lanes", json!({}), t).unwrap()["lanes"][0]["stale"],
+        true
+    );
+    in_session(&mut s, "claude", "claude:s2", "join", json!({}), t).unwrap();
+}
+
+#[test]
+fn review_inner_takes_notify_once_and_busy_says_to_release() {
+    let mut s = board();
+    take(&mut s, "claude", &["x/child"], false, NOW).unwrap();
+    take(&mut s, "codex", &["x"], true, NOW).unwrap();
+    for (i, p) in ["x/a", "x/b", "x/c"].iter().enumerate() {
+        take(&mut s, "claude", &[p], false, NOW + 1 + i as i64).unwrap();
+    }
+    let inbox = run(&mut s, "codex", "inbox", json!({}), NOW + 10).unwrap();
+    let text = serde_json::to_string(&inbox).unwrap();
+    assert_eq!(
+        text.matches("Work continues inside your queued lane")
+            .count(),
+        1,
+        "{text}"
+    );
+    let late = NOW + LANE_PATIENCE_MS + 1;
+    for who in ["claude", "codex"] {
+        run(&mut s, who, "heartbeat", json!({}), late).unwrap();
+    }
+    let err = s
+        .execute_at(
+            &Request::new(
+                "lane_take",
+                "claude",
+                json!({"paths":["x/d"],"purpose":"w"}),
+            ),
+            late,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "lane_busy");
+    assert!(err.message.contains("release it"), "{}", err.message);
+}

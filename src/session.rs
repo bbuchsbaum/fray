@@ -30,19 +30,22 @@ pub fn resolve(
 }
 
 fn from_host(explicit: Option<&str>, hook_session: Option<&str>) -> Result<Option<String>> {
+    let explicit = explicit
+        .map(str::to_owned)
+        .or_else(|| env::var("FRAY_SESSION").ok());
+    if explicit.is_some() {
+        return resolve(explicit.as_deref(), None, None);
+    }
     let claude = env::var("CLAUDE_CODE_SESSION_ID").ok();
     let codex = env::var("CODEX_THREAD_ID").ok();
     // One host started inside the other inherits the outer host's variable.
-    // The caller is the nearer host in the process tree.
+    // The caller is the nearer host in the process tree; if that cannot be
+    // read (a sandbox without ps), Codex, since Claude commonly starts Codex.
     let claude = match (&claude, &codex) {
-        (Some(_), Some(_)) if nearer_host() == Some("codex") => None,
+        (Some(_), Some(_)) if nearer_host().unwrap_or("codex") == "codex" => None,
         _ => claude,
     };
-    resolve(
-        explicit.or(env::var("FRAY_SESSION").ok().as_deref()),
-        claude.as_deref().or(hook_session),
-        codex.as_deref(),
-    )
+    resolve(None, claude.as_deref().or(hook_session), codex.as_deref())
 }
 
 /// The nearest Claude Code or Codex process among this process's ancestors.
