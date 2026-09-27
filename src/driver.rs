@@ -19,6 +19,8 @@ const HEARTBEAT_SECS: u64 = 30;
 pub struct Options {
     #[arg(long, default_value_t = 12)]
     max_turns: usize,
+    /// Exit after this many idle seconds without selected attention (0: do not wait).
+    /// Does not limit a running child; use --child-timeout for that.
     #[arg(long, default_value_t = 300)]
     idle_timeout: u64,
     #[arg(long, default_value_t = 100)]

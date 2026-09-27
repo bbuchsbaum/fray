@@ -109,3 +109,66 @@ fn pending_mail_waits_for_the_agent_and_arrives_on_join() {
         2
     );
 }
+
+#[test]
+fn withdrawn_or_rerouted_pending_mail_does_not_leave_a_phantom_in_default_roster() {
+    let mut s = board();
+    let mut cards = Vec::new();
+    for body in ["First", "Second"] {
+        cards.push(
+            run(
+                &mut s,
+                "claude",
+                "send",
+                json!({"to":"typo","body":body,"pending":true}),
+            )
+            .unwrap()["card"]["id"]
+                .clone(),
+        );
+    }
+    let visible = |s: &mut Store, args| {
+        run(s, "claude", "agents", args).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"] == "typo")
+    };
+    run(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id":cards[0],"expect":1,"status":"withdrawn"}),
+    )
+    .unwrap();
+    assert!(
+        visible(&mut s, json!({})),
+        "one open message still needs the recipient"
+    );
+    run(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id":cards[1],"expect":1,"assignee":"codex-attention-0923"}),
+    )
+    .unwrap();
+    assert!(!visible(&mut s, json!({})));
+    assert!(
+        visible(&mut s, json!({"all":true})),
+        "history is retained, never deleted"
+    );
+    let brief = run(&mut s, "claude", "brief", json!({})).unwrap();
+    assert!(!brief["agents"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["name"] == "typo"));
+    // A later genuine join still works and recovers the terminal directed message.
+    run(&mut s, "typo", "join", json!({})).unwrap();
+    assert!(visible(&mut s, json!({})));
+    let inbox = run(&mut s, "typo", "inbox", json!({})).unwrap();
+    assert!(inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["card"]["id"] == cards[0]));
+}

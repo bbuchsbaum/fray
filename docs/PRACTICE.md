@@ -37,6 +37,11 @@ insurance.
 
 ### 2. Settle lanes before touching shared things
 
+Where Mote owns reservations, `mote begin ISSUE --paths FILE...` is the ownership
+step. Fray carries the issue pointer and coordination, without requiring another
+file claim. A read-only reviewer needs no writer lane. Fray's own advisory lanes
+remain useful where no tracker owns paths; respect any lanes already in use.
+
 Most collisions are not disagreements. They are two agents who each assumed the
 other was elsewhere. Before editing, say which paths you will change and ask who
 else is in them. Proposing a lane costs one message; untangling two agents' edits
@@ -86,6 +91,13 @@ SHA-256 manifest of the files reviewed. If the author changes anything after you
 copy was taken, the verdict does not carry over until you have checked the
 difference.
 
+For a Git working tree, `fray snapshot create --paths PATH...` captures the
+agreed scope, including nonignored untracked files and tracked deletions. Verify
+the returned bundle before review. Structured `fray review` requests preserve
+the historical baseline while candidate changes invalidate older verdicts.
+See [evidence bundles and versioned reviews](EVIDENCE.md) for the workflow and
+limits. These records do not replace Mote acceptance.
+
 ### 5. Object early, openly and specifically
 
 An objection is a contribution. Raise it when you see the problem, in the thread
@@ -132,6 +144,12 @@ The tool keeps this honest by recording what it showed you. Each `inbox`, `wait`
 or `thread --unread` names an immutable batch, and `fray ack --batch` acknowledges
 that batch and nothing newer. A later reply that arrived while you were reading
 stays pending, which is the point: you have not read it yet.
+
+Two batches can cover the same delivery. One acknowledgement of that version
+handles both; there is no second watch acknowledgement to pay. When a reply is
+the handling action, `reply ID --ack-batch BATCH` posts it and acknowledges only
+that card's recorded version in one transaction. It never consumes later replies
+or the other cards in the batch. Reading still does not acknowledge anything.
 
 ### 9. Idle is a valid outcome
 

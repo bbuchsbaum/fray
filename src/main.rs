@@ -82,6 +82,18 @@ impl Filters {
 }
 #[derive(Subcommand)]
 enum Cmd {
+    /// Capture or verify explicit working-tree evidence without contacting a daemon.
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCmd,
+    },
+    /// Route version-bound peer review evidence; never closes or accepts Mote work.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCmd,
+    },
+    /// Show peer registrations not yet presented to this host session.
+    Peers,
     /// Print the shared agent skill, or install it into this project's host directories.
     Skill {
         /// Bundled skill to print/install; use 'all' with --install.
@@ -115,7 +127,7 @@ enum Cmd {
     Join {
         #[arg(long, value_delimiter = ',')]
         topics: Option<Vec<String>>,
-        #[arg(long)]
+        #[arg(long, value_parser = ["worker", "steward", "reviewer"])]
         role: Option<String>,
         /// Replace another live session holding this name. Only when that
         /// session is gone; the displaced session is recorded and visible.
@@ -162,6 +174,10 @@ enum Cmd {
         refs: Vec<String>,
         #[arg(long, default_value = "answer")]
         kind: String,
+        /// Also acknowledge this card's exact version in a batch you handled.
+        /// Other cards and newer replies stay pending; failure changes neither.
+        #[arg(long)]
+        ack_batch: Option<String>,
     },
     /// Read a conversation's current head, ordered history, and delivery receipts.
     Thread {
@@ -327,7 +343,11 @@ enum Cmd {
         #[arg(long)]
         fence: i64,
     },
-    Agents,
+    Agents {
+        /// Include never-joined recipients whose pending mail is all closed or rerouted.
+        #[arg(long)]
+        all: bool,
+    },
     /// Silence this exact card without acknowledging its unread receipts.
     Mute {
         id: i64,
@@ -414,7 +434,7 @@ enum Cmd {
     },
     /// Launch an interactive agent with an isolated identity in this shared project.
     Enter {
-        #[arg(long)]
+        #[arg(long, value_parser = ["worker", "steward", "reviewer"])]
         role: Option<String>,
         #[arg(long, value_delimiter = ',')]
         topics: Option<Vec<String>>,
@@ -435,6 +455,68 @@ enum Cmd {
     /// Send one raw protocol request (JSON argument or '-' for stdin).
     Rpc {
         request: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCmd {
+    /// Capture selected literal repository paths, including nonignored untracked files.
+    Create {
+        #[arg(long,required=true,num_args=1..)]
+        paths: Vec<PathBuf>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Bundle directory root; defaults to BOARD_HOME/evidence/snapshots.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Verify a bundle directory or manifest:SHA256 in the board's snapshot directory.
+    Verify { bundle: String },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// Open a request with a frozen scope/baseline and an immutable candidate reference.
+    Request {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        baseline: String,
+        #[arg(long, visible_alias = "subject")]
+        candidate: String,
+        #[arg(long)]
+        title: String,
+        #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+        /// External Mote candidate or issue pointer; Fray does not change its state.
+        #[arg(long = "ref")]
+        mote_ref: Option<String>,
+    },
+    /// Advance the current candidate; --expect is its sREV, not the card's rREV.
+    Subject {
+        id: i64,
+        #[arg(long)]
+        expect: i64,
+        #[arg(long)]
+        at: String,
+    },
+    /// Record advisory evidence for the exact candidate and subject revision reviewed.
+    Verdict {
+        id: i64,
+        #[arg(value_parser=["approve","object","blocked"])]
+        verdict: String,
+        #[arg(long)]
+        at: String,
+        #[arg(long)]
+        expect: i64,
+        #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+        #[arg(long)]
+        ack_batch: Option<String>,
     },
 }
 
@@ -970,6 +1052,8 @@ fn send(
     let mutation = matches!(
         op,
         "post"
+            | "review_request"
+            | "review_subject"
             | "send"
             | "patch"
             | "annotate"
@@ -1026,6 +1110,26 @@ fn join_args(role: Option<String>, topics: Option<Vec<String>>) -> Value {
 fn main() {
     let cli = Cli::parse();
     let json = cli.json;
+    let brief_budget = match &cli.command {
+        Cmd::Brief { budget } => Some(*budget),
+        _ => None,
+    };
+    let peers_command = matches!(&cli.command, Cmd::Peers);
+    let discover = matches!(
+        &cli.command,
+        Cmd::Join { .. }
+            | Cmd::Brief { .. }
+            | Cmd::Agents { .. }
+            | Cmd::Send { .. }
+            | Cmd::Reply { .. }
+            | Cmd::Post { .. }
+            | Cmd::Patch { .. }
+            | Cmd::Inbox { .. }
+            | Cmd::Thread { .. }
+            | Cmd::Review { .. }
+    );
+    let peer_context =
+        (discover || peers_command).then(|| (client::home(cli.home.clone()), cli.actor.clone()));
     let attention_stream = matches!(
         &cli.command,
         Cmd::Watch {
@@ -1035,16 +1139,62 @@ fn main() {
     );
     let wait_command = matches!(&cli.command, Cmd::Wait { .. });
     match run(cli) {
-        Ok(Some(v)) => {
+        Ok(Some(mut v)) => {
+            let mut peers = if peers_command && v["session_bound"] == true {
+                Some(v.clone())
+            } else if peers_command {
+                None
+            } else {
+                peer_context.as_ref().and_then(|(home, actor)| {
+                    home.as_ref().ok().and_then(|home| peer_delta(home, actor))
+                })
+            };
+            if !peers_command {
+                if let Some(delta) = &mut peers {
+                    // Brief has a hard byte budget. Defer any peers that do not
+                    // fit, without consuming their session exposure marker.
+                    loop {
+                        v["new_peers"] = delta.clone();
+                        if brief_budget.is_none_or(|budget| {
+                            serde_json::to_vec(&v).is_ok_and(|bytes| bytes.len() <= budget)
+                        }) {
+                            break;
+                        }
+                        let rows = delta["peers"].as_array_mut().unwrap();
+                        rows.pop();
+                        if rows.is_empty() {
+                            v.as_object_mut().unwrap().remove("new_peers");
+                            peers = None;
+                            break;
+                        }
+                        delta["more"] = json!(true);
+                    }
+                }
+            }
             if let Err(e) = output(&v, json) {
                 eprintln!("{e}");
                 std::process::exit(1);
+            }
+            if let (Some((Ok(home), actor)), Some(peers)) = (&peer_context, peers.as_ref()) {
+                mark_peers(home, actor, peers);
             }
             if wait_command && v["timed_out"] == true {
                 std::process::exit(3);
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            if let Some((Ok(home), actor)) = &peer_context {
+                if let Some(peers) = peer_delta(home, actor) {
+                    if io::stdout()
+                        .write_all(peer_text(&peers).as_bytes())
+                        .and_then(|_| io::stdout().flush())
+                        .is_ok()
+                    {
+                        mark_peers(home, actor, &peers);
+                    }
+                }
+            }
+        }
         Err(e) => {
             if json && !attention_stream {
                 let _ = server::write_frame(&mut io::stdout().lock(), &failure(e.clone()));
@@ -1063,6 +1213,48 @@ fn main() {
         }
     }
 }
+
+fn peer_delta(home: &Path, actor: &str) -> Option<Value> {
+    if fray::session::current().ok().flatten().is_none() || !valid_name(actor) {
+        return None;
+    }
+    match send(home, actor, "peers", json!({}), None, 5) {
+        Ok(value) if value["peers"].as_array().is_some_and(|p| !p.is_empty()) => Some(value),
+        _ => None,
+    }
+}
+fn mark_peers(home: &Path, actor: &str, value: &Value) {
+    let peers: Vec<_> = value["peers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| json!({"name":p["name"],"generation":p["generation"]}))
+        .collect();
+    let _ = send(
+        home,
+        actor,
+        "peer_present",
+        json!({"store_id":value["store_id"],"peers":peers}),
+        None,
+        5,
+    );
+}
+fn peer_text(value: &Value) -> String {
+    let mut out = String::new();
+    for peer in value["peers"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "Peer joined/rejoined: {} ({}, recently active: {}, listener: {})\n",
+            clean(peer["name"].as_str().unwrap_or("")),
+            clean(peer["role"].as_str().unwrap_or("")),
+            peer["recently_seen"],
+            clean(peer["listener"]["state"].as_str().unwrap_or("none"))
+        ));
+    }
+    if value["more"] == true {
+        out.push_str("More newly observed peers; use fray peers or the next command.\n");
+    }
+    out
+}
 fn run(cli: Cli) -> Result<Option<Value>> {
     if !matches!(&cli.command, Cmd::Hook { .. }) {
         fray::session::configure(
@@ -1076,6 +1268,70 @@ fn run(cli: Cli) -> Result<Option<Value>> {
     let key = cli.key;
     let mut timeout = 10;
     let (op, args) = match cli.command {
+        Cmd::Snapshot { command } => {
+            return Ok(Some(match command {
+                SnapshotCmd::Create {
+                    paths,
+                    root,
+                    output,
+                } => fray::snapshot::create(
+                    &root,
+                    &output.unwrap_or_else(|| home.join("evidence/snapshots")),
+                    &paths,
+                )?,
+                SnapshotCmd::Verify { bundle } => {
+                    let path = if bundle.starts_with("manifest:") {
+                        fray::review::version(&bundle)?;
+                        home.join("evidence/snapshots")
+                            .join(bundle.trim_start_matches("manifest:"))
+                    } else {
+                        PathBuf::from(bundle)
+                    };
+                    fray::snapshot::verify(&path)?
+                }
+            }));
+        }
+        Cmd::Review { command } => match command {
+            ReviewCmd::Request {
+                to,
+                baseline,
+                candidate,
+                title,
+                body,
+                body_file,
+                mote_ref,
+            } => {
+                let mut args = json!({"to":to,"baseline":baseline,"candidate":candidate,"title":title,"body":message_body(body,body_file)?});
+                if let Some(reference) = mote_ref {
+                    args["mote_ref"] = json!(reference);
+                }
+                ("review_request", args)
+            }
+            ReviewCmd::Subject { id, expect, at } => {
+                ("review_subject", json!({"id":id,"expect":expect,"at":at}))
+            }
+            ReviewCmd::Verdict {
+                id,
+                verdict,
+                at,
+                expect,
+                body,
+                body_file,
+                ack_batch,
+            } => {
+                let kind = match verdict.as_str() {
+                    "object" => "objection",
+                    "blocked" => "question",
+                    _ => "evidence",
+                };
+                let mut args = json!({"id":id,"body":message_body(body,body_file)?,"kind":kind,"review_verdict":{"verdict":verdict,"at":at,"expect":expect}});
+                if let Some(batch) = ack_batch {
+                    args["ack_batch"] = json!(batch);
+                }
+                ("annotate", args)
+            }
+        },
+        Cmd::Peers => ("peers", json!({})),
         Cmd::Skill {
             name,
             list,
@@ -1152,10 +1408,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             body_file,
             kind,
             refs,
+            ack_batch,
         } => {
             let mut args = json!({"id":id,"body":message_body(body,body_file)?,"kind":kind});
             if !refs.is_empty() {
                 args["refs"] = json!(refs);
+            }
+            if let Some(batch) = ack_batch {
+                args["ack_batch"] = json!(batch);
             }
             ("annotate", args)
         }
@@ -1373,7 +1633,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Claim { id, ttl } => ("claim", json!({"id":id,"ttl":ttl})),
         Cmd::Renew { id, fence, ttl } => ("renew", json!({"id":id,"fence":fence,"ttl":ttl})),
         Cmd::Release { id, fence } => ("release", json!({"id":id,"fence":fence})),
-        Cmd::Agents => ("agents", json!({})),
+        Cmd::Agents { all } => ("agents", if all { json!({"all":true}) } else { json!({}) }),
         Cmd::Mute { id } => ("mute", json!({"id":id})),
         Cmd::Unmute { id } => ("unmute", json!({"id":id})),
         Cmd::Doctor => return Ok(Some(fray::diagnostics::inspect(&home, &actor)?)),
@@ -1488,6 +1748,13 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             client::start(&home, false)?;
             let brief = send(&home, &actor, "join", join_args(role, topics), None, 10)?;
             eprintln!("Joined Fray as {actor}; {} pending cards. Agent instructions/hooks supply the briefing to the model.",brief["attention"]["total"]);
+            eprintln!("Board: {}", home.display());
+            if let Some(peers) = peer_delta(&home, &actor) {
+                io::stderr().write_all(peer_text(&peers).as_bytes())?;
+                io::stderr().flush()?;
+                // Terminal output does not reach the child's model context.
+                // Leave these unseen for its SessionStart hook or first CLI read.
+            }
             let status = Process::new(&command[0])
                 .args(&command[1..])
                 .env("FRAY_AGENT", &actor)
@@ -1570,13 +1837,15 @@ fn present(home: &Path, actor: &str, source: &str, receipts: &[Value], value: &m
 fn unread_text(v: &Value) -> String {
     let card = &v["card"];
     let mut out = format!(
-        "#{} {} [{}]  unread after @{} through @{}\n",
+        "#{} r{} {} [{}]  unread after @{} through @{}\n",
         card["id"],
+        card["rev"],
         clean(card["title"].as_str().unwrap_or("")),
         clean(card["status"].as_str().unwrap_or("")),
         v["ack_seq"],
         v["next_after"]
     );
+    out.push_str(&review_text(&v["review"]));
     out.push_str(&follow_ups_text(v));
     let events = v["unread"].as_array().cloned().unwrap_or_default();
     if events.is_empty() {
@@ -1636,6 +1905,50 @@ fn clean(s: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
+fn review_text(review: &Value) -> String {
+    if !review.is_object() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\nReview s{} (advisory)\n  baseline: {}\n  candidate: {}\n",
+        review["subject_rev"],
+        clean(review["baseline"].as_str().unwrap_or("")),
+        clean(review["candidate"].as_str().unwrap_or(""))
+    );
+    if let Some(reference) = review["mote_ref"].as_str() {
+        out.push_str(&format!(
+            "  Mote: {} (acceptance remains there)\n",
+            clean(reference)
+        ));
+    }
+    let verdicts: Vec<&Value> = match review["verdicts"].as_array() {
+        Some(v) => v.iter().collect(),
+        None => review
+            .get("latest_verdict")
+            .filter(|v| v.is_object())
+            .into_iter()
+            .collect(),
+    };
+    for verdict in verdicts {
+        out.push_str(&format!(
+            "  @{} {}: {} at {} s{}{}\n",
+            verdict["event_seq"],
+            clean(verdict["reviewer"].as_str().unwrap_or("")),
+            clean(verdict["verdict"].as_str().unwrap_or("")),
+            clean(verdict["version"].as_str().unwrap_or("")),
+            verdict["subject_rev"],
+            if verdict["stale"] == true {
+                " [STALE]"
+            } else {
+                ""
+            }
+        ));
+    }
+    if review["verdicts_more"] == true {
+        out.push_str("  Older verdicts remain in thread history.\n");
+    }
+    out
+}
 /// Open questions/objections against a thread, with an explicit omission marker.
 fn follow_ups_text(v: &Value) -> String {
     let mut out = String::new();
@@ -1661,11 +1974,13 @@ fn follow_ups_text(v: &Value) -> String {
 }
 fn thread_bodies(v: &Value) -> String {
     let mut out = format!(
-        "#{} {} [{}]\n",
+        "#{} r{} {} [{}]\n",
         v["card"]["id"],
+        v["card"]["rev"],
         clean(v["card"]["title"].as_str().unwrap_or("")),
         clean(v["card"]["status"].as_str().unwrap_or(""))
     );
+    out.push_str(&review_text(&v["review"]));
     out.push_str(&follow_ups_text(v));
     if let Some(events) = v["history"].as_array() {
         for event in events {
@@ -1739,6 +2054,18 @@ fn card_text(c: &Value) -> String {
     )
 }
 fn human(v: &Value, out: &mut String) {
+    if v["new_peers"].is_object() {
+        out.push_str(&peer_text(&v["new_peers"]));
+    }
+    if v["peers"].is_array() {
+        out.push_str(&peer_text(v));
+        if v["session_bound"] == false {
+            out.push_str(
+                "Bind --session or a supported host session to remember displayed peers.\n",
+            );
+        }
+        return;
+    }
     if v.get("attention").is_some() {
         out.push_str(&format!(
             "FRAY  agent={}  cursor={}  current state\n",
@@ -1789,6 +2116,7 @@ fn human(v: &Value, out: &mut String) {
                 ));
             } else if item.get("card").is_some() {
                 out.push_str(&card_text(&item["card"]));
+                out.push_str(&review_text(&item["card"]["review"]));
                 out.push_str(&format!(
                     "\n      receipt={}  annotations={} ({} omitted)\n",
                     item["through_seq"], item["annotation_count"], item["annotations_omitted"]
@@ -1852,6 +2180,7 @@ fn human(v: &Value, out: &mut String) {
         }
     } else if v.get("card").is_some() {
         out.push_str(&card_text(&v["card"]));
+        out.push_str(&review_text(&v["review"]));
         out.push_str(&format!(
             "\n      seq={} fence={} lease_until={}\n",
             v["card"]["last_seq"], v["card"]["fence"], v["card"]["lease_until_ms"]
@@ -1863,6 +2192,17 @@ fn human(v: &Value, out: &mut String) {
         }
         if let Some(notice) = v["notice"].as_str() {
             out.push_str(&format!("Note: {}\n", clean(notice)));
+        }
+        if let Some(warning) = v["reply_warning"].as_str() {
+            out.push_str(&format!("Warning: {}\n", clean(warning)));
+        }
+        if let Some(acked) = v["acknowledged"].as_array() {
+            for item in acked {
+                out.push_str(&format!(
+                    "Acknowledged #{} through @{} (newer pending: {})\n",
+                    item["id"], item["ack_seq"], item["still_pending"]
+                ));
+            }
         }
         if let Some(r) = v.get("receipts") {
             out.push_str(&format!(
@@ -2007,7 +2347,8 @@ fn hook(
         args["unresolved"] = json!(true);
     }
     let page = send(home, &actor, "inbox", args, None, 5)?;
-    let mut data = json!({"agent":actor,"attention":page,"idle_readiness":brief["idle_readiness"]});
+    let peers = peer_delta(home, &actor);
+    let mut data = json!({"agent":actor,"board_home":home,"attention":page,"idle_readiness":brief["idle_readiness"],"new_peers":peers});
     // Preserve a bounded hook payload even if several long annotations arrive.
     while serde_json::to_vec(&data)?.len() > 6000 {
         let items = data["attention"]["items"].as_array_mut().unwrap();
@@ -2023,7 +2364,14 @@ fn hook(
         .cloned()
         .unwrap_or_default();
     let warning = data["idle_readiness"]["warning"].is_string();
-    if items.is_empty() && event != "SessionStart" && !(event == "Stop" && warning) {
+    let peer_news = data["new_peers"]["peers"]
+        .as_array()
+        .is_some_and(|p| !p.is_empty());
+    if items.is_empty()
+        && event != "SessionStart"
+        && !(event == "Stop" && warning)
+        && (event == "Stop" || !peer_news)
+    {
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
@@ -2034,6 +2382,9 @@ fn hook(
         json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":context}})
     };
     server::write_frame(&mut io::stdout().lock(), &result)?;
+    if let Some(peers) = peers.as_ref() {
+        mark_peers(home, &actor, peers);
+    }
     // Exposure is not ACK. Recording after stdout permits harmless duplicate reminders
     // after a crash; unread items remain in the durable inbox until an explicit ack.
     let receipts: Vec<_> = items

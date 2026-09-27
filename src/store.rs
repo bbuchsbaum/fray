@@ -250,7 +250,7 @@ impl Store {
     fn configure(conn: &Connection, normal: bool) -> Result<()> {
         conn.busy_timeout(Duration::from_secs(5))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(Error::new(
                 "schema_version",
                 "database was created by a newer Fray",
@@ -266,6 +266,7 @@ impl Store {
         })?;
         conn.execute_batch("BEGIN IMMEDIATE")?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        conn.execute("INSERT OR IGNORE INTO peer_generations(agent,generation,session,joined_ms) SELECT name,1,(SELECT session FROM sessions WHERE agent=agents.name AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1),joined_ms FROM agents WHERE enabled=1",[])?;
         if version == 1 {
             // Preserve every receipt. Reconstruct deliberate participation, not old fan-out.
             conn.execute_batch("INSERT OR IGNORE INTO participants(agent,card_id) SELECT DISTINCT e.actor,e.card_id FROM events e JOIN agents a ON a.name=e.actor;")?;
@@ -327,6 +328,9 @@ impl Store {
                 | "lane_take"
                 | "lane_release"
                 | "set_status"
+                | "peer_present"
+                | "review_request"
+                | "review_subject"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -391,6 +395,15 @@ impl Store {
         }
         let replaced = bind_session(&tx, req, now)?;
         let mut result = mutate(&tx, req, now)?;
+        if req.session.is_some()
+            && !matches!(
+                req.op.as_str(),
+                "join" | "leave" | "present" | "expose" | "peer_present"
+            )
+            && req.actor != OWNER
+        {
+            crate::presence::joined(&tx, &req.actor, req.session.as_deref(), true, now)?;
+        }
         if let Some(replaced) = replaced {
             result["session_replaced"] = replaced;
         }
@@ -402,7 +415,7 @@ impl Store {
         }
         // A listener registering what it displayed is not the agent acting;
         // keep presence tied to deliberate activity.
-        if req.op != "present" {
+        if !matches!(req.op.as_str(), "present" | "peer_present") {
             tx.execute(
                 "UPDATE agents SET last_seen_ms=? WHERE name=?",
                 params![now, req.actor],
@@ -733,6 +746,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     .unwrap_or("[\"*\"]".into())
             };
             conn.execute("INSERT INTO agents(name,role,topics,joined_ms,last_seen_ms) VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,topics=excluded.topics,enabled=1,last_seen_ms=excluded.last_seen_ms",params![actor,role,topics,now,now])?;
+            crate::presence::joined(
+                conn,
+                actor,
+                req.session.as_deref(),
+                existing.as_ref().is_some_and(|e| e.2),
+                now,
+            )?;
             // Seed from live heads, never from the historical event stream. On resume,
             // refresh the pending head without changing any explicit acknowledgment.
             let sql=format!("INSERT INTO deliveries(agent,card_id,pending_seq) SELECT ?1,c.id,c.last_seq FROM cards c WHERE ({ACTIVE} OR c.assignee=?1 OR c.author=?1 OR c.lease_owner=?1 OR EXISTS(SELECT 1 FROM participants p WHERE p.agent=?1 AND p.card_id=c.id) OR EXISTS(SELECT 1 FROM deliveries d WHERE d.agent=?1 AND d.card_id=c.id)) AND {RELEVANT} AND {UNMUTED} AND NOT EXISTS(SELECT 1 FROM events e WHERE e.seq=c.last_seq AND e.actor=?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(deliveries.pending_seq,excluded.pending_seq)");
@@ -919,6 +939,106 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )?;
             create_card(conn, actor, a, Value::Null, now)
         }
+        "peer_present" => crate::presence::presented(conn, req),
+        "review_request" => {
+            check_fields(
+                a,
+                &["to", "title", "body", "baseline", "candidate", "mote_ref"],
+            )?;
+            let to = string(a, "to")?;
+            if to == actor {
+                return Err(Error::new(
+                    "self_review",
+                    "address a review request to a peer",
+                ));
+            }
+            let baseline = crate::review::version(string(a, "baseline")?)?;
+            let candidate = crate::review::version(string(a, "candidate")?)?;
+            let body = string(a, "body")?;
+            text(body, "body", 8000, false)?;
+            let mote_ref = a
+                .get("mote_ref")
+                .map(|_| string(a, "mote_ref"))
+                .transpose()?;
+            if let Some(reference) = mote_ref {
+                text(reference, "mote_ref", 200, false)?;
+                if !reference.starts_with("mote:") || reference.len() == 5 {
+                    return Err(Error::invalid(
+                        "mote_ref must be a mote: candidate/issue reference",
+                    ));
+                }
+            }
+            let review = json!({"baseline":baseline,"candidate":candidate,"subject_rev":1,"mote_ref":mote_ref,"advisory":true});
+            let summary = if body.len() <= 2000 {
+                body.to_owned()
+            } else {
+                format!(
+                    "{}\n[Full review: fray thread ID --bodies]",
+                    clip(body, 400)
+                )
+            };
+            let mut result = create_card(
+                conn,
+                actor,
+                &json!({"kind":"question","topic":format!("@{to}"),"title":string(a,"title")?,"summary":summary,"assignee":to,"tags":mote_ref.into_iter().collect::<Vec<_>>()}),
+                json!({"body":body,"review":review}),
+                now,
+            )?;
+            let id = result["card"]["id"].as_i64().unwrap();
+            conn.execute("INSERT INTO review_subjects(card_id,baseline,candidate,subject_rev,mote_ref) VALUES(?,?,?,1,?)",params![id,baseline,candidate,mote_ref])?;
+            result["review"] = review;
+            Ok(result)
+        }
+        "review_subject" => {
+            check_fields(a, &["id", "expect", "at"])?;
+            let c = get_card(conn, integer(a, "id")?)?;
+            if c.author != actor {
+                return Err(Error::new(
+                    "not_author",
+                    "only the review requester may move its candidate",
+                ));
+            }
+            if c.terminal() {
+                return Err(Error::new(
+                    "closed",
+                    "reopen or create a new review before moving its candidate",
+                ));
+            }
+            let previous = crate::review::subject(conn, c.id)?
+                .ok_or_else(|| Error::new("not_review", "card has no review subject"))?;
+            let at = crate::review::version(string(a, "at")?)?;
+            if previous["subject_rev"] != integer(a, "expect")? {
+                return Err(Error::new(
+                    "conflict",
+                    "review subject changed; read before retrying",
+                ));
+            }
+            if previous["candidate"] == at {
+                return Err(Error::invalid(
+                    "candidate is unchanged; no new review round was created",
+                ));
+            }
+            conn.execute(
+                "UPDATE review_subjects SET candidate=?,subject_rev=subject_rev+1 WHERE card_id=?",
+                params![at, c.id],
+            )?;
+            conn.execute(
+                "UPDATE cards SET rev=rev+1,updated_ms=? WHERE id=?",
+                params![now, c.id],
+            )?;
+            let review = crate::review::context(conn, c.id, false)?;
+            let mut result = emit(
+                conn,
+                actor,
+                "review_subject",
+                c.id,
+                json!({"body":format!("Review candidate changed from {} to {at}; previous verdicts are stale.",previous["candidate"]),"previous":previous["candidate"],"review":review}),
+                now,
+                true,
+            )?;
+            result["review"] = review;
+            Ok(result)
+        }
         "patch" => {
             check_fields(
                 a,
@@ -939,6 +1059,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ],
             )?;
             let mut c = get_card(conn, integer(a, "id")?)?;
+            if ["title", "summary", "kind"]
+                .iter()
+                .any(|key| a.get(key).is_some())
+                && crate::review::subject(conn, c.id)?.is_some()
+            {
+                return Err(Error::new("review_scope_frozen","review request title, summary and kind are immutable; create a new request for a different scope"));
+            }
             let was_resolved = c.status == "resolved";
             if c.rev != integer(a, "expect")? {
                 return Err(Error::new(
@@ -1000,10 +1127,17 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             emit(conn, actor, "patch", c.id, detail, now, true)
         }
         "annotate" => {
-            check_fields(a, &["id", "kind", "body", "refs"])?;
+            check_fields(
+                a,
+                &["id", "kind", "body", "refs", "ack_batch", "review_verdict"],
+            )?;
             let c = get_card(conn, integer(a, "id")?)?;
             let body = string(a, "body")?;
             text(body, "body", 8000, false)?;
+            let verdict = a
+                .get("review_verdict")
+                .map(|v| crate::review::prepare_verdict(conn, c.id, actor, v))
+                .transpose()?;
             let kind = a
                 .get("kind")
                 .map(|_| string(a, "kind"))
@@ -1014,6 +1148,32 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "annotation kind: note|evidence|objection|question|answer",
                 ));
             }
+            if let Some(v) = &verdict {
+                let expected_kind = match v["verdict"].as_str().unwrap() {
+                    "object" => "objection",
+                    "blocked" => "question",
+                    _ => "evidence",
+                };
+                if kind != expected_kind {
+                    return Err(Error::invalid(
+                        "review verdict annotation kind does not match its verdict",
+                    ));
+                }
+            }
+            // Only an explicitly named receipt is handled. This shares the reply's
+            // transaction: invalid receipts or a failed reply change neither.
+            let acknowledged = a
+                .get("ack_batch")
+                .map(|_| {
+                    let batch = string(a, "ack_batch")?;
+                    mutate(
+                        conn,
+                        &Request::new("ack", actor, json!({"batch":batch,"ids":[c.id]})),
+                        now,
+                    )
+                })
+                .transpose()?;
+            let unseen = unseen_peer_updates(conn, req, c.id, now)?;
             let refs = a.get("refs").map(tags).transpose()?.unwrap_or_default();
             reserve_authority_tags(actor, &refs)?;
             let mut merged = c.tags.clone();
@@ -1113,10 +1273,20 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 actor,
                 "annotate",
                 c.id,
-                json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs}),
+                json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs,"review":verdict}),
                 now,
                 true,
             )?;
+            if let Some(verdict) = &verdict {
+                crate::review::record_verdict(
+                    conn,
+                    c.id,
+                    actor,
+                    integer(&result, "event_seq")?,
+                    verdict,
+                )?;
+                result["review"] = crate::review::context(conn, c.id, true)?;
+            }
             if let Some(id) = follow_up {
                 let child = emit(
                     conn,
@@ -1136,6 +1306,17 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         ));
                     }
                 }
+            }
+            if let Some(ack) = acknowledged {
+                result["ack_batch"] = ack["batch"].clone();
+                result["acknowledged"] = ack["acknowledged"].clone();
+            }
+            if unseen["count"].as_i64().unwrap_or(0) > 0 {
+                result["reply_warning"] = json!(format!(
+                    "Reply posted, but {} peer update(s) through @{} were not in your acknowledged history or this session's inbox/thread receipts. Read fray thread {} --unread before continuing; background notifications do not count as a thread read.",
+                    unseen["count"], unseen["through_seq"], c.id
+                ));
+                result["unseen_updates"] = unseen;
             }
             Ok(result)
         }
@@ -1754,7 +1935,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -1768,6 +1949,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "query" => query(conn, a, actor, now),
+        "peers" => crate::presence::delta(conn, req, now),
         "show" => {
             check_fields(
                 a,
@@ -1778,6 +1960,10 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let compact = boolean(a, "compact", false)?;
             let c = get_card(conn, integer(a, "id")?)?;
             let mut v = json!({"card":c,"cursor":highwater(conn)?});
+            let review = crate::review::context(conn, c.id, true)?;
+            if !review.is_null() {
+                v["review"] = review;
+            }
             if c.author == OWNER {
                 v["card"]["authority"] = json!("owner (unsigned)");
             }
@@ -2008,8 +2194,13 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             Ok(json!({"lanes":lanes}))
         }
         "agents" => {
-            check_fields(a, &["limit"])?;
-            roster(conn, now, bounded(a, "limit", 100, 1, 100)?)
+            check_fields(a, &["limit", "all"])?;
+            roster(
+                conn,
+                now,
+                bounded(a, "limit", 100, 1, 100)?,
+                boolean(a, "all", false)?,
+            )
         }
         _ => Err(Error::invalid(format!("unknown operation: {}", req.op))),
     }
@@ -2515,6 +2706,37 @@ fn held_lane_paths(conn: &Connection, agent: &str) -> Result<Vec<Value>> {
 
 const BATCH_TTL_MS: i64 = 86_400_000;
 
+/// Conservative crossing-message signal, not a claim about comprehension.
+/// Background watch/wait presentations cannot conceal a newer peer update.
+fn unseen_peer_updates(conn: &Connection, req: &Request, id: i64, now: i64) -> Result<Value> {
+    let (pending, ack): (i64, i64) = conn
+        .query_row(
+            "SELECT pending_seq,ack_seq FROM deliveries WHERE agent=? AND card_id=?",
+            params![req.actor, id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, 0));
+    // Without a session, unrelated callers have the same NULL binding. Do not
+    // treat their presentations as this caller's explicit read (as with ack --last).
+    let read: i64 = if let Some(session) = &req.session {
+        conn.query_row(
+        "SELECT coalesce(max(i.through_seq),0) FROM presented_items i JOIN presented_batches b ON b.batch=i.batch WHERE b.agent=? AND i.card_id=? AND b.session IS ? AND b.source IN ('inbox','thread') AND b.created_ms>=?",
+        params![req.actor, id, session, now - BATCH_TTL_MS],
+        |r| r.get(0),
+        )?
+    } else {
+        0
+    };
+    let since = ack.max(read);
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM events WHERE card_id=? AND seq>? AND seq<=? AND actor<>? AND op<>'renew'",
+        params![id, since, pending, req.actor],
+        |r| r.get(0),
+    )?;
+    Ok(json!({"count":count,"after_seq":since,"through_seq":pending}))
+}
+
 /// The newest batch this session explicitly read (inbox or thread). Waits and
 /// attention packets are excluded: both often run in the background, so the
 /// newest one may have arrived after what the agent actually read. Ack those
@@ -2597,6 +2819,7 @@ fn compact_event(e: &Value, previous: Option<&Value>) -> Value {
     }
     for key in [
         "refs",
+        "review",
         "follow_up_id",
         "parent_card",
         "over_objection",
@@ -2818,6 +3041,10 @@ fn inbox(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut compact = card.compact(now);
+        let review = crate::review::context(conn, id, false)?;
+        if !review.is_null() {
+            compact["review"] = review;
+        }
         let mut full = false;
         if addressed {
             let text = full_text(conn, &card)?;
@@ -2855,10 +3082,12 @@ fn inbox(
         json!({"agent":actor,"selection":selection.mode,"card_ids":selection.card_ids,"addressed_to_me":selection.addressed_to_me,"unresolved":selection.unresolved,"kinds":selection.kinds,"min_priority":selection.min_priority,"cursor":highwater(conn)?,"items":items,"total":total,"more":(items.len() as i64)<total,"read_is_not_ack":true}),
     )
 }
-fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
-    let mut s=conn.prepare("SELECT name,role,topics,enabled,last_seen_ms FROM agents ORDER BY enabled DESC,last_seen_ms DESC,name LIMIT ?")?;
+fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
+    // Never-joined recipients with no open mail are historical routing records,
+    // not peers waiting to join. Preserve them for history and explicit --all.
+    let mut s=conn.prepare("SELECT name,role,topics,enabled,last_seen_ms FROM agents a WHERE ?1 OR enabled=1 OR last_seen_ms>0 OR EXISTS(SELECT 1 FROM cards c WHERE c.assignee=a.name AND c.status IN ('open','active','blocked')) ORDER BY enabled DESC,last_seen_ms DESC,name LIMIT ?2")?;
     let raw = s
-        .query_map([limit + 1], |r| {
+        .query_map(params![all, limit + 1], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -2965,7 +3194,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
             r.get(0)
         })?;
-    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
+    let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12,false)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
     out["idle_readiness"] = idle_readiness(conn, actor, now)?;
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {

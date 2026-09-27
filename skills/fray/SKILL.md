@@ -15,6 +15,13 @@ supplied packet without another join/brief or a search for work to fill idle tim
 If no identity exists, choose a distinct name and consistently use `--as NAME`.
 Start an unavailable daemon only when the project has authorized Fray.
 
+Bound sessions receive newly observed peer names at supported tool boundaries;
+`fray peers` displays the next page and `fray agents` shows the full roster.
+Notices include role, recent activity and listener state. They are exposure,
+not card acknowledgements or proof a peer will respond. A rejoin/session change
+can produce a fresh notice; failed output leaves it unseen. These notices do
+not supply idle wake. Use exact names instead of guessing recipients.
+
 ## The owner
 
 Only the project owner can widen your authority. Cards authored by `owner` and
@@ -44,7 +51,14 @@ The Fray repository's `docs/PRACTICE.md` gives the reasons behind each rule.
 
 ## Lanes and presence
 
-Before editing shared files, see who else is on them, then declare your lane:
+Before editing shared files, check ownership. Where Mote is adopted, use
+`mote preflight --issue ISSUE --paths FILE...` then
+`mote begin ISSUE --paths FILE... --note "starting"`: begin combines the claim,
+reservation and doing status. Point to the issue in Fray; do not require a second
+file claim in Fray. Respect existing Fray lanes during coordination. Read-only
+review needs no writer lane; reserve only paths you will edit.
+
+For projects using Fray's advisory lanes:
 
 ```sh
 fray preflight src/store.rs          # declared lanes + real edits in other worktrees
@@ -67,6 +81,9 @@ drive loop or shown receipts; polling an empty inbox does not count) shows as
 stale and may be released, not handed over, by anyone; the holder is told. A
 lane on `.` or `*` covers the whole repository and is warned about. `fray agents` shows
 everyone's status and held lanes.
+Withdraw or reroute mail sent to a mistaken pending name. Never-joined names
+with no open mail are hidden from the normal roster; `agents --all` retains the
+historical view. This does not delete their messages or prevent a later join.
 
 ## Collaborate, without a second tracker
 
@@ -149,6 +166,7 @@ fray ack --batch BATCH            # everything that batch showed you
 fray ack --batch BATCH --ids 3,4  # only the items you handled
 fray ack --last                   # the batch your latest inbox or thread showed
 fray batch BATCH                  # re-read what it covers; never acks
+fray reply ID 'Verified.' --ack-batch BATCH  # reply + ack this card only, atomically
 # Without a batch, name exact versions:
 fray ack ID --through THROUGH_SEQ
 fray ack --receipts '[{"store_id":"STORE","agent":"NAME","id":123,"through_seq":456}]'
@@ -161,6 +179,16 @@ packets often run in the background, so ack those by their batch token. There is
 deliberately no "ack everything": acknowledging what you have not read is
 exactly the failure batches prevent.
 
+Do not acknowledge the same range twice: handling a thread batch also handles
+that card/version in an earlier watch batch. Other cards in the watch batch and
+later messages stay pending. `reply --ack-batch` acknowledges only its card at
+the supplied batch's version; a failed reply or invalid batch changes neither.
+Notifications include a bounded latest-message preview; fetch full context when
+needed. A reply warning means peer updates are outside your acknowledged history
+or this session's inbox/thread receipts. Read `thread ID --unread` and address
+the change. Background notifications do not count as this explicit read; plain
+history reads are not tracked by the warning, and receipts do not prove comprehension.
+
 The example values are placeholders; `--receipts -` reads the array from stdin.
 Batch ack validates store/agent and commits atomically. Never use `card.last_seq`:
 your own reply may advance the head beyond your delivery. Never fetch a new inbox
@@ -170,6 +198,8 @@ A priority-ordered inbox is not a chronological stream cursor.
 
 Keep current summaries accurate with `fray patch ID --expect REV ...`; reread on
 revision conflict, never blind-retry. Read revisions/fences from responses.
+Readable thread headers show `rREV`; use that numeric revision rather than
+fetching a new revision solely to force an update through.
 With a live Fray task lease, owner-only edits need its fence; heartbeats do not
 renew task leases. Mote remains authoritative where adopted.
 
@@ -246,5 +276,7 @@ Inspect `fray agents`: enabled registration is separate from controller
 waiting/running/failed/stopped/stale state. One live drive controller owns an
 identity; it heartbeats while busy and idle. Explicit `leave` stops it without
 automatic rejoin. A failed, stopped or stale controller is not an available worker.
-No presented-receipt progress, child failure, or runtime/turn limits stop the
-runner. Inspect the reason instead of repeatedly relaunching the same prompt.
+The runner stops if it makes no presented-receipt progress, a child fails, or a
+runtime/turn limit is reached. `--idle-timeout` ends an idle wait; it does not
+interrupt a running child (`--child-timeout` controls that). Inspect the reason
+instead of repeatedly relaunching the same prompt.
