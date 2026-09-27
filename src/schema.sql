@@ -145,4 +145,10 @@ CREATE TABLE IF NOT EXISTS agent_status(
     text TEXT NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+-- A wait in progress, refreshed every minute: reachability, not activity.
+CREATE TABLE IF NOT EXISTS agent_waits(
+    agent TEXT PRIMARY KEY,
+    session TEXT,
+    refreshed_ms INTEGER NOT NULL
+);
 PRAGMA user_version = 2;
