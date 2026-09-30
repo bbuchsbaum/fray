@@ -21,6 +21,16 @@ use std::{
 /// Bounded waits (section 1): reads degrade, mutations must be confirmed.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The read timeout, overridable with `FRAY_MOTE_READ_TIMEOUT_MS` for a large
+/// store on a slow disk, or for tests.
+pub fn read_timeout() -> Duration {
+    env::var("FRAY_MOTE_READ_TIMEOUT_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .filter(|ms| (1..=600_000).contains(ms))
+        .map_or(READ_TIMEOUT, Duration::from_millis)
+}
 /// The Mote releases this contract was verified against.
 const SUPPORTED: &str = "mote 0.1.";
 
@@ -402,4 +412,104 @@ pub fn parse_lines(stdout: &str) -> std::result::Result<Value, String> {
         .map(|l| serde_json::from_str(l).map_err(|e| e.to_string()))
         .collect::<std::result::Result<Vec<Value>, _>>()
         .map(Value::Array)
+}
+
+/// The event categories a sync reads (section 6). Candidates join in the
+/// reconciliation slice, where their landability is re-read.
+pub const SYNC_KINDS: &str = "claim,reservation";
+
+/// An op-id-shaped cursor for this instant. `events --after` compares ids as
+/// strings, so seeding here skips history (section 6: start at the tail).
+pub fn tail_cursor(now: std::time::SystemTime) -> String {
+    let d = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs() as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}.{:06}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60,
+        d.subsec_micros()
+    )
+}
+
+fn paths(data: &Value) -> String {
+    data["paths"]
+        .as_array()
+        .map(|p| {
+            p.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
+/// Which Mote events become attention, for whom (section 6). Each item is
+/// keyed by the event id, so replaying an event yields no second card.
+pub fn attention_items(events: &[Value]) -> Vec<Value> {
+    let mut items = Vec::new();
+    for e in events {
+        let (Some(kind), Some(key)) = (e["type"].as_str(), e["event_id"].as_str()) else {
+            continue;
+        };
+        let data = &e["data"];
+        let entity = data["entity"].as_str().unwrap_or("");
+        match kind {
+            "reservation.expiring" | "reservation.expired" => {
+                let Some(holder) = data["holder"].as_str().or(e["actor"].as_str()) else {
+                    continue;
+                };
+                let expired = kind == "reservation.expired";
+                items.push(serde_json::json!({
+                    "key": key,
+                    "recipient": holder,
+                    "title": format!("Mote reservation {} on {}", if expired { "expired" } else { "expiring" }, paths(data)),
+                    "summary": format!(
+                        "Your Mote reservation {} for {entity} on {} {} at {}. Mote owns it: check with `mote who-has PATH`; renew or re-reserve through Mote if you still need the paths.",
+                        data["reservation_id"].as_str().unwrap_or(""),
+                        paths(data),
+                        if expired { "expired" } else { "expires" },
+                        data["deadline"].as_str().unwrap_or("its deadline")
+                    ),
+                    "priority": 1,
+                    "refs": [entity],
+                }));
+            }
+            "claim.acquired" => {
+                let (Some(actor), Some(to)) = (e["actor"].as_str(), data["to"].as_str()) else {
+                    continue;
+                };
+                // Claiming for oneself is not news; a claim given to someone
+                // else is a handoff they need to hear about.
+                if actor == to {
+                    continue;
+                }
+                items.push(serde_json::json!({
+                    "key": key,
+                    "recipient": to,
+                    "title": format!("Mote: {actor} handed you {entity}"),
+                    "summary": format!(
+                        "{actor} transferred the Mote claim on {entity} to you. Mote owns the claim: `mote show {entity}` for the work, and look for a Fray handoff packet from {actor}."
+                    ),
+                    "priority": 1,
+                    "refs": [entity],
+                }));
+            }
+            _ => {}
+        }
+    }
+    items
 }

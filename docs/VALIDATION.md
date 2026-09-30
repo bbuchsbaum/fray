@@ -1,5 +1,39 @@
 # Validation
 
+## Mote adapter slice 5b: Mote events into attention (2026-09-30)
+
+`fray mote sync` and the `mote_ingest` operation implement the event path of
+section 6 of `docs/design/mote-adapter.md`, for claims and reservations.
+Candidates, and the reconciliation that covers skipped events, come in
+slice 5c.
+
+`tests/mote_sync.rs` has 10 tests:
+
+- **Exactly once.** Each (store, event, recipient) produces one card; a
+  replayed event produces none; the syncing agent receives its own cards.
+- **Cursor.** It moves only under compare-and-set and never backwards; a
+  stale sync writes nothing.
+- **Store and recipients.** Ingest is refused from an unbound or different
+  store. A Mote actor that is not on the board is reported, not notified. The
+  `mote` identity is reserved.
+- **Timeouts.** They are counted, and the counter resets on success. Three in
+  a row move the cursor to the latest event, through the CLI, with a stub
+  whose `events` never finishes.
+- **Mapping.** Expiry goes to the holder, a handoff to the new holder, and a
+  claim for oneself is not reported. The cursor has op-id form, including
+  across a leap day.
+- **Real `mote 0.1.0`.** Tested end to end: a handoff reaches bob, an expired
+  reservation reaches alice even when bob runs the sync, a stranger is
+  reported, and a second sync delivers nothing twice.
+- **Warnings.** `brief` and `join` warn when `MOTE_ACTOR` names another actor.
+
+With `MOTE_STORE` pointing at a scratch store, the adapter suites pass and
+that store's op count stays at 0. Eight concurrent runs pass.
+
+Checks at this change: strict Clippy, 288 Rust tests, a locked build, the
+three IPC scripts and `check_sql.py` all pass. `cargo fmt --check` reports only
+`src/driver.rs`, which was inherited from `main` (fray #33).
+
 ## Mote adapter slice 5a: transport, binding, classification (2026-09-30)
 
 `src/mote.rs` and `fray mote status` implement sections 1 to 4 of

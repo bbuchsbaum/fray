@@ -189,4 +189,14 @@ CREATE TABLE IF NOT EXISTS agent_waits(
     session TEXT,
     refreshed_ms INTEGER NOT NULL
 );
+-- Mote events already turned into attention, once per recipient
+-- (docs/design/mote-adapter.md section 6). Additive: a board without Mote
+-- never writes here.
+CREATE TABLE IF NOT EXISTS mote_events(
+    store_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    card_id INTEGER REFERENCES cards(id),
+    PRIMARY KEY(store_id, key, recipient)
+);
 PRAGMA user_version = 3;

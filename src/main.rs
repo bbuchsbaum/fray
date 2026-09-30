@@ -572,6 +572,9 @@ enum MoteCmd {
     /// Which Mote store this board uses, whether it is reachable, and the
     /// binding. Binds the board to the store on first use.
     Status,
+    /// Turn new Mote events (reservations expiring or expired, claims handed
+    /// to you) into attention for their recipients, exactly once each.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -943,6 +946,167 @@ fn mote_status(home: &Path, actor: &str) -> Result<Value> {
         "version":version,"actor":actor,"binding":binding,"reads":reads,"warnings":warnings}}),
     )
 }
+/// Section 3: a MOTE_ACTOR that differs from the Fray identity makes manual
+/// `mote` commands act as a second actor. Only the environment is checked,
+/// so this costs nothing on every brief.
+fn mote_actor_warning(actor: &str) {
+    if let Some(env_actor) = std::env::var("MOTE_ACTOR")
+        .ok()
+        .filter(|a| !a.is_empty() && !actor.is_empty() && a != actor)
+    {
+        eprintln!(
+            "Warning: MOTE_ACTOR is {env_actor} but your Fray identity is {actor}; manual mote commands would act as a second actor whose reservations conflict with yours."
+        );
+    }
+}
+
+/// `fray mote sync` (docs/design/mote-adapter.md section 6).
+fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
+    use fray::mote;
+    if actor.is_empty() || actor == fray::store::OWNER {
+        return Err(Error::invalid(
+            "fray mote sync needs an agent identity (--as NAME)",
+        ));
+    }
+    let cwd = std::env::current_dir()?;
+    let Some(path) = mote::locate(home, &cwd)? else {
+        return Ok(json!({"mote_sync":{"adopted":false,
+            "note":"No Mote store is paired with this board; nothing to sync."}}));
+    };
+    let store_id = mote::store_id(&path)?;
+    mote::version()?;
+    let binding = send(
+        home,
+        actor,
+        "mote_bind",
+        json!({"store":path.display().to_string(),"store_id":store_id}),
+        None,
+        10,
+    )?["binding"]
+        .clone();
+    let store = mote::Store {
+        path,
+        store_id: store_id.clone(),
+    };
+    let ingest = |after: Option<&str>, cursor: &str, items: Vec<Value>| {
+        send(
+            home,
+            actor,
+            "mote_ingest",
+            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":items}),
+            None,
+            10,
+        )
+    };
+    let moved = |e: &Error| e.code == "mote_cursor_moved";
+    // Never move the cursor backwards, even with a skewed clock.
+    let tail = |current: Option<&str>| {
+        let now = mote::tail_cursor(std::time::SystemTime::now());
+        match current {
+            Some(c) if c > now.as_str() => c.to_owned(),
+            _ => now,
+        }
+    };
+    let Some(cursor) = binding["cursor"].as_str().map(str::to_owned) else {
+        // First sync: start at the tail, never replay history.
+        let seed = tail(None);
+        return match ingest(None, &seed, vec![]) {
+            Ok(_) => Ok(json!({"mote_sync":{"seeded":seed,"created":0}})),
+            Err(e) if moved(&e) => {
+                Ok(json!({"mote_sync":{"note":"another sync seeded the cursor first","created":0}}))
+            }
+            Err(e) => Err(e),
+        };
+    };
+    let events = match mote::run(
+        &store,
+        None,
+        &["events", "--after", &cursor, "--kind", mote::SYNC_KINDS],
+        mote::read_timeout(),
+    ) {
+        mote::Outcome::Ok(Value::Array(events)) => events,
+        mote::Outcome::Failed(why) if why.contains("timed out") => {
+            let n = send(home, actor, "mote_sync_failed", json!({}), None, 10)?
+                ["consecutive_timeouts"]
+                .as_i64()
+                .unwrap_or(0);
+            if n < 3 {
+                return Err(Error::new(
+                    "mote_unavailable",
+                    format!("{why} ({n} of 3 before the cursor is reseeded at the tail); nothing was written"),
+                ));
+            }
+            let seed = tail(Some(&cursor));
+            return match ingest(Some(&cursor), &seed, vec![]) {
+                Ok(_) => Ok(
+                    json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":0,
+                    "note":"Three syncs in a row timed out; the cursor moved to the tail. Reconciliation covers the skipped events."}}),
+                ),
+                Err(e) if moved(&e) => Ok(
+                    json!({"mote_sync":{"note":"another sync advanced the cursor first","created":0}}),
+                ),
+                Err(e) => Err(e),
+            };
+        }
+        other => {
+            return Err(Error::new(
+                "mote_unavailable",
+                format!("mote events failed ({other:?}); nothing was written"),
+            ))
+        }
+    };
+    let newest = events
+        .iter()
+        .filter_map(|e| e["event_id"].as_str())
+        .max()
+        .filter(|id| *id > cursor.as_str())
+        .unwrap_or(&cursor)
+        .to_owned();
+    let items = mote::attention_items(&events);
+    let (mut created, mut duplicate, mut unknown) = (Vec::new(), 0, Vec::new());
+    let chunks: Vec<Vec<Value>> = if items.is_empty() {
+        vec![vec![]]
+    } else {
+        items.chunks(100).map(<[Value]>::to_vec).collect()
+    };
+    let last = chunks.len() - 1;
+    let mut after = cursor.clone();
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        // Only the final chunk advances the cursor; an interrupted sync
+        // replays from the old cursor and its keys dedupe what already landed.
+        let next = if i == last {
+            newest.clone()
+        } else {
+            after.clone()
+        };
+        match ingest(Some(&after), &next, chunk) {
+            Ok(r) => {
+                created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                duplicate += r["duplicate"].as_i64().unwrap_or(0);
+                unknown.extend(
+                    r["unknown_recipients"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                after = next;
+            }
+            Err(e) if moved(&e) => {
+                return Ok(
+                    json!({"mote_sync":{"note":"another sync advanced the cursor; stopped without duplicating","created":created}}),
+                )
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unknown.sort_by_key(|v| v.to_string());
+    unknown.dedup();
+    Ok(
+        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
+        "unknown_recipients":unknown,"cursor":after}}),
+    )
+}
+
 /// Declared lanes plus observed edits in every other worktree of this repo.
 fn preflight(home: &Path, actor: &str, typed: Vec<String>, staged: bool) -> Result<Value> {
     let here = std::env::current_dir()?;
@@ -1513,6 +1677,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             role,
             takeover,
         } => {
+            mote_actor_warning(&actor);
             let mut args = join_args(role, topics);
             if takeover {
                 args["takeover"] = json!(true);
@@ -1521,7 +1686,10 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         }
         Cmd::Leave => ("leave", json!({})),
         Cmd::Heartbeat => ("heartbeat", json!({})),
-        Cmd::Brief { budget } => ("brief", json!({"budget":budget})),
+        Cmd::Brief { budget } => {
+            mote_actor_warning(&actor);
+            ("brief", json!({"budget":budget}))
+        }
         Cmd::Send {
             to,
             body,
@@ -1841,6 +2009,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Status { text } => ("set_status", json!({"text":text})),
         Cmd::Mote { action } => match action {
             MoteCmd::Status => return Ok(Some(mote_status(&home, &actor)?)),
+            MoteCmd::Sync => return Ok(Some(mote_sync(&home, &actor)?)),
         },
         Cmd::Preflight { paths, staged } => {
             return Ok(Some(preflight(&home, &actor, paths, staged)?));
@@ -2227,6 +2396,32 @@ fn human(v: &Value, out: &mut String) {
             out.push_str(
                 "Bind --session or a supported host session to remember displayed peers.\n",
             );
+        }
+        return;
+    }
+    if let Some(m) = v.get("mote_sync") {
+        if let Some(note) = m["note"].as_str() {
+            out.push_str(&format!("Mote sync: {}\n", clean(note)));
+        }
+        if let Some(seed) = m["seeded"].as_str().or(m["reseeded"].as_str()) {
+            out.push_str(&format!(
+                "Mote sync: cursor set at the tail ({})\n",
+                clean(seed)
+            ));
+        }
+        if m.get("events").is_some() {
+            out.push_str(&format!(
+                "Mote sync: {} events, {} new attention cards, {} already delivered\n",
+                m["events"],
+                m["created"].as_array().map_or(0, Vec::len),
+                m["duplicate"]
+            ));
+            if let Some(u) = m["unknown_recipients"].as_array().filter(|u| !u.is_empty()) {
+                out.push_str(&format!(
+                    "  Not on this board, so not notified: {}\n",
+                    clean(&serde_json::to_string(u).unwrap_or_default())
+                ));
+            }
         }
         return;
     }

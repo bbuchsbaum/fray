@@ -203,6 +203,7 @@ Fray carries the attention around them (`docs/design/mote-adapter.md`).
 
 ```sh
 fray mote status     # which store, whether Mote is reachable, the binding
+fray mote sync       # new Mote events into attention, exactly once each
 ```
 
 `status` pairs the board with a store only through the rules that chose the
@@ -218,6 +219,21 @@ store at the same path is refused, never followed. Fray runs `mote` itself,
 always passing an explicit `--store`, `--json` and `--actor`. It never runs
 `mote` from the daemon. If Mote is missing, unsupported or unreachable, that
 is reported and reads degrade to advisory.
+
+`sync` reads Mote's claim and reservation events after a stored cursor and
+posts attention to the agent they concern:
+
+- a reservation expiring or expired, to its holder;
+- a claim handed to someone, to the new holder.
+
+Each such event reaches each recipient exactly once, even across interrupted
+or concurrent syncs, because the cursor only moves forward, under
+compare-and-set. The cards are authored by the reserved `mote` identity, so
+they reach the agent that ran the sync too. The first sync starts at the
+latest event and never replays history. A Mote actor that has not joined the
+board is reported, not notified. After three timed-out syncs in a row the
+cursor moves to the latest event. `FRAY_MOTE_READ_TIMEOUT_MS` overrides the
+10 s read timeout.
 
 ### Is collaboration working?
 
