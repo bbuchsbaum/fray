@@ -7,7 +7,10 @@ against Mote, and each is addressed below, marked [#63] and so on. Revision 2
 when someone read, so an armed steward was never woken, and with no runner
 alive a Mote request never reached the board at all. Revision 3 makes
 escalation a written delivery and gives owner review its own sync [#68]; it
-also takes the review's non-blocking points (R2, R3, R4, R7).
+also takes the review's non-blocking points (R2, R3, R4, R7). Revision 3
+(d6422c7) kept #68 open and drew #71. Revision 4 addresses the escalation to
+each steward as their own assigned card, dedupes it on the daemon board-wide,
+ticks on boards without Mote, and keeps sync off the brief and hook path.
 
 This design answers these field reports from the ScalaFIM campaign:
 
@@ -73,7 +76,11 @@ It is replaced by one function returning one of:
 
 - **`wakeable`**: an armed listener under the strict `idle_readiness` test
   (live, not expired, unfiltered, activation mode managed, native-monitor or
-  background-completion), or a live `drive` controller.
+  background-completion), or a live `drive` controller, or a `fray wait` in
+  progress with no card, kind, priority or unresolved filter. "Wakeable" is
+  for cards assigned to the agent, which every selection mode (`involved`
+  included) covers; that is why every escalation and routed ask is assigned
+  to its recipient.
 - **`present`**: recent activity but nothing armed. It will see the request
   only at its next turn, if it has one.
 - **`absent`**: neither.
@@ -135,19 +142,34 @@ A request is **stuck** when it is open and either:
 wakes only on a new delivery, so a stuck request that is merely computed at
 read time wakes no one [#68]. Therefore:
 
-- The runners' periodic sync tick (the background Mote sync on `watch
-  --attention` and `drive`) also evaluates stuck requests, Fray and Mote
-  alike. For each, it writes one idempotent escalation card addressed to the
-  stewards, keyed `stuck:<id>:<reason>`, with a fixed body naming the
-  request, its addressee and state, and the actions below. An armed steward
-  is woken by it. When the request clears, the escalation is settled with a
-  note. The key makes a second runner, or a retry, a no-op.
-- `fray owner review` runs one bounded sync of its own (Mote requests,
-  then stuck evaluation, the same code) before listing, so it works with no
-  runner alive. So do `brief` and hook context, within their time budget.
-- When no runner has synced within twice the sync interval, `brief` and
-  `fray owner review` say so: "no runner is syncing; escalation happens
-  only when someone reads".
+- **A tick on every board.** The runners (`watch --attention` and `drive`)
+  run a periodic tick whether or not Mote is paired. With Mote paired, it
+  first syncs Mote as the background sync does now; then it evaluates stuck
+  requests, Fray and Mote alike [#68].
+- **One escalation per steward, assigned to that steward.** The skill arms
+  stewards with `--selection involved`, which covers only cards a steward
+  authored, holds, is assigned or follows. So an escalation is not one card
+  "to the stewards": each present steward gets their own card, assigned to
+  them, which every selection mode covers. Its fixed body names the request,
+  its addressee and state, and the actions below [#68].
+- **Deduplicated by the daemon, board-wide.** `--key` idempotency is per
+  agent, so two runners under different identities would each post. A new
+  daemon operation `escalate` (capability `escalations`) takes the key
+  `stuck:<id>:<reason>:<steward>` and records it in an additive table, like
+  `mote_events`, so the card is created at most once whoever ticks. When
+  the request clears, the same operation settles each escalation with a note.
+  Against a daemon without the capability, runners do not escalate, and
+  `brief` says escalation is pull-only [#68].
+- **Owner review syncs; brief and hook only read.** `fray owner review` runs
+  one bounded tick of its own before listing, so it works with no runner
+  alive; it is interactive and rare. `brief` and hook context never sync, as
+  mote-adapter.md section 6 requires [#71]. They read what is already written:
+  the escalations, and the stuck requests the store can compute without
+  Mote.
+- **A stale tick is named.** When no runner has ticked within twice the
+  interval (`mote_last_sync_ms`, or a new `last_tick_ms` on boards without
+  Mote), `brief` and `fray owner review` say so: "no runner is ticking;
+  escalation happens only when someone reads".
 
 The stuck requests then appear:
 
@@ -165,9 +187,9 @@ automatically.
 Acceptance is an end-to-end replay of the incident: a Mote-only requester
 sends a Mote request to an interactive agent with a lapsed listener.
 
-- With an armed steward and a runner alive, and no other board activity, the
-  steward's listener is woken with the escalation once the grace period
-  passes.
+- With a steward armed with `--selection involved` and a runner alive, and
+  no other board activity, the steward's listener is woken with the
+  escalation once the grace period passes.
 - With no runner alive, `fray owner review` still lists the request.
 - Both clear when the helper answers in Mote.
 
@@ -265,7 +287,10 @@ needs a restart is old by definition. So:
 - **R3:**
   - the incident replay above, both cases: an armed steward is woken with no
     other activity, and with no runner alive owner review lists the request;
-  - one escalation per stuck request, however many runners tick;
+  - one escalation per stuck request and steward, however many runners, under
+    however many identities, tick;
+  - on a board without Mote, a stuck Fray ask escalates;
+  - brief and hook never run `mote`;
   - a request already shown to its addressee does not escalate as
     unreachable;
   - stuck requests clear on an answer; nothing is re-routed without a
