@@ -465,3 +465,86 @@ fn a_stale_lane_is_reported_but_does_not_block() {
     assert!(err.contains("in bob's lane"), "{err}");
     assert!(ok, "stale lanes never refuse: {err}");
 }
+
+#[test]
+fn a_merges_own_changes_and_what_a_force_push_drops_are_checked() {
+    let r = Repo::new("merge");
+    let remote = r.remote();
+    r.install();
+    assert!(r
+        .fray("bob", &["lane", "take", "src/", "--purpose", "parser"])
+        .status
+        .success());
+    // A merge commit that itself edits bob's lane (committed unchecked).
+    r.git(&["switch", "-q", "-c", "side"]);
+    let (ok, _) = r.commit(&r.root, "docs/side.md", false);
+    assert!(ok);
+    r.git(&["switch", "-q", "main"]);
+    r.git(&["merge", "-q", "--no-ff", "--no-commit", "side"]);
+    fs::create_dir_all(r.root.join("src")).unwrap();
+    fs::write(r.root.join("src/in_merge.rs"), "x").unwrap();
+    r.git(&["add", "src/in_merge.rs"]);
+    r.git(&["commit", "-q", "--no-verify", "-m", "merge side"]);
+    let push = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&r.root)
+            .args(args)
+            .env("FRAY_AGENT", "alice")
+            .env("FRAY_SESSION", "test:alice")
+            .env("FRAY_GUARD", "block")
+            .env_remove("MOTE_STORE")
+            .env_remove("MOTE_ACTOR")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (ok, err) = push(&["push", "-q", "origin", "main"]);
+    assert!(!ok && err.contains("src/in_merge.rs"), "{err}");
+    r.git(&["push", "-q", "--no-verify", "origin", "main"]);
+    // bob's commit reaches the remote; alice fetches it, then force-pushes a
+    // history without it. Dropping bob's work touches bob's lane.
+    let other = r.root.join(".worktrees/bob");
+    let out = Command::new("git")
+        .args([
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    fs::write(other.join("src/bobs.rs"), "bob\n").unwrap();
+    for args in [
+        &["add", "src/bobs.rs"][..],
+        &[
+            "-c",
+            "user.name=b",
+            "-c",
+            "user.email=b@b",
+            "commit",
+            "-qm",
+            "bob",
+        ][..],
+        &["push", "-q", "--no-verify", "origin", "main"][..],
+    ] {
+        let out = Command::new("git")
+            .current_dir(&other)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    r.git(&["fetch", "-q", "origin"]);
+    let (ok, _) = r.commit(&r.root, "docs/alice.md", false);
+    assert!(ok);
+    let (ok, err) = push(&["push", "-q", "--force", "origin", "main"]);
+    assert!(!ok && err.contains("src/bobs.rs"), "{err}");
+}

@@ -2311,10 +2311,10 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Guard { action } => {
             let (v, refuse) = match action {
                 GuardCmd::Install => (guard::install()?, false),
-                GuardCmd::PreCommit => guard::check(&home, &actor, "pre-commit", None)?,
-                GuardCmd::PrePush { remote, .. } => {
-                    guard::check(&home, &actor, "pre-push", remote.as_deref())?
-                }
+                GuardCmd::PreCommit => guard::check(&home, &actor, "pre-commit")?,
+                // The remote's name and URL are accepted as git passes them;
+                // the ref-update lines on stdin carry what is checked.
+                GuardCmd::PrePush { .. } => guard::check(&home, &actor, "pre-push")?,
             };
             if refuse {
                 return Err(Error::new(

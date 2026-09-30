@@ -106,7 +106,8 @@ fn blocking() -> bool {
     std::env::var("FRAY_GUARD").as_deref() == Ok("block")
 }
 
-/// Runs git and returns its NUL-separated output, or why it failed.
+/// Runs git with `-z` output and returns its NUL-separated names, or why it
+/// failed. Split on NUL only: a name may contain a newline.
 fn git_z(top: &Path, args: &[&str]) -> std::result::Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
         .current_dir(top)
@@ -121,7 +122,7 @@ fn git_z(top: &Path, args: &[&str]) -> std::result::Result<Vec<String>, String> 
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout)
-        .split(['\0', '\n'])
+        .split('\0')
         .filter(|p| !p.is_empty())
         .map(str::to_owned)
         .collect())
@@ -129,44 +130,85 @@ fn git_z(top: &Path, args: &[&str]) -> std::result::Result<Vec<String>, String> 
 
 /// Paths touched by a push, from the ref-update lines git gives pre-push:
 /// `<local ref> <local sha> <remote ref> <remote sha>`. A deletion is
-/// ignored. A new branch, or a remote tip this clone does not have (a force
-/// push over commits never fetched), covers the commits no remote-tracking
-/// ref has. Names come NUL-separated and unquoted, and renames count on both
-/// sides. `Err` means the paths could not be listed.
-fn pushed_paths(top: &Path, remote: &str, input: &str) -> std::result::Result<Vec<String>, String> {
+/// ignored. For an update, both the pushed commits and what the push
+/// overwrites count: the commits a force push drops from the remote touched
+/// paths too. A new branch covers the commits no remote-tracking ref has. A
+/// remote tip this clone lacks (a force push over commits never fetched)
+/// covers the pushed commits, and what it overwrites is reported as
+/// unchecked. Merge commits' own changes count (`--cc`). Names come
+/// NUL-separated and unquoted, and renames count on both sides. Returns the
+/// paths and any notes on what could not be checked; `Err` means the paths
+/// could not be listed.
+fn pushed_paths(
+    top: &Path,
+    input: &str,
+) -> std::result::Result<(Vec<String>, Vec<String>), String> {
     let mut paths = Vec::new();
+    let mut unchecked = Vec::new();
+    let add = |found: Vec<String>, paths: &mut Vec<String>| {
+        for p in found {
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    };
     for line in input.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
-        let [_, local, _, remote_sha] = f.as_slice() else {
+        let [_, local, remote_ref, remote_sha] = f.as_slice() else {
             continue;
         };
         if local.chars().all(|c| c == '0') {
             continue; // deletion
         }
-        let known = !remote_sha.chars().all(|c| c == '0')
+        let new_branch = remote_sha.chars().all(|c| c == '0');
+        let known = !new_branch
             && std::process::Command::new("git")
                 .current_dir(top)
                 .args(["cat-file", "-e", &format!("{remote_sha}^{{commit}}")])
+                .stderr(std::process::Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success());
+        // Commits already on any remote are published; only new ones count.
         let range: Vec<String> = if known {
             vec![format!("{remote_sha}..{local}")]
         } else {
-            vec![
-                (*local).to_owned(),
-                "--not".into(),
-                format!("--remotes={remote}"),
-            ]
+            vec![(*local).to_owned(), "--not".into(), "--remotes".into()]
         };
-        let mut args: Vec<&str> = vec!["log", "--format=", "--name-only", "-z", "--no-renames"];
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--format=",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--cc",
+        ];
         args.extend(range.iter().map(String::as_str));
-        for p in git_z(top, &args)? {
-            if !paths.contains(&p) {
-                paths.push(p);
-            }
+        add(git_z(top, &args)?, &mut paths);
+        if known {
+            // Whatever differs between the remote tip and what replaces it,
+            // including the paths of any commits a force push drops.
+            add(
+                git_z(
+                    top,
+                    &[
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        "--no-renames",
+                        remote_sha,
+                        local,
+                    ],
+                )?,
+                &mut paths,
+            );
+        } else if !new_branch {
+            unchecked.push(format!(
+                "{remote_ref}: the remote tip {} is not in this clone, so what this push overwrites was not checked (fetch first)",
+                &remote_sha[..remote_sha.len().min(12)]
+            ));
         }
     }
-    Ok(paths)
+    Ok((paths, unchecked))
 }
 
 /// Other holders of any of `paths`: Mote reservations where Mote is paired
@@ -193,13 +235,6 @@ fn holders(home: &Path, actor: &str, paths: &[String]) -> std::result::Result<Ve
                 store_id: mote::store_id(&path).map_err(|e| e.message)?,
                 path,
             };
-            // Without FRAY_AGENT, the Mote actor is who "you" are.
-            let me = if actor.is_empty() {
-                std::env::var("MOTE_ACTOR").unwrap_or_default()
-            } else {
-                actor.to_owned()
-            };
-            let actor = me.as_str();
             let who = (!actor.is_empty()).then_some(actor);
             let board = match mote::run(&store, who, &["board"], mote::read_timeout()) {
                 mote::Outcome::Ok(b) => b,
@@ -245,7 +280,7 @@ fn holders(home: &Path, actor: &str, paths: &[String]) -> std::result::Result<Ve
 /// `fray guard pre-commit` and `fray guard pre-push`: exit status 1 only when
 /// blocking is on and another holder was found. Everything else, including
 /// an unreachable Fray or Mote, is a warning and exit 0.
-pub fn check(home: &Path, actor: &str, stage: &str, remote: Option<&str>) -> Result<(Value, bool)> {
+pub fn check(home: &Path, actor: &str, stage: &str) -> Result<(Value, bool)> {
     let here = std::env::current_dir()?;
     let Some(top) = git_lines(&here, &["rev-parse", "--show-toplevel"])
         .pop()
@@ -259,12 +294,13 @@ pub fn check(home: &Path, actor: &str, stage: &str, remote: Option<&str>) -> Res
     let paths = if stage == "pre-push" {
         let mut input = Vec::new();
         std::io::stdin().read_to_end(&mut input)?;
-        match pushed_paths(
-            &top,
-            remote.unwrap_or("origin"),
-            &String::from_utf8_lossy(&input),
-        ) {
-            Ok(paths) => paths,
+        match pushed_paths(&top, &String::from_utf8_lossy(&input)) {
+            Ok((paths, unchecked)) => {
+                for note in &unchecked {
+                    eprintln!("fray guard: {note}");
+                }
+                paths
+            }
             Err(why) => {
                 eprintln!("fray guard: could not list the pushed paths ({why}); not blocking");
                 return Ok((json!({"guard":{"unchecked":why}}), false));
@@ -276,6 +312,13 @@ pub fn check(home: &Path, actor: &str, stage: &str, remote: Option<&str>) -> Res
     if paths.is_empty() {
         return Ok((json!({"guard":{"paths":[],"conflicts":[]}}), false));
     }
+    // Without FRAY_AGENT, the Mote actor, if set, is who "you" are.
+    let me = if actor.is_empty() {
+        std::env::var("MOTE_ACTOR").unwrap_or_default()
+    } else {
+        actor.to_owned()
+    };
+    let actor = me.as_str();
     let block = blocking();
     match holders(home, actor, &paths) {
         Err(why) => {
@@ -288,7 +331,7 @@ pub fn check(home: &Path, actor: &str, stage: &str, remote: Option<&str>) -> Res
         Ok(conflicts) => {
             if actor.is_empty() && !conflicts.is_empty() {
                 eprintln!(
-                    "fray guard: no FRAY_AGENT set, so every holder below counts as someone else"
+                    "fray guard: neither FRAY_AGENT nor MOTE_ACTOR is set, so every holder below counts as someone else"
                 );
             }
             for c in &conflicts {
