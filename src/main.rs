@@ -1807,6 +1807,8 @@ fn main() {
                 3
             } else if wait_command && e.code == "unavailable" {
                 4
+            } else if e.code == "guard_blocked" {
+                guard::REFUSED
             } else if matches!(e.code.as_str(), "conflict" | "claimed" | "lease_lost") {
                 2
             } else {

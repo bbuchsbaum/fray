@@ -16,23 +16,31 @@ use std::{
 
 /// Marks hook files written by `fray guard install`.
 const MARKER: &str = "# fray-guard";
+/// The exit status of `fray guard pre-commit|pre-push` that refuses; the hook
+/// treats every other failure as a warning.
+pub const REFUSED: i32 = 10;
 
 fn hook_script(hook: &str, fray: &Path) -> String {
     let fray = fray.display().to_string().replace('\'', "'\\''");
     let prior = format!("\"$(dirname \"$0\")/{hook}.fray-prior\"");
     // Runs any prior hook first, with the same arguments (and, for pre-push,
     // the same stdin), and stops with its status if it fails. Then asks fray,
-    // found where it was installed or on PATH; a missing fray never blocks.
+    // found where it was installed or on PATH. Only a refusal (REFUSED) stops
+    // the commit or push; a missing fray or any other failure is a warning.
     let find = format!(
         "fray='{fray}'\n[ -x \"$fray\" ] || fray=$(command -v fray || true)\nif [ -z \"$fray\" ]; then echo 'fray guard: fray not found; not checked' >&2; exit 0; fi\n"
     );
+    let verdict = format!(
+        "status=$?\n[ $status -eq {REFUSED} ] && exit {REFUSED}\n[ $status -eq 0 ] || echo \"fray guard: the check failed (status $status); not blocking\" >&2\nexit 0\n"
+    );
     if hook == "pre-push" {
+        // `feed` replays git's stdin exactly: nothing when git sent nothing.
         format!(
-            "#!/bin/sh\n{MARKER}: installed by `fray guard install`; the previous hook, if any, is {hook}.fray-prior\ninput=$(cat)\nif [ -x {prior} ]; then\n    printf '%s\\n' \"$input\" | {prior} \"$@\" || exit $?\nfi\n{find}printf '%s\\n' \"$input\" | \"$fray\" guard pre-push \"$@\"\n"
+            "#!/bin/sh\n{MARKER}: installed by `fray guard install`; the previous hook, if any, is {hook}.fray-prior\ninput=$(cat)\nfeed() {{ [ -z \"$input\" ] || printf '%s\\n' \"$input\"; }}\nif [ -x {prior} ]; then\n    feed | {prior} \"$@\" || exit $?\nfi\n{find}feed | \"$fray\" guard pre-push \"$@\" >/dev/null\n{verdict}"
         )
     } else {
         format!(
-            "#!/bin/sh\n{MARKER}: installed by `fray guard install`; the previous hook, if any, is {hook}.fray-prior\nif [ -x {prior} ]; then\n    {prior} \"$@\" || exit $?\nfi\n{find}\"$fray\" guard {hook}\n"
+            "#!/bin/sh\n{MARKER}: installed by `fray guard install`; the previous hook, if any, is {hook}.fray-prior\nif [ -x {prior} ]; then\n    {prior} \"$@\" || exit $?\nfi\n{find}\"$fray\" guard {hook} >/dev/null\n{verdict}"
         )
     }
 }
@@ -50,6 +58,15 @@ pub fn install() -> Result<Value> {
         return Err(Error::invalid("fray guard install needs a git repository"));
     };
     let dir = PathBuf::from(dir);
+    // A configured core.hooksPath (often global) is shared beyond this
+    // repository: the guard would then run in every repository using it.
+    let hooks_path = git_lines(&here, &["config", "core.hooksPath"]).pop();
+    if let Some(p) = &hooks_path {
+        eprintln!(
+            "fray guard: core.hooksPath is set ({p}), so these hooks go to {} and run in every repository that uses it",
+            dir.display()
+        );
+    }
     fs::create_dir_all(&dir)?;
     let fray = std::env::current_exe()?;
     let mut installed = Vec::new();
@@ -80,7 +97,7 @@ pub fn install() -> Result<Value> {
             "prior":prior.exists().then(|| prior.display().to_string())}));
     }
     Ok(
-        json!({"guard":{"installed":installed,"fray":fray.display().to_string(),
+        json!({"guard":{"installed":installed,"fray":fray.display().to_string(),"core_hooks_path":hooks_path,
         "mode":if blocking() {"block"} else {"warn"}}}),
     )
 }
@@ -89,12 +106,34 @@ fn blocking() -> bool {
     std::env::var("FRAY_GUARD").as_deref() == Ok("block")
 }
 
-const ZERO: &str = "0000000000000000000000000000000000000000";
+/// Runs git and returns its NUL-separated output, or why it failed.
+fn git_z(top: &Path, args: &[&str]) -> std::result::Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(top)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {}: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split(['\0', '\n'])
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
 
 /// Paths touched by a push, from the ref-update lines git gives pre-push:
 /// `<local ref> <local sha> <remote ref> <remote sha>`. A deletion is
-/// ignored; a new branch covers the commits no remote-tracking ref has.
-fn pushed_paths(top: &Path, remote: &str, input: &str) -> Vec<String> {
+/// ignored. A new branch, or a remote tip this clone does not have (a force
+/// push over commits never fetched), covers the commits no remote-tracking
+/// ref has. Names come NUL-separated and unquoted, and renames count on both
+/// sides. `Err` means the paths could not be listed.
+fn pushed_paths(top: &Path, remote: &str, input: &str) -> std::result::Result<Vec<String>, String> {
     let mut paths = Vec::new();
     for line in input.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -104,24 +143,30 @@ fn pushed_paths(top: &Path, remote: &str, input: &str) -> Vec<String> {
         if local.chars().all(|c| c == '0') {
             continue; // deletion
         }
-        let range: Vec<String> = if remote_sha.chars().all(|c| c == '0') || *remote_sha == ZERO {
+        let known = !remote_sha.chars().all(|c| c == '0')
+            && std::process::Command::new("git")
+                .current_dir(top)
+                .args(["cat-file", "-e", &format!("{remote_sha}^{{commit}}")])
+                .status()
+                .is_ok_and(|s| s.success());
+        let range: Vec<String> = if known {
+            vec![format!("{remote_sha}..{local}")]
+        } else {
             vec![
                 (*local).to_owned(),
                 "--not".into(),
                 format!("--remotes={remote}"),
             ]
-        } else {
-            vec![format!("{remote_sha}..{local}")]
         };
-        let mut args: Vec<&str> = vec!["log", "--format=", "--name-only"];
+        let mut args: Vec<&str> = vec!["log", "--format=", "--name-only", "-z", "--no-renames"];
         args.extend(range.iter().map(String::as_str));
-        for p in git_lines(top, &args) {
-            if !p.is_empty() && !paths.contains(&p) {
+        for p in git_z(top, &args)? {
+            if !paths.contains(&p) {
                 paths.push(p);
             }
         }
     }
-    paths
+    Ok(paths)
 }
 
 /// Other holders of any of `paths`: Mote reservations where Mote is paired
@@ -148,6 +193,13 @@ fn holders(home: &Path, actor: &str, paths: &[String]) -> std::result::Result<Ve
                 store_id: mote::store_id(&path).map_err(|e| e.message)?,
                 path,
             };
+            // Without FRAY_AGENT, the Mote actor is who "you" are.
+            let me = if actor.is_empty() {
+                std::env::var("MOTE_ACTOR").unwrap_or_default()
+            } else {
+                actor.to_owned()
+            };
+            let actor = me.as_str();
             let who = (!actor.is_empty()).then_some(actor);
             let board = match mote::run(&store, who, &["board"], mote::read_timeout()) {
                 mote::Outcome::Ok(b) => b,
@@ -205,9 +257,19 @@ pub fn check(home: &Path, actor: &str, stage: &str, remote: Option<&str>) -> Res
         ));
     };
     let paths = if stage == "pre-push" {
-        let mut input = String::new();
-        std::io::stdin().read_to_string(&mut input)?;
-        pushed_paths(&top, remote.unwrap_or("origin"), &input)
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input)?;
+        match pushed_paths(
+            &top,
+            remote.unwrap_or("origin"),
+            &String::from_utf8_lossy(&input),
+        ) {
+            Ok(paths) => paths,
+            Err(why) => {
+                eprintln!("fray guard: could not list the pushed paths ({why}); not blocking");
+                return Ok((json!({"guard":{"unchecked":why}}), false));
+            }
+        }
     } else {
         staged_paths(&top)
     };
@@ -265,10 +327,12 @@ pub fn check(home: &Path, actor: &str, stage: &str, remote: Option<&str>) -> Res
             if !conflicts.is_empty() {
                 eprintln!(
                     "fray guard: ask the holder first (fray send HOLDER ...), take the lane when it frees (fray lane take PATHS --queue), or commit with --no-verify if you are sure.{}",
-                    if block { " Blocking (FRAY_GUARD=block)." } else { " Not blocking; set FRAY_GUARD=block to refuse." }
+                    if block && conflicts.iter().any(|c| c["stale"] != true) { " Blocking (FRAY_GUARD=block)." } else if block { " Not blocking: every lane found is stale." } else { " Not blocking; set FRAY_GUARD=block to refuse." }
                 );
             }
-            let refuse = block && !conflicts.is_empty();
+            // A stale lane is reported but never refuses: its holder has gone
+            // quiet, and anyone may release it.
+            let refuse = block && conflicts.iter().any(|c| c["stale"] != true);
             Ok((
                 json!({"guard":{"paths":paths,"conflicts":conflicts,"blocked":refuse}}),
                 refuse,

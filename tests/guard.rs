@@ -106,6 +106,18 @@ impl Repo {
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     }
+    /// A bare remote inside the checkout (excluded, and removed with it).
+    fn remote(&self) -> PathBuf {
+        let remote = self.root.join(".worktrees/remote.git");
+        let out = Command::new("git")
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        self.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        self.git(&["push", "-q", "origin", "main"]);
+        remote
+    }
     fn install(&self) {
         let out = self.fray("alice", &["--json", "guard", "install"]);
         assert!(
@@ -166,6 +178,14 @@ fn a_prior_hook_runs_first_and_its_failure_is_kept() {
     assert!(r.root.join(".git/hooks/pre-commit.fray-prior").exists());
     let (ok, err) = r.commit(&r.root, "x.txt", false);
     assert!(!ok && err.contains("prior-ran"), "{err}");
+    // git reports any hook failure as 1; the hook itself keeps the status.
+    let status = Command::new(r.root.join(".git/hooks/pre-commit"))
+        .current_dir(&r.root)
+        .output()
+        .unwrap()
+        .status
+        .code();
+    assert_eq!(status, Some(7), "the prior hook's own status is kept");
     // Reinstalling is idempotent: the prior hook is not wrapped twice.
     r.install();
     let text = fs::read_to_string(r.root.join(".git/hooks/pre-commit.fray-prior")).unwrap();
@@ -175,17 +195,7 @@ fn a_prior_hook_runs_first_and_its_failure_is_kept() {
 #[test]
 fn pre_push_checks_new_and_updated_branches_and_keeps_stdin_for_the_prior_hook() {
     let r = Repo::new("push");
-    let remote = r.root.parent().unwrap().join(format!(
-        "{}-remote.git",
-        r.root.file_name().unwrap().to_string_lossy()
-    ));
-    let out = Command::new("git")
-        .args(["init", "-q", "--bare", remote.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    r.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
-    r.git(&["push", "-q", "origin", "main"]);
+    r.remote();
     let seen = r.root.join("prior-stdin");
     hook(&r.root, "pre-push", &format!("cat > {}", seen.display()));
     r.install();
@@ -298,4 +308,160 @@ fn mote_reservations_decide_where_mote_is_adopted() {
     );
     let (ok, _) = r.commit(&r.root, "lib/other.rs", true);
     assert!(!ok, "blocking applies to Mote reservations too");
+    r.git(&["reset", "-q"]);
+    // bob's own reservation is quiet, named by MOTE_ACTOR alone.
+    fs::write(r.root.join("lib/own.rs"), "x").unwrap();
+    r.git(&["add", "lib/own.rs"]);
+    let out = Command::new("git")
+        .current_dir(&r.root)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "own",
+        ])
+        .env_remove("FRAY_AGENT")
+        .env("FRAY_SESSION", "test:bob")
+        .env("MOTE_ACTOR", "bob")
+        .env("FRAY_GUARD", "block")
+        .env_remove("MOTE_STORE")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success() && !err.contains("reserved in Mote"),
+        "{err}"
+    );
+}
+
+#[test]
+fn pushed_names_are_exact_and_a_force_push_over_unfetched_commits_is_checked() {
+    let r = Repo::new("exact");
+    let remote = r.remote();
+    r.install();
+    assert!(r
+        .fray("bob", &["lane", "take", "src/", "--purpose", "parser"])
+        .status
+        .success());
+    // Non-ASCII names come quoted from git unless read with -z.
+    let (ok, _) = r.commit(&r.root, "src/café.rs", false);
+    assert!(ok);
+    let out = r.git_in(&r.root, "alice", &["push", "-q", "origin", "main"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("src/café.rs") && err.contains("in bob's lane"),
+        "{err}"
+    );
+    // Someone else pushes a commit this clone never fetches.
+    let other = r.root.join(".worktrees/other");
+    let out = Command::new("git")
+        .args([
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    fs::write(other.join("README"), "theirs\n").unwrap();
+    for args in [
+        &[
+            "-c",
+            "user.name=o",
+            "-c",
+            "user.email=o@o",
+            "commit",
+            "-qam",
+            "theirs",
+        ][..],
+        &["push", "-q", "--no-verify", "origin", "main"][..],
+    ] {
+        let out = Command::new("git")
+            .current_dir(&other)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // alice force-pushes over it with a change in bob's lane, blocking on.
+    let (ok, _) = r.commit(&r.root, "src/forced.rs", false);
+    assert!(ok);
+    let out = Command::new("git")
+        .current_dir(&r.root)
+        .args(["push", "-q", "--force", "origin", "main"])
+        .env("FRAY_AGENT", "alice")
+        .env("FRAY_SESSION", "test:alice")
+        .env("FRAY_GUARD", "block")
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "the forced push is checked and refused: {err}"
+    );
+    assert!(err.contains("src/forced.rs"), "{err}");
+}
+
+#[test]
+fn a_failing_check_warns_but_only_a_refusal_blocks() {
+    let r = Repo::new("fail");
+    r.install();
+    assert!(r
+        .fray("bob", &["lane", "take", "src/", "--purpose", "parser"])
+        .status
+        .success());
+    fs::write(r.root.join("src.txt"), "x").unwrap();
+    r.git(&["add", "src.txt"]);
+    // An invalid session makes fray itself fail: a warning, not a refusal.
+    let out = Command::new("git")
+        .current_dir(&r.root)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "s",
+        ])
+        .env("FRAY_AGENT", "alice")
+        .env("FRAY_SESSION", "bad session!")
+        .env("FRAY_GUARD", "block")
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("the check failed"), "{err}");
+    // A clean commit prints nothing on stdout.
+    let (ok, err) = r.commit(&r.root, "docs/clean.md", false);
+    assert!(ok && !err.contains("fray guard:"), "{err}");
+}
+
+#[test]
+fn a_stale_lane_is_reported_but_does_not_block() {
+    let r = Repo::new("stale");
+    r.install();
+    assert!(r
+        .fray("bob", &["lane", "take", "src/", "--purpose", "parser"])
+        .status
+        .success());
+    // bob's lane goes stale when bob leaves.
+    assert!(r.fray("bob", &["leave"]).status.success());
+    let (ok, err) = r.commit(&r.root, "src/late.rs", true);
+    assert!(err.contains("in bob's lane"), "{err}");
+    assert!(ok, "stale lanes never refuse: {err}");
 }
