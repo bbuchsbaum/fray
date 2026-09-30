@@ -1,5 +1,45 @@
 # Validation
 
+## Wake-path latency baseline (2026-09-30)
+
+`scripts/bench_wake.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX, step 0) publishes
+one p1 question per trial through the real CLI. It then times arrival at a
+stand-in host on each delivery path, from the publisher's `send` returning to
+the host-visible event, on one monotonic clock:
+
+- **wait:** `fray wait --new` returns.
+- **watch:** `fray watch --attention --notification` prints a notice. This is
+  what the Claude Monitor plugin runs.
+- **drive:** `fray drive` starts a stub child with the packet. The stub is
+  Python and makes no model call.
+- **hook:** `fray hook` PostToolUse returns context naming the item, assuming a
+  tool boundary right after publication.
+
+Model response and the host's scheduling of an idle session are not included;
+they need real hosts, which the charter reserves for the owner. Failed or
+timed-out trials count against a path. None occurred.
+
+Release build `e8e6c93` (main `0ce4333` plus `fray stats`), macOS 14.3 arm64,
+30 declared trials per path:
+
+| Path | Delivered | Duplicates | p50 ms | p95 ms | max ms |
+|---|---|---|---|---|---|
+| wait (finite timeout) | 30/30 | 0 | 91.6 | 110.0 | 121.9 |
+| watch --attention | 30/30 | 0 | 104.2 | 107.3 | 108.5 |
+| drive (stub child start) | 30/30 | 0 | 88.5 | 214.7 | 389.8 |
+| hook PostToolUse | 30/30 | 0 | 18.3 | 43.4 | 79.7 |
+
+Delivery is complete and duplicate-free, but finite waits carry a fixed floor
+of about 100 ms. With `wait --timeout none` the same measurement gives p50
+2.4 ms and p95 13.5 ms (20 trials). The floor comes from `wait_cancellable`
+(`src/server.rs`): a finite wait's hang-up observer reads with a 100 ms timeout,
+and the reply waits for that thread to notice completion. The watch stream
+shows the same floor. This is the first improvement target. The drive column
+is dominated by process spawn; its tail includes the stub's Python start-up.
+
+Reproduce: `cargo build --release && python3 scripts/bench_wake.py
+target/release/fray --n 30 --home-parent /tmp`.
+
 ## Collaboration stats baseline (2026-09-30)
 
 `fray stats` and `fray friction` (Mote bd-01M3RZ9C6948DBVW30C1610F6W) replay the
