@@ -503,11 +503,29 @@ fn wait_cancellable(
     }
     written
 }
+/// A wait, tracked while it runs: an unfiltered wait makes its agent
+/// wakeable (no-silent-stalls R1) through its own `wake_waits` row, removed
+/// on every exit (answer, timeout, hang-up or error).
 fn wait(
     shared: &Shared,
     req: &Request,
     cancelled: Option<&AtomicBool>,
     unexpected_input: Option<&AtomicBool>,
+) -> Result<Value> {
+    let wake_id = random_key()?;
+    let result = wait_body(shared, req, cancelled, unexpected_input, &wake_id);
+    if let Ok(store) = shared.store.lock() {
+        let _ = store.wait_ended(&wake_id);
+    }
+    result
+}
+
+fn wait_body(
+    shared: &Shared,
+    req: &Request,
+    cancelled: Option<&AtomicBool>,
+    unexpected_input: Option<&AtomicBool>,
+    wake_id: &str,
 ) -> Result<Value> {
     check_fields(
         &req.args,
@@ -543,7 +561,16 @@ fn wait(
     }
     // Waiting makes the agent reachable; refresh that while the wait lasts.
     const TOUCH: Duration = Duration::from_secs(60);
-    store.touch(&req.actor, req.session.as_deref(), now_ms())?;
+    let wake = {
+        let sel = crate::store::InboxSelection::parse(&req.args)?;
+        (sel.card_ids.is_empty()
+            && sel.kinds.is_empty()
+            && sel.min_priority.is_none()
+            && !sel.addressed_to_me
+            && !sel.unresolved)
+            .then_some(wake_id)
+    };
+    store.touch(&req.actor, req.session.as_deref(), wake, now_ms())?;
     let mut touched = Instant::now();
     loop {
         if unexpected_input.is_some_and(|input| input.load(Ordering::SeqCst)) {
@@ -586,7 +613,7 @@ fn wait(
             return Ok(page);
         }
         if touched.elapsed() >= TOUCH {
-            store.touch(&req.actor, req.session.as_deref(), now_ms())?;
+            store.touch(&req.actor, req.session.as_deref(), wake, now_ms())?;
             touched = Instant::now();
         }
         // The condition check and wait use the SAME mutex as commits: no lost

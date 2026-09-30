@@ -6,7 +6,7 @@
 //! truncated preview, host wake latency) is listed as unavailable, never
 //! reported as zero.
 use crate::model::*;
-use crate::store::{agent_live, agent_waiting, live_lanes, OWNER};
+use crate::store::{live_lanes, reachability, Reach, OWNER};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -322,8 +322,10 @@ pub(crate) fn friction(conn: &Connection, now: i64) -> Result<Value> {
     open.sort_by_key(|(id, h)| (h.created_ms, *id));
     // The owner is reached through the owner queue (`fray owner review`), not
     // a session; requests to it wait for the owner, they are not lost.
+    // Reachable means wakeable (no-silent-stalls R1): a present agent with
+    // nothing armed may never take another turn.
     let reachable = |agent: &str| -> Result<bool> {
-        Ok(agent == OWNER || agent_live(conn, agent, now)? || agent_waiting(conn, agent, now)?)
+        Ok(agent == OWNER || reachability(conn, agent, now)? == Reach::Wakeable)
     };
     let mut unanswered = Vec::new();
     for (id, h) in open

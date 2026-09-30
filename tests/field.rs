@@ -61,7 +61,11 @@ fn a_third_partys_question_reaches_the_author_not_a_stale_assignee() {
     .unwrap();
     let notice = sent["notice"].as_str().unwrap();
     assert!(notice.contains("p1"), "{notice}");
-    assert!(notice.contains("present now: release"), "{notice}");
+    // release is active but has nothing armed: present, not wakeable.
+    assert!(
+        notice.contains("present, nothing armed: release"),
+        "{notice}"
+    );
     // release answers there with a question: it goes to codex, who asked.
     let reply = run(
         &mut s,
@@ -72,7 +76,9 @@ fn a_third_partys_question_reaches_the_author_not_a_stale_assignee() {
     )
     .unwrap();
     assert_eq!(reply["follow_up"]["assignee"], "codex", "{reply}");
-    assert!(reply["notice"].is_null());
+    // codex is present but nothing will wake it, and release is told so.
+    let notice = reply["notice"].as_str().unwrap();
+    assert!(notice.contains("codex is present"), "{notice}");
 }
 
 #[test]
@@ -359,7 +365,7 @@ fn review_continued_sessions_show_as_takeovers_and_waiting_is_presence() {
         NOW + 3,
     )
     .unwrap();
-    s.touch("release", None, LATER).unwrap();
+    s.touch("release", None, Some("w1"), LATER).unwrap();
     run(&mut s, "codex", "heartbeat", json!({}), LATER).unwrap();
     let lanes = run(&mut s, "codex", "lanes", json!({}), LATER).unwrap();
     assert_eq!(lanes["lanes"][0]["stale"], false, "{lanes}");
