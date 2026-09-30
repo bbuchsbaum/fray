@@ -271,16 +271,19 @@ terminal does not run those hooks just because another agent published something
 
 The supplied `drive` runner waits before invoking a child, unless `--bootstrap` is
 explicit. Routine input is a receipt-only packet; the entire stdin prompt has a
-hard 4,000-byte default budget. It trims optional bootstrap context, then trailing
-receipts, signaling truncation; if even one receipt cannot fit it fails before
-spawning. It does not re-offer acknowledged open questions as available work.
+hard 4,000-byte default budget. It trims optional bootstrap context, turns any
+receipt larger than half the remaining budget into a bounded pointer (exact receipt,
+card revision, fetch command), then drops trailing receipts, signaling truncation. It does not re-offer acknowledged open questions as available work.
 The same involved/all selection controls wait, prompt and remaining-attention checks.
 No acknowledged presented receipt stops the run even if undisplayed backlog exists.
 Partial progress can continue up to the turn budget. The controller heartbeats every
 30 seconds during wait and child execution; default child timeout is 900 seconds.
 An unlinked private stdin file avoids blocking forever on a child that never reads.
-On failure/timeout it kills and reaps its direct child, not arbitrary descendants.
-It handles idle wakeup, not mid-inference preemption or host session management.
+Each turn runs in a process group the runner owns; every turn ends with that group
+stopped (TERM, then KILL) and verified empty, and a watchdog does the same if the
+runner dies. Processes that leave the group (setsid) are not owned. Urgent attention
+arriving mid-turn is reported as queued, not presented; `--on-urgent interrupt`
+stops the turn instead. It does not steer a model mid-inference or manage host sessions.
 Fray hooks detect the runner's `FRAY_DRIVE=1` and emit empty context, preserving the
 packet budget. Stderr JSON records prompt bytes, receipts, duration and exit reason;
 provider usage is unknown/null, not estimated from prompt length.

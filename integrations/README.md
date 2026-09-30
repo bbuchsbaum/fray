@@ -296,8 +296,38 @@ Fray's Claude hooks for that child to avoid duplicate, unbudgeted context.
 No acknowledged receipt from the presented batch means `stalled`, even with unseen
 backlog. Partial progress may continue within `--max-turns`; acknowledgment is not
 completion. `--child-timeout 900` bounds each invocation's wall time, not tokens or
-cost. Timeout kills/reaps the direct child; Fray is not a process-tree supervisor.
-Abrupt controller death is reported as stale after 120 seconds. Controllers heartbeat
+cost. Each turn runs in its own process group, which the runner owns. However the
+turn ends (success, failure, timeout, preemption), the runner sends the group TERM,
+then KILL after 5 seconds, and verifies it empty before reporting a final state; the
+controller detail in `fray agents` records the PID/PGID, signals sent and whether
+termination was verified (`descendants_alive` fails the run otherwise). A watchdog in
+a separate group stops the owned group if the runner itself is interrupted, killed
+or crashes. A job meant to outlive its turn must leave the group (for example with
+`setsid`) and be recorded on the board; Fray then does not own it. A new run refuses
+to start while a previous run's unverified group is still alive (`orphaned_child`);
+inspect it with `pgrep -l -g PGID` and stop it, or pass `--release-orphan PGID`.
+Because the owned group is not the terminal's foreground group, a child that reads
+or reconfigures the terminal (a password prompt, `stty`, a TUI) is stopped by the
+kernel; the runner detects the stopped group and fails fast with `child_stopped`.
+Drive children must be noninteractive. In a container, run with an init process
+(`docker run --init`, tini): as PID 1 the runner cannot reap orphaned grandchildren,
+so their zombies would keep the group from being verified empty.
+Abrupt controller death is reported as stale after 120 seconds.
+
+A running turn cannot see attention that arrives after its packet. Every 2 seconds
+the runner lists selected urgent attention (priority 0-1, which includes every
+objection's follow-up) that was not presented; the controller detail shows each as
+`queued_not_presented` with its next boundary. Presented receipts are marked
+exposed (`fray thread ID` receipts show `exposed_seq`), never acknowledged. With
+`--on-urgent interrupt`, urgent attention that arrives during a turn stops that
+turn's group and starts the next turn, where it sorts first; ordinary chatter never
+interrupts, and a preempted turn is not counted as stalled. The default `queue`
+only reports.
+
+A receipt too large for its share of `--budget` is presented as a pointer: its exact
+receipt, card identity and revision, `omitted: true`, and a `fray thread ID --unread`
+fetch command, so other selected attention still fits. A pointer is not content; the
+child must fetch and read it before acting or acknowledging. Controllers heartbeat
 every 30 seconds; duplicate live controllers are rejected and old run tokens cannot
 alter replacements or undo `leave`. Enabled registration alone is not availability.
 
