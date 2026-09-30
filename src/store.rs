@@ -2598,12 +2598,14 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             Ok(json!({"binding":mote_binding(conn)?}))
         }
         "mote_claims" => {
-            // Every holder Fray has recorded for a store, for reconciliation
-            // against Mote's live board (docs/design/mote-adapter.md section 6).
+            // Every live holder Fray has recorded for a store, for
+            // reconciliation against Mote's live board (docs/design/
+            // mote-adapter.md section 6). Released rows are left out, so they
+            // can never push live claims past the listing limit.
             check_fields(a, &["store_id"])?;
             let store_id = string(a, "store_id")?;
             let mut s = conn.prepare(
-                "SELECT entity,holder FROM mote_claims WHERE store_id=? ORDER BY entity LIMIT 10001",
+                "SELECT entity,holder FROM mote_claims WHERE store_id=? AND holder IS NOT NULL ORDER BY entity LIMIT 10001",
             )?;
             let rows = s
                 .query_map([store_id], |r| {

@@ -279,6 +279,11 @@ Candidate reviews follow the rule in 7.3.
   - The cards say what changed ("you now hold E", "E is now held by X"),
     keyed `claimstate:E:<holder>:<lease_until>`.
   - A release or expiry is recorded without cards.
+  - An A→B→A round trip between two syncs is invisible to reconciliation,
+    because the holder is unchanged. The event feed reports it if it saw it.
+  - An op stamped by a slow clock may arrive after a reconciliation and sort
+    below its marker, so the feed drops it. The next reconciliation reports
+    the resulting state with a generic card, so it heals itself.
   - `mote history` is not used. It cannot tell a handoff from a renewal, and
     a late op can overturn the op order it implies (review of 637458b).
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
