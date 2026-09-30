@@ -1,8 +1,12 @@
 # Design: the Mote adapter contract
 
-Status: contract for review (2026-09-30). Epic child 5, Mote
+Status: revision 2 (2026-09-30), for re-review. Epic child 5, Mote
 bd-01M3RZ9BW6K159Y3AAQR2NF99A. Children 1 (review and landing), 4 (git guard)
 and 6 (dispatch and handoff) depend on it.
+
+Revision 1 (86ac705) drew seven blocking objections from design review on
+fray card #26. Each was reproduced against Mote source or scratch stores, and
+each is addressed below, marked **[D1]** to **[D7]**.
 
 ## Problem
 
@@ -17,200 +21,306 @@ The adapter makes that division real without creating a second ledger:
 
 - **Mote owns** work, claims, reservations, candidates, reviews and landing
   authority.
-- **Fray owns** attention, meaning who needs to know what, and how fast.
+- **Fray owns** attention, meaning who needs to know what, and how fast, and
+  the conversation, including verdicts as evidence.
 - Fray never records a substitute for state Mote owns.
 
 ## Facts this contract rests on
 
-These were read from the Mote source at 95379f0 (`mote 0.1.0`) on 2026-09-30.
-Citations are to `/Users/bbuchsbaum/code/rust/mote`.
+These were read from the Mote source at 95379f0 (`mote 0.1.0`) and verified in
+scratch stores on 2026-09-30. Citations are to `/Users/bbuchsbaum/code/rust/mote`.
 
 - **Store discovery.** Mote tries `--store`, then `MOTE_STORE`, then walks up
   from the working directory to the first `.mote/` (`repo.rs:50-61`,
-  `cli.rs:11949-11966`). It never consults Git. A worktree outside the
-  checkout that holds `.mote/` finds no store, or the wrong one.
-- **Store identity.** `store_id` (`st-<ULID>`) is in `.mote/FORMAT.json`, and
-  every event carries it.
+  `cli.rs:11949-11966`). Candidate commands also run `git` from the current
+  directory and from the store's parent (`cli.rs:1934`, `2518-2521`), so the
+  working directory matters for them.
+- **Store identity.** `store_id` is in `.mote/FORMAT.json`. Among command
+  outputs, only `events` and candidate output carry it.
 - **Actor.** Mote tries `--actor`, then `MOTE_ACTOR`, then
-  `.mote/local/actor`. When more than one session lease is live, it refuses
-  writes whose actor came from the local file (`cli.rs:1527-1551`). Claims,
-  reservations and reviews record the actor only, not a session.
-- **Ops.** Each op is an immutable file. The reducer replays them in filename
-  (timestamp) order, and the order decides acceptance. A late op carrying an
-  earlier timestamp can therefore change, after the fact, which of two racing
-  ops won.
-- **Exit codes.** 0 ok, 2 rejected by the reducer, 3 invalid, 4 store or
-  duplicate error, 1 internal (`main.rs:43-53`).
+  `.mote/local/actor`. The multi-session guard fires only when the actor came
+  from the local file (`cli.rs:1527-1551`). On `events`, `--actor` filters the
+  output to that actor (`cli.rs:11267-11270`).
+- **Ops.** Each op is an immutable file. The reducer replays ops in filename
+  (timestamp) order, so the order decides acceptance. Verified: after an
+  accepted reserve, copying in a competing op with an earlier timestamp
+  transferred the reservation. The already-emitted `reservation.opened`
+  vanished, and `events --after CURSOR` never showed the new op.
+- **Exit codes.** 0 ok, 1 internal, 3 invalid, 4 store or duplicate error.
+  Exit 2 covers both a reducer rejection and a command-line usage error
+  (`main.rs:26-53`). For `preflight`, exit 2 means "conflicts found": a
+  result, not a failure.
 - **Output.**
-  - `reserve` and `candidate` commands print JSON.
-  - `unreserve`, `claim`, `release`, `begin` and `handoff` print none; a
-    rejection appears as `rejected: <reason>` on stderr with exit 2.
-- **Idempotency keys.** Supported for messages, candidate mutations,
-  heartbeats and roles. Not supported for reserve, unreserve, claim, release,
-  begin or handoff. A retried reserve creates a new reservation id and is
-  rejected as a same-actor duplicate.
+  - `reserve` prints JSON even when rejected.
+  - `unreserve`, `claim` and `release` print nothing and write `rejected: …`
+    to stderr.
+  - `handoff` writes `handoff claim rejected: …`.
+- **Idempotency.** Keys are required for `candidate review` and supported for
+  messages and roles. There are none for reserve, unreserve, claim, release,
+  begin or handoff. A retried reserve is rejected as a same-actor duplicate.
+  A candidate-review retry counts as idempotent only when verdict, body,
+  evidence and `--expect` are all byte-identical (`cli.rs:2669-2697`).
 - **Events.**
-  - `mote events --json [--after OP_ID] [--follow]` emits accepted ops as
-    `mote.event.v1`, and the cursor is the op id.
-  - A late op that sorts before the cursor is skipped on resume.
-  - An event already emitted can later become rejected.
-  - Derived events (reservation expiring or expired, presence, stale
-    requests) have synthetic ids.
-- **Handoff.** `mote handoff` transfers the claim (compare-and-set on the
-  claim clock) and, with `--release`, closes the sender's reservations. It
-  does not transfer reservations. While the issue stays open, the recipient
-  cannot adopt them.
-- **Candidates.** A review is per reviewer: approve, block or comment, updated
-  by compare-and-set. The proposer cannot review their own candidate.
-  Supersede carries no reviews forward. `landability` lists blocking reasons.
+  - The cursor is the op id. Event types are op-derived (for example
+    `claim.acquired`, `reservation.opened`, `candidate.*`) plus a few derived
+    ones (`reservation.expiring` and `.expired`, `presence.*`,
+    `request.stale`). There is no "landable", "review requested" or "handoff"
+    event.
+  - The cost grows quadratically with store size (`events.rs:461-466`,
+    `660-670`). On a copy of a 1,953-op store: a full run took 29.1 s; from
+    the tail, 6.5 s; from the tail with `--kind`, 1.2 s.
+- **Reservations.**
+  - TTL defaults to 3,600 s, and `reserve --ttl` overrides it.
+  - A live reservation cannot be renewed: re-reserving is rejected as a
+    duplicate.
+  - An orphaned reservation, whose issue is closed or deleted, is still live
+    and still blocks others (`reducer.rs:3513-3530`).
+  - `adopt --issue WORK RV [--ttl]` re-homes an orphan onto an open issue the
+    adopter has claimed, with a fresh TTL (`state.rs:869-912`).
+  - Paths are case-sensitive and literal, `.` is rejected, and `Src/a.rs` does
+    not overlap `src/`.
+- **Handoff.**
+  - `mote handoff` transfers the claim, filling in the current compare-and-set
+    token, and with `--release` closes the sender's reservations.
+  - The reducer does not check who is sending (`cli.rs:9347-9352`,
+    `reducer.rs:881-910`): any actor can hand off anyone's claim.
+- **Candidates.**
+  - A review is per reviewer (approve, block or comment), compare-and-set on
+    the reviewer's previous op.
+  - Only named reviewers, or holders of an eligible role, may review
+    (`reducer.rs:5183-5194`), and the proposer may not (`reducer.rs:5121`).
+  - Supersede carries no reviews forward.
+  - `candidate show --json` lists the blocking `landability` reasons.
 
 ## Contract
 
 ### 1. Transport
 
-Fray runs the `mote` binary and parses `--json` output; it never opens Mote's
-files. Every call passes `--store`, `--actor` and `--json` explicitly, and has
-a bounded timeout (10 s for reads, 30 s for mutations). The adapter lives in
-the client, never in the daemon. A slow or hung Mote must never hold the
-store lock that serializes every agent's requests.
+- Fray runs the `mote` binary and parses `--json` output. The one exception
+  is a read-only read of `FORMAT.json` for the store id.
+- Every call passes `--store` and `--json` explicitly. Every call except
+  `events` also passes `--actor` [D1].
+- Calls have bounded timeouts: 10 s for reads, 30 s for mutations. On timeout
+  the adapter kills and reaps Mote's process group before any re-read.
+- The adapter supports `mote 0.1.x`. It checks `mote --version` once per
+  process and refuses anything else with `mote_version`.
+- The adapter lives in the client. It never runs in the daemon or under the
+  store lock that serializes every agent's requests.
+- Outcomes are classified from the exit code, stderr and JSON together. A
+  usage error (exit 2 without `rejected`) is `mote_invalid`, an adapter bug,
+  not a rejection. A `preflight` exit 2 is its result.
 
-### 2. Which store
+### 2. Which store [D6]
 
-A board and a Mote store are bound once, and the binding is checked on every
-call:
+The adapter binds the store to the board with the same resolution that picks
+the board (`client::home`), and records the binding:
 
-1. `MOTE_STORE`, if set, is used as given.
-2. Otherwise the adapter uses `.mote/` in the main worktree: the parent of
-   `git rev-parse --path-format=absolute --git-common-dir` for a non-bare
-   repository. That is the same root from which Fray derives its shared
-   board, so every linked worktree, including ones outside the checkout, uses
-   one store.
-3. On first use, the board records that store's `store_id` in its `meta`
-   table (`mote_store_id`). A later call against a different `store_id` fails
-   with `mote_store_mismatch` and names both ids; nothing falls back silently.
-4. No `.mote/` means no adapter. Fray behaves exactly as it does today, and
-   says "Mote not adopted" wherever an adapter feature would have acted.
+1. If `MOTE_STORE` is set, that store is used.
+2. If the board is `<root>/.fray` (an ancestor `.fray/`), the store is
+   `<root>/.mote`.
+3. If the board is `<git-common-dir>/fray`, the store is `.mote/` in the main
+   worktree, taken from the first entry of `git worktree list --porcelain`.
+4. For a bare repository, or a submodule (a `.git` file whose gitdir sits
+   under another repository's `modules/`), `MOTE_STORE` is required.
+
+On first use the board records the store path and its `store_id` (read from
+`FORMAT.json`) in `meta` (`mote_store`, `mote_store_id`). Every later call
+re-reads `FORMAT.json` and compares. A mismatch fails with
+`mote_store_mismatch`, naming both ids; nothing falls back silently. No
+`.mote/` means no adapter, and Fray behaves as it does today.
+
+Candidate commands run with the agent's own worktree as their working
+directory, because Mote runs git there.
 
 ### 3. Which actor
 
-- The Mote actor is the Fray identity name, passed with `--actor`. The
-  adapter never relies on `.mote/local/actor`, so Mote's multi-session guard
-  cannot silently misattribute a write.
-- Fray already refuses a second live session under one name (sessions,
-  Phase 1.1). While that holds, name to actor is one-to-one, and it is
-  collision prevention, not authentication.
-- A mutation with no Fray identity is refused (`mote_actor_unresolved`).
-- The owner never acts in Mote through the adapter.
+The Mote actor is the Fray identity name, passed with `--actor`, so Mote's
+local-file guard cannot misattribute a write. Fray already refuses a second
+live session under one name, so name to actor is one-to-one. That is
+collision prevention, not authentication.
+
+A mutation with no Fray identity is refused. If `MOTE_ACTOR` in the
+environment differs from the Fray name, `brief` warns: manual `mote` calls
+would otherwise act as a second actor whose reservations conflict with the
+agent's own. The owner never acts in Mote through the adapter.
 
 ### 4. Reads and mutations fail differently
 
 | Call | Examples | On failure |
 |---|---|---|
-| Read | `who-has`, `preflight`, `show`, `candidate show`, `events` | Degrade to advisory: continue with Fray's own view and print one warning naming the command and error (`Mote unavailable; lanes are advisory only`). Never block a commit or a message. |
-| Mutation, rejected (exit 2) | `reserve`, `unreserve`, `claim`, `handoff`, `candidate review` | Fail with `mote_rejected` and Mote's reason. Record nothing in Fray. |
-| Mutation, unconfirmed (exit 1, 3 or 4, timeout, unparseable output) | same | Re-read Mote's state to learn the outcome (see 5). If that re-read also fails, fail with `mote_unconfirmed` and name the read the agent can run. Never report success; never record a substitute. |
+| Read | `who-has`, `preflight`, `show`, `candidate show`, `events` | Degrade to advisory: continue with Fray's own view, printing one warning that names the command and error. Never block a commit or a message. |
+| Mutation, rejected | `reserve`, `unreserve`, `claim`, `adopt`, `handoff` | Fail with `mote_rejected` and Mote's reason. Record nothing that Mote owns. |
+| Mutation, unconfirmed (timeout, exit 1 or 4, unparseable output) | same | Re-read the outcome (see 5). If that also fails, fail with `mote_unconfirmed` and name the read to run. Never report success. |
+
+Candidate reviews follow the rule in 7.3.
 
 ### 5. Idempotency without Mote keys
 
-For ops Mote can key (candidate review, messages), the adapter passes a key
-derived from Fray's own request key, so a retry is safe end to end.
+- **Keyed ops (candidate review, messages).** The adapter stores the exact
+  payload it sent in Fray's request record: verdict, body, evidence, the
+  `--expect` token and the key. A retry replays that payload byte for byte,
+  never re-reading the token [D7].
+- **reserve.** Before writing, the adapter runs one `preflight --issue ISSUE
+  --paths …` call. A `same_actor_duplicate` on the same issue and paths means
+  the reservation is already present, so it is reported as present, not
+  created again.
+- **claim and unreserve.** A retry is naturally safe.
+- **handoff.** Before sending, and before any retry, the adapter reads `show`
+  and proceeds only while the sender still holds the claim. If the intended
+  recipient already holds it, the handoff is done.
 
-For ops without keys, the adapter checks before it writes, and checks again
-if the outcome is uncertain:
+### 6. Mote to Fray attention [D1, D2, D3]
 
-- **reserve:** `who-has` for each path. If a live reservation held by this
-  actor on this entity already covers the path, it is reported as present,
-  not created again.
-- **claim and handoff:** `show` the issue and compare the claim holder with
-  the intended holder.
-- **unreserve:** `who-has` again. If no reservation remains, the unreserve is
-  done.
+- **Reading events.** A sync runs `mote events --json --after CURSOR --kind
+  K…` with no `--actor`, restricted to the event types below. Fray decides the
+  recipients. On adoption the cursor starts at the current tail, so history
+  is never replayed.
+- **Dedup and cursor.** The board keeps a table `mote_events(store_id,
+  event_id, recipient)` with that composite primary key, recording the card
+  produced for each recipient. One event can therefore reach several agents.
+  The cursor (`meta.mote_cursor`) only moves forward: the store applies a
+  compare-and-set to it in the same transaction as the cards, so a
+  concurrent or slower sync can never move it back.
+- **Where sync runs.** Sync is never on the `brief` or hook critical path.
+  `fray mote sync` runs on demand. A drive or watch runner runs it in the
+  background at most once a minute, and a timed-out sync leaves the cursor
+  where it was. A latency test on a store of at least 2,000 ops bounds one
+  sync from the tail. The quadratic `events` cost is also filed with Mote
+  (see Requests).
+- **Which events produce attention, and for whom.**
 
-Each check is a read, so it degrades under the rules in 4.
+  | Mote event | Attention | Recipient |
+  |---|---|---|
+  | `reservation.expiring`, `reservation.expired` | "your reservation on PATHS is expiring" | the holder |
+  | `claim.acquired`, where the new holder differs from the previous holder | handoff received | the new holder, and the previous holder as a receipt |
+  | `candidate.*` (proposed, reviewed, evidence, authorized, superseded, landed) | Re-read `candidate show`. Report a change in landability or blocking reasons; a named reviewer who has not reviewed is asked for review. | the proposer, named reviewers, the authorizer |
 
-### 6. Mote to Fray attention
-
-A small `mote_events` table in the board records `(store_id, event_id)` as the
-primary key, together with the Fray card it produced. The `events` cursor is
-stored in `meta` (`mote_cursor`).
-
-A listener run by the client (`fray mote sync`, and on each `brief`) reads
-`mote events --json --after CURSOR`. For each event relevant to an agent, it
-writes the attention card, the `mote_events` row and the new cursor in one
-Fray transaction:
-
-- a reservation that is expiring or expired;
-- a candidate becoming landable, or blocked;
-- a review requested from the agent;
-- a handoff to the agent.
-
-The consequences:
-
-- **Exactly-once attention.** A duplicate `event_id` is ignored.
-- **Mote committed, Fray write failed.** The cursor did not advance, so the
-  next sync replays the event and produces exactly one card.
-- **Fray crashes mid-sync.** The whole transaction rolls back; the restart
-  converges.
-- **Skipped and flipped events.** The event feed can skip a late op, and an
-  accepted op can later be rejected. Every sync therefore also runs a bounded
-  snapshot reconciliation: the agent's claims and reservations from `mote ls`
-  and `who-has` are compared with the attention cards it holds. Wrong cards
-  are superseded with a note; no card is ever treated as authoritative.
-- **Mote ownership in cards.** A Fray card produced from Mote carries the
-  `mote:ID` reference and says that Mote holds the state. Resolving the card
-  never changes Mote.
+  "Landable" and "review requested" are derived from `candidate show`, never
+  assumed from the event name.
+- **Reconciliation.** Because the feed can skip a late op and an emitted op
+  can later be rejected, every sync also reconciles a bounded snapshot: the
+  agent's claims and reservations (`mote ls`, `who-has`), and the candidates
+  where the agent is proposer, named reviewer or authorizer (`candidate list`
+  and `candidate show`), against the attention cards it holds. A wrong card
+  is superseded with a note. A missing one is created, keyed by a synthetic
+  event id `reconcile:<entity>:<state-hash>`, so it too is exactly once.
+- **Clock skew.** An op stamped in the future sorts after later-arriving ops.
+  The cursor may then skip them, and reconciliation is what catches them.
+- **Mote ownership in cards.** A Fray card produced from Mote carries
+  `mote:ID` and says that Mote holds the state. Resolving the card never
+  changes Mote.
 
 ### 7. What each dependent child gets
 
-- **Lanes and the git guard (child 4).** With Mote adopted, `lane take` calls
-  `mote reserve` for the lane's paths under the card's `mote:` issue, and the
-  guard consults `who-has`. A Fray lane becomes a view of the Mote
-  reservation plus Fray's queue and notification order. A rejected reserve
-  refuses the lane.
-- **Review and landing (child 1).** A Fray verdict is recorded as a Mote
-  candidate review (approve maps to approve; object or blocked maps to
-  block), keyed so a retry is safe. The Fray card is the conversation. Mote's
-  self-review refusal and quorum policy apply unchanged.
-- **Handoff (child 6).** Mote cannot transfer a reservation, and the
-  recipient cannot reserve overlapping paths while the sender holds them. So
-  a handoff cannot avoid a gap without a Mote change. The adapter makes the
-  gap short and visible:
-  1. Post the handoff packet.
-  2. `mote handoff --to` transfers the claim.
-  3. The sender runs `mote unreserve`.
-  4. The recipient's first `accept` runs `mote reserve`.
+#### 7.1 Lanes and the git guard (child 4) [D5]
 
-  A Fray lane is held across steps 3 and 4 and announces the gap. Each step
-  is idempotent under 5, and `fray handoff --resume` continues an interrupted
-  sequence. Child 6's acceptance criterion "no window in which the paths are
-  unreserved" is not achievable on Mote 0.1.0. It needs the Mote capability
-  in the next section, and is marked blocked on it.
+- **Issue rule.** Under Mote, a lane needs exactly one `mote:ISSUE` reference
+  on its card (`--for CARD`) or given as `--mote ISSUE`. Zero or several is
+  refused, with a message naming the choice.
+- **Path rule.** Lane paths go through Fray's normalizer first. A directory
+  becomes `dir/` with a trailing slash; a file stays literal. Whole-repository
+  lanes (`.` or `*`) and glob lanes are refused under Mote, because Mote
+  cannot represent them. Fray's case-insensitive overlap stays in force for
+  Fray's own warnings. Mote is authoritative only for the literal paths it
+  holds.
+- **Carrier issue.** The reservation is not made on the work issue itself. It
+  is made on a lane carrier: a Mote bead titled `lane: PATHS`, tagged
+  `fray-lane`, and related as a child of the work issue. The carrier is what
+  makes gap-free handoff possible (7.3). Carriers are closed when the lane is
+  released.
+- **Ordering and compensation.** `fray lane take` runs in the client:
+  1. Create the carrier and claim it.
+  2. `mote reserve --issue CARRIER --ttl T`.
+  3. Take the Fray lane.
+
+  If Mote refuses, there is no lane and the carrier is closed. If Fray
+  refuses after Mote accepted, the client compensates with `mote unreserve`
+  and closes the carrier; if compensation fails, it reports `mote_unconfirmed`
+  with the ids. Queue promotion happens in the daemon and cannot call Mote.
+  So a promoted lane is marked `awaiting_mote`, and the promoted agent's
+  notice gives the one command that completes steps 1 and 2 (`fray lane take
+  --resume LANE`).
+- **TTL.** `T` defaults to 8 hours, beyond Fray's 4-hour stale-lane horizon.
+  Mote cannot renew a live reservation. At 80 % of `T`, the holder is told,
+  and `fray lane renew` re-homes the reservation with a fresh TTL: it closes
+  the carrier, adopts the orphan onto a new carrier, and the paths are never
+  unreserved. A Mote renew verb is requested.
+- **Guard.** The git guard checks the staged or pushed paths with one
+  `preflight --issue ISSUE --paths …` call per hook invocation, never one
+  call per path.
+
+#### 7.2 Handoff (child 6) [D4]
+
+Revision 1 said a gap-free handoff was impossible on Mote 0.1.0. That was
+wrong. Carriers make it possible:
+
+1. Check that the sender holds the work claim (5); refuse otherwise. This
+   compensates for Mote's missing holder check.
+2. Post the Fray handoff packet: state, next step, evidence, lanes.
+3. `mote handoff WORK --to RECIPIENT` transfers the work claim.
+4. The sender closes the lane carriers. Their reservations become orphans,
+   which are still live and still blocking.
+5. On the recipient's first `accept`, `mote adopt --issue WORK RV` re-homes
+   each orphan onto the work issue it now holds. The recipient may then move
+   them to its own carriers by the same close-and-adopt step.
+
+The paths are never unreserved. Each step is checked before it runs, and
+`fray handoff --resume` continues from the first incomplete step.
+
+#### 7.3 Review and landing (child 1) [D7]
+
+- The Fray verdict is always recorded on the board. It is conversation and
+  evidence, open to any reviewer, and bound to its SHA or manifest.
+- It is mirrored to Mote as a candidate review only when three conditions all
+  hold: the reviewer is a named reviewer or holds an eligible role, the Fray
+  verdict's SHA equals the candidate's `commit_oid`, and the reviewer is not
+  the proposer. Approve maps to approve; object or blocked maps to block.
+- A verdict that is not mirrored says why ("not a named reviewer", "reviewed
+  SHA differs from the candidate") and changes nothing in Mote.
+- Landability always comes from `candidate show`, never from Fray verdicts.
 
 ## Requests to Mote
 
 These are not filed in the Mote repository. Filing there would affect
 another project, which the charter reserves for the owner.
 
-1. Transfer reservations on handoff, atomically with the claim.
-2. Idempotency keys on reserve, unreserve, claim, release, begin and handoff.
-3. JSON output for unreserve, claim, release, begin and handoff.
-4. A stable acceptance order. With order-derived acceptance, a late op can
-   retroactively overturn a reservation or claim that Fray already reported
-   as held. Until this is fixed, Fray re-reads Mote at the points where it
-   matters: `fray land` and the pre-push guard.
+1. `events` cost that is linear in the ops read, not quadratic in the size of
+   the store.
+2. A holder check on `handoff`: only the claim holder, or an authorized role,
+   can hand off.
+3. Renewal of a live reservation, and transfer of reservations with the
+   claim on handoff.
+4. Idempotency keys on reserve, unreserve, claim, release, begin, adopt and
+   handoff, and JSON output for the commands that have none.
+5. A stable acceptance order, so an accepted op cannot be overturned
+   retroactively by a late op with an earlier timestamp. Until then, Fray
+   re-reads Mote wherever it matters: `fray land`, the pre-push guard, and
+   reconciliation.
+6. Distinct exit codes for usage errors and reducer rejections.
 
-## Acceptance (from the bead)
+## Acceptance
 
-- The tests run with and without `.mote/`.
-- All worktrees, including one outside the checkout, resolve one store, and
-  a mismatched `store_id` is refused.
-- A read outage produces a warning; a mutation outage fails loudly and
-  records nothing.
-- Replaying the same Mote op yields exactly one attention card.
-- A failure injected between the Mote commit and the Fray write recovers on
-  the next sync.
-- When `.mote/` exists, Fray writes no state that Mote owns.
+Tests use a stub `mote` on `PATH` for failure injection (it records its argv
+and returns canned output and exit codes), plus the real binary in temporary
+stores. They cover:
 
-Tests use a stub `mote` on `PATH` (a script that records its argv and returns
-canned JSON and exit codes) for failure injection, plus the real binary in a
-temporary store for the happy path.
+- with and without `.mote/`;
+- store binding: an ancestor `.fray`, a git-common-dir board, a worktree
+  outside the checkout, a bare repository and a submodule (both require
+  `MOTE_STORE`), and a `store_id` mismatch refused;
+- a read outage that warns, and a mutation outage that fails loudly and
+  records nothing Mote owns;
+- multi-agent routing, where one event reaches every recipient exactly once,
+  and the cursor never moves back under concurrent syncs;
+- a late-op flip caught by reconciliation;
+- latency: one sync from the tail on a store of at least 2,000 ops, within
+  the read timeout;
+- path translation: case, directory versus file, and refusal of glob and
+  whole-repository lanes;
+- lane TTL warning and gap-free renewal, and compensation when Fray refuses
+  after Mote accepted;
+- handoff: refused from a non-holder, gap-free in the carrier-and-adopt flow,
+  and resumed after an interruption at each step;
+- a verdict from an unnamed reviewer, and one for a mismatched SHA: both
+  recorded on the board, neither mirrored, with the reason shown;
+- a keyed review retried after a timeout, replayed byte-identically.
