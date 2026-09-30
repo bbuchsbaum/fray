@@ -1,5 +1,18 @@
 # Validation
 
+## Mote adapter: background sync (2026-09-30)
+
+`fray watch --attention` and `fray drive` now sync Mote in the background,
+paced for the whole board on the last sync any agent ran.
+
+The test `a_watching_agent_hears_mote_changes_without_anyone_running_sync`
+runs against the real `mote 0.1.0`. Bob runs `watch --attention` with a 300 ms
+interval, and alice hands him a claim; his watch prints the handoff notice
+with no manual sync, in about 2 s.
+
+The same test, run with `FRAY_MOTE_SYNC=off`, fails after its 20 s wait. So
+the test does exercise the background path.
+
 ## Mote adapter slice 5c-b: candidates (2026-09-30)
 
 `fray mote sync` reads the pending candidates once per sync (`mote

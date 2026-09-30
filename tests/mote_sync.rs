@@ -1317,7 +1317,12 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
         .env_remove("MOTE_ACTOR")
         .env("FRAY_SESSION", "test:bob")
         .env("FRAY_MOTE_SYNC_INTERVAL_MS", "300")
-        .args(["--home", p.t.0.join(".fray").to_str().unwrap(), "--as", "bob"])
+        .args([
+            "--home",
+            p.t.0.join(".fray").to_str().unwrap(),
+            "--as",
+            "bob",
+        ])
         .args(["watch", "--attention", "--notification"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -1327,7 +1332,10 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead;
-        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
             if tx.send(line).is_err() {
                 return;
             }
@@ -1337,7 +1345,10 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
     std::thread::sleep(Duration::from_millis(1500));
     let w = p.bead("alice");
     assert!(p.mote("alice", &["claim", &w]).status.success());
-    assert!(p.mote("alice", &["handoff", &w, "--to", "bob"]).status.success());
+    assert!(p
+        .mote("alice", &["handoff", &w, "--to", "bob"])
+        .status
+        .success());
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut heard = None;
     while std::time::Instant::now() < deadline {

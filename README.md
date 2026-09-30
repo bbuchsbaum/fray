@@ -225,6 +225,13 @@ fray mote status     # which store, whether Mote is reachable, the binding
 fray mote sync       # new Mote events into attention, exactly once each
 ```
 
+Agents rarely need to run `sync` by hand. A long-running `fray watch
+--attention` or `fray drive` syncs Mote in the background about once a minute
+for the whole board: runners pace themselves on the last sync any of them
+ran, so several runners do not multiply the load. It is quiet on success, and
+reports a failure at most once an hour. `FRAY_MOTE_SYNC=off` disables it;
+`FRAY_MOTE_SYNC_INTERVAL_MS` changes the interval.
+
 `status` pairs the board with a store only through the rules that chose the
 board:
 
