@@ -1162,8 +1162,10 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     let mut reconciled = 0;
     let mut raced = 0;
     let mut reconcile_note = Value::Null;
-    let marker = tail(Some(&after));
     let board = mote::run(&store, Some(actor), &["board"], mote::read_timeout());
+    // Taken after the board read: an op published during the read then
+    // sorts at or below the marker only if the board already shows it.
+    let marker = tail(Some(&after));
     let known = send(
         home,
         actor,
