@@ -227,6 +227,7 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             "stats" | "friction" => Some(("stats", "fray stats and friction")),
             "mote_bind" | "mote_binding" => Some(("mote_adapter", "the Mote adapter")),
             "mote_ingest" | "mote_sync_failed" => Some(("mote_sync", "fray mote sync")),
+            "mote_claims" => Some(("mote_reconcile", "Mote claim reconciliation")),
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
             "ack" if req.args.get("last").is_some() => Some(("ack_last", "ack --last")),
             "owner_decide" | "owner_answer" => Some(("owner_channel", "fray owner")),

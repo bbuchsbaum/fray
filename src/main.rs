@@ -1079,7 +1079,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             return match ingest(Some(&cursor), &seed, vec![], vec![]) {
                 Ok(_) => Ok(
                     json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":[],
-                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Events in between are not delivered until reconciliation (a later slice) is in place."}}),
+                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Claims are reconciled against Mote's board on every sync; reservation events in between are not recovered."}}),
                 ),
                 Err(e) if moved(&e) => Ok(
                     json!({"mote_sync":{"note":"another sync advanced the cursor first","created":[]}}),
@@ -1144,11 +1144,98 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
         }
     }
+    // Reconciliation for claims: the event feed can skip a late op, or a
+    // reseed can jump past events, so Mote's live board is the check. A
+    // mismatch is resolved from the entity's history (the last accepted claim
+    // is the op behind the current holder) and goes through the same ingest,
+    // under the same state keys, so nothing is delivered twice.
+    let mut reconciled = 0;
+    let mut reconcile_note = Value::Null;
+    match mote::run(&store, Some(actor), &["board"], mote::read_timeout()) {
+        mote::Outcome::Ok(board) => {
+            let live: Vec<(String, String)> = board["active_claims"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| {
+                    Some((
+                        c["id"].as_str()?.to_owned(),
+                        c["claimed_by"].as_str()?.to_owned(),
+                    ))
+                })
+                .take(1000)
+                .collect();
+            let entities: Vec<&str> = live.iter().map(|(e, _)| e.as_str()).collect();
+            let known = send(
+                home,
+                actor,
+                "mote_claims",
+                json!({"store_id":store_id,"entities":entities}),
+                None,
+                10,
+            )?["holders"]
+                .clone();
+            let mut claims = Vec::new();
+            for (entity, holder) in &live {
+                if known[entity.as_str()]["holder"].as_str() == Some(holder.as_str()) {
+                    continue;
+                }
+                // Bounded per sync; the next sync continues with the rest.
+                if claims.len() >= 50 {
+                    reconcile_note =
+                        json!("more mismatches than one sync reconciles; the next sync continues");
+                    break;
+                }
+                let mote::Outcome::Ok(Value::Array(history)) = mote::run(
+                    &store,
+                    Some(actor),
+                    &["history", entity],
+                    mote::read_timeout(),
+                ) else {
+                    continue;
+                };
+                let Some(last) = history
+                    .iter()
+                    .rev()
+                    .find(|h| h["kind"] == "claim" && h["accepted"] == true)
+                else {
+                    continue;
+                };
+                claims.push(
+                    json!({"entity":entity,"to":holder,"by":last["actor"],"op_id":last["op_id"]}),
+                );
+            }
+            for chunk in claims.chunks(100) {
+                match ingest(Some(&after), &after, vec![], chunk.to_vec()) {
+                    Ok(r) => {
+                        created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                        unknown.extend(
+                            r["unknown_recipients"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
+                        invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
+                        reconciled += chunk.len();
+                    }
+                    Err(e) if moved(&e) => {
+                        reconcile_note = json!(
+                            "another sync advanced the cursor; reconciliation deferred to it"
+                        );
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        other => reconcile_note = json!(format!("claim reconciliation skipped: {other:?}")),
+    }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
-        "unknown_recipients":unknown,"invalid":invalid,"cursor":after}}),
+        "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
+        "reconciled_claims":reconciled,"reconcile_note":reconcile_note}}),
     )
 }
 
@@ -2466,6 +2553,15 @@ fn human(v: &Value, out: &mut String) {
                     "  Skipped as invalid (reported, not retried): {}\n",
                     clean(&serde_json::to_string(bad).unwrap_or_default())
                 ));
+            }
+            if m["reconciled_claims"].as_i64().unwrap_or(0) > 0 {
+                out.push_str(&format!(
+                    "  Reconciled {} claims the event feed had missed\n",
+                    m["reconciled_claims"]
+                ));
+            }
+            if let Some(n) = m["reconcile_note"].as_str() {
+                out.push_str(&format!("  {}\n", clean(n)));
             }
             if let Some(u) = m["unknown_recipients"].as_array().filter(|u| !u.is_empty()) {
                 out.push_str(&format!(

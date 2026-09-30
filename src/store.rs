@@ -2260,7 +2260,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2530,6 +2530,31 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "mote_binding" => {
             check_fields(a, &[])?;
             Ok(json!({"binding":mote_binding(conn)?}))
+        }
+        "mote_claims" => {
+            // The last holder Fray has seen for each entity, for reconciliation
+            // against Mote's live board (docs/design/mote-adapter.md section 6).
+            check_fields(a, &["store_id", "entities"])?;
+            let store_id = string(a, "store_id")?;
+            let entities = a["entities"]
+                .as_array()
+                .filter(|e| e.len() <= 1000)
+                .ok_or_else(|| Error::invalid("entities must be an array of at most 1000"))?;
+            let mut holders = serde_json::Map::new();
+            for e in entities {
+                let Some(entity) = e.as_str() else { continue };
+                if let Some((holder, op_id)) = conn
+                    .query_row(
+                        "SELECT holder,op_id FROM mote_claims WHERE store_id=? AND entity=?",
+                        params![store_id, entity],
+                        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .optional()?
+                {
+                    holders.insert(entity.to_owned(), json!({"holder":holder,"op_id":op_id}));
+                }
+            }
+            Ok(json!({"holders":holders}))
         }
         "stats" => {
             check_fields(a, &["window_ms"])?;

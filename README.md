@@ -235,7 +235,10 @@ they reach the agent that ran the sync too. The first sync starts at the
 latest event and never replays history. A Mote actor that has not joined the
 board is reported, not notified. After three timed-out syncs in a row the
 cursor moves to the latest event. `FRAY_MOTE_READ_TIMEOUT_MS` overrides the
-10 s read timeout.
+10 s read timeout. Every sync also checks claims against Mote's live board.
+A change of hands that the event feed missed, through a late op or a reseed,
+is delivered from the claim's history under the same keys, so it is never
+delivered twice.
 
 ### Is collaboration working?
 

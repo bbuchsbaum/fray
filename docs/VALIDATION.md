@@ -1,5 +1,34 @@
 # Validation
 
+## Mote adapter slice 5c-a: claim reconciliation (2026-09-30)
+
+Section 6 reconciliation, for claims. After ingesting events, `fray mote
+sync` compares Mote's live board (`board --json`) with the holders Fray has
+recorded, read through a new `mote_claims` operation.
+
+For each mismatch:
+
+- The last accepted `claim` in `mote history --json` is the operation behind
+  the current holder: its actor issued it, and the board names the holder.
+- That transition goes through the same `mote_ingest`, at an unchanged cursor.
+  The same state keys and the same once-in-op-order rule apply.
+
+A change that the feed skipped, through a late op or a reseed, is therefore
+delivered. A change the feed already delivered is not delivered again.
+
+Each sync reconciles at most 50 mismatches and leaves the rest for the next
+one. A concurrent sync that moved the cursor defers reconciliation to that
+sync. Reservation expiry is not reconciled: Mote's live views drop expired
+reservations. Candidates come in a later slice.
+
+Tests (`tests/mote_sync.rs`, 18 in all) run against the real `mote 0.1.0`:
+
+- With the cursor forced past the events, a missed handoff reaches bob.
+- A missed third-party takeover reaches alice.
+- Each is delivered exactly once across repeated syncs by different agents.
+- A change that the feed did see is not reconciled a second time.
+- A unit test covers the holder read.
+
 ## Mote adapter slice 5b: Mote events into attention (2026-09-30)
 
 `fray mote sync` and the `mote_ingest` operation implement the event path of
