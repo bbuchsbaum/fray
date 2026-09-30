@@ -1,12 +1,15 @@
 # Design: the Mote adapter contract
 
-Status: revision 2 (2026-09-30), for re-review. Epic child 5, Mote
+Status: revision 3 (2026-09-30), for re-review. Epic child 5, Mote
 bd-01M3RZ9BW6K159Y3AAQR2NF99A. Children 1 (review and landing), 4 (git guard)
 and 6 (dispatch and handoff) depend on it.
 
 Revision 1 (86ac705) drew seven blocking objections from design review on
 fray card #26. Each was reproduced against Mote source or scratch stores, and
-each is addressed below, marked **[D1]** to **[D7]**.
+each is addressed below, marked **[D1]** to **[D7]**. Revision 2 (399315f)
+resolved all seven and drew one more objection, fray #42: a third party can
+adopt an orphaned carrier reservation. It is addressed in 7.1 and 7.2,
+marked **[D8]**.
 
 ## Problem
 
@@ -75,8 +78,13 @@ scratch stores on 2026-09-30. Citations are to `/Users/bbuchsbaum/code/rust/mote
     duplicate.
   - An orphaned reservation, whose issue is closed or deleted, is still live
     and still blocks others (`reducer.rs:3513-3530`).
-  - `adopt --issue WORK RV [--ttl]` re-homes an orphan onto an open issue the
-    adopter has claimed, with a fresh TTL (`state.rs:869-912`).
+  - `adopt --issue WORK RV [--ttl]` re-homes an orphan onto any open issue
+    the adopter has claimed, with a fresh TTL (`state.rs:869-912`). Without
+    `--ttl` the lease resets to the 3,600 s default. Nothing ties the adopter
+    to the orphan's previous holder: any actor holding any live claim can
+    adopt it (`reducer.rs:3640-3700`, verified with a third party). Mote's own
+    skill tells agents to adopt orphans, and `mote audit` lists them.
+  - Anyone can close an issue, including a carrier claimed by someone else.
   - Paths are case-sensitive and literal, `.` is rejected, and `Src/a.rs` does
     not overlap `src/`.
 - **Handoff.**
@@ -148,6 +156,7 @@ agent's own. The owner never acts in Mote through the adapter.
 
 | Call | Examples | On failure |
 |---|---|---|
+| Invalid (exit 3, or exit 2 without `rejected`) | any | `mote_invalid`: an adapter bug or version mismatch, reported with Mote's message. Record nothing. |
 | Read | `who-has`, `preflight`, `show`, `candidate show`, `events` | Degrade to advisory: continue with Fray's own view, printing one warning that names the command and error. Never block a commit or a message. |
 | Mutation, rejected | `reserve`, `unreserve`, `claim`, `adopt`, `handoff` | Fail with `mote_rejected` and Mote's reason. Record nothing that Mote owns. |
 | Mutation, unconfirmed (timeout, exit 1 or 4, unparseable output) | same | Re-read the outcome (see 5). If that also fails, fail with `mote_unconfirmed` and name the read to run. Never report success. |
@@ -184,8 +193,11 @@ Candidate reviews follow the rule in 7.3.
 - **Where sync runs.** Sync is never on the `brief` or hook critical path.
   `fray mote sync` runs on demand. A drive or watch runner runs it in the
   background at most once a minute, and a timed-out sync leaves the cursor
-  where it was. A latency test on a store of at least 2,000 ops bounds one
-  sync from the tail. The quadratic `events` cost is also filed with Mote
+  where it was. After three consecutive timeouts, the cursor is reseeded at
+  the tail; the gap is covered by reconciliation. `--after` compares op ids
+  as strings (`events.rs:1377-1391`), so a timestamp-shaped cursor is valid.
+  A latency test on a store of at least 2,000 ops bounds one sync from the
+  tail. The quadratic `events` cost is also filed with Mote
   (see Requests).
 - **Which events produce attention, and for whom.**
 
@@ -202,8 +214,12 @@ Candidate reviews follow the rule in 7.3.
   agent's claims and reservations (`mote ls`, `who-has`), and the candidates
   where the agent is proposer, named reviewer or authorizer (`candidate list`
   and `candidate show`), against the attention cards it holds. A wrong card
-  is superseded with a note. A missing one is created, keyed by a synthetic
-  event id `reconcile:<entity>:<state-hash>`, so it too is exactly once.
+  is superseded with a note. A missing one is created. Both paths key a
+  state by `state:<entity>:<op_id>`, where `op_id` is the op that produced
+  the observed state (claim or phase op, or reservation id). So a card from
+  the event feed and a card from reconciliation dedupe against each other,
+  and a state that recurs (A, then B, then A) is still reported, because its
+  op differs.
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries
@@ -225,7 +241,9 @@ Candidate reviews follow the rule in 7.3.
   holds.
 - **Carrier issue.** The reservation is not made on the work issue itself. It
   is made on a lane carrier: a Mote bead titled `lane: PATHS`, tagged
-  `fray-lane`, and related as a child of the work issue. The carrier is what
+  `fray-lane`, and related as a child of the work issue. It is created with
+  `mote new --id fray-lane-<request key>` (the `bd-` prefix is reserved), so
+  a retried creation is refused as already existing rather than duplicated. The carrier is what
   makes gap-free handoff possible (7.3). Carriers are closed when the lane is
   released.
 - **Ordering and compensation.** `fray lane take` runs in the client:
@@ -242,9 +260,15 @@ Candidate reviews follow the rule in 7.3.
   --resume LANE`).
 - **TTL.** `T` defaults to 8 hours, beyond Fray's 4-hour stale-lane horizon.
   Mote cannot renew a live reservation. At 80 % of `T`, the holder is told,
-  and `fray lane renew` re-homes the reservation with a fresh TTL: it closes
-  the carrier, adopts the orphan onto a new carrier, and the paths are never
-  unreserved. A Mote renew verb is requested.
+  and `fray lane renew` re-homes the reservation with a fresh TTL. It claims
+  a new carrier, then closes the old one and immediately runs `adopt --issue
+  NEW --ttl T RV`, back to back in one client call. The paths are never
+  unreserved, and the reservation is an orphan only for the interval between
+  those two calls [D8]. A Mote renew verb is requested.
+- **Confirm every adopt [D8].** After each adopt, the adapter confirms with
+  `who-has` that the actor holds the reservation. If a third party adopted it
+  in the interval, the adapter raises urgent attention naming the new holder
+  and the paths. The lane shows `lost_to AGENT` and is not reported as held.
 - **Guard.** The git guard checks the staged or pushed paths with one
   `preflight --issue ISSUE --paths …` call per hook invocation, never one
   call per path.
@@ -256,16 +280,28 @@ wrong. Carriers make it possible:
 
 1. Check that the sender holds the work claim (5); refuse otherwise. This
    compensates for Mote's missing holder check.
-2. Post the Fray handoff packet: state, next step, evidence, lanes.
-3. `mote handoff WORK --to RECIPIENT` transfers the work claim.
-4. The sender closes the lane carriers. Their reservations become orphans,
-   which are still live and still blocking.
-5. On the recipient's first `accept`, `mote adopt --issue WORK RV` re-homes
-   each orphan onto the work issue it now holds. The recipient may then move
-   them to its own carriers by the same close-and-adopt step.
+2. Post the Fray handoff packet: state, next step, evidence, lanes, and the
+   carrier and reservation ids.
+3. `mote handoff WORK --to RECIPIENT` transfers the work claim. The carriers
+   stay open, so the reservations are not orphans and cannot be adopted by
+   anyone.
+4. On the recipient's `accept`, one client call does, for each carrier, back
+   to back:
+   - close the sender's carrier (anyone may close an issue);
+   - immediately `mote adopt --issue WORK --ttl T RV`;
+   - confirm the holder with `who-has`.
+
+   A reservation is orphaned only between those two calls, not for the hours
+   before the recipient accepts [D8]. If a third party took it in that
+   interval, both agents get urgent attention naming the holder, and the lane
+   is marked lost, not held.
+5. The recipient may later move the reservations to its own carriers by the
+   renewal step in 7.1.
 
 The paths are never unreserved. Each step is checked before it runs, and
-`fray handoff --resume` continues from the first incomplete step.
+`fray handoff --resume` continues from the first incomplete step. Until
+recipients accept, the sender's open carriers keep the paths reserved in the
+sender's name. The handoff packet says so.
 
 #### 7.3 Review and landing (child 1) [D7]
 
@@ -287,7 +323,8 @@ another project, which the charter reserves for the owner.
 1. `events` cost that is linear in the ops read, not quadratic in the size of
    the store.
 2. A holder check on `handoff`: only the claim holder, or an authorized role,
-   can hand off.
+   can hand off. Likewise on `adopt`: only the orphan's previous holder, or
+   whoever now holds the claim on the orphan's work issue, can adopt it.
 3. Renewal of a live reservation, and transfer of reservations with the
    claim on handoff.
 4. Idempotency keys on reserve, unreserve, claim, release, begin, adopt and
@@ -321,6 +358,9 @@ stores. They cover:
   after Mote accepted;
 - handoff: refused from a non-holder, gap-free in the carrier-and-adopt flow,
   and resumed after an interruption at each step;
+- a third party adopting in the close-and-adopt interval, which is detected
+  and reported as lost, never shown as held;
+- adopt always passes `--ttl`, so the lease is not reset to the default;
 - a verdict from an unnamed reviewer, and one for a mismatched SHA: both
   recorded on the board, neither mirrored, with the reason shown;
 - a keyed review retried after a timeout, replayed byte-identically.
