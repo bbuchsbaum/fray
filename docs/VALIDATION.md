@@ -2,32 +2,47 @@
 
 ## Mote adapter slice 5c-a: claim reconciliation (2026-09-30)
 
-Section 6 reconciliation, for claims. After ingesting events, `fray mote
-sync` compares Mote's live board (`board --json`) with the holders Fray has
-recorded, read through a new `mote_claims` operation.
+Section 6 reconciliation, for claims, as state comparison. After ingesting
+events, `fray mote sync` reads Mote's live board (`board --json`) and every
+holder Fray has recorded (`mote_claims`). It compares the two holder by
+holder, across every entity in either. Each difference is sent with the holder
+Fray had, and the store applies it only if that is still what it records.
+This compare-and-set means a concurrent sync is never overwritten; the next
+sync rechecks any entry that lost the race.
 
-For each mismatch:
+- **Cards say what changed, not who changed it.** The new holder gets "you
+  now hold E", and the previous holder gets "E is now held by X". They share
+  the key `claimstate:E:<holder>:<lease_until>`.
+- **A release or expiry the feed missed is recorded quietly.** Nobody is told
+  anything that might be false.
 
-- The last accepted `claim` in `mote history --json` is the operation behind
-  the current holder: its actor issued it, and the board names the holder.
-- That transition goes through the same `mote_ingest`, at an unchanged cursor.
-  The same state keys and the same once-in-op-order rule apply.
+The first design (`637458b`) rebuilt who moved what from `mote history`.
+Independent review showed that was unsound, and all three objections were
+reproduced against the real `mote`:
 
-A change that the feed skipped, through a late op or a reseed, is therefore
-delivered. A change the feed already delivered is not delivered again.
+- A late op that Mote ordered before one Fray had already seen blocked
+  reconciliation for good, while the sync still reported it as reconciled.
+- A renewal looks like a handoff in history, so a receipt blamed the wrong
+  agent.
+- Reading the board and then history was not atomic, so a handoff in between
+  was lost.
 
-Each sync reconciles at most 50 mismatches and leaves the rest for the next
-one. A concurrent sync that moved the cursor defers reconciliation to that
-sync. Reservation expiry is not reconciled: Mote's live views drop expired
-reservations. Candidates come in a later slice.
+The state comparison removes all three causes: it never consults history or
+op order, and the compare-and-set covers the gap between reading and writing.
+Reconciliation also no longer makes one history call per entity. A daemon that
+lacks the new operation degrades the sync to a note instead of failing it.
 
-Tests (`tests/mote_sync.rs`, 18 in all) run against the real `mote 0.1.0`:
+`tests/mote_sync.rs` has 20 tests. Against the real `mote 0.1.0`, with the
+cursor forced past the events:
 
-- With the cursor forced past the events, a missed handoff reaches bob.
-- A missed third-party takeover reaches alice.
-- Each is delivered exactly once across repeated syncs by different agents.
-- A change that the feed did see is not reconciled a second time.
-- A unit test covers the holder read.
+- a missed handoff followed by a renewal reaches the new holder, without
+  blaming anyone;
+- a missed third-party takeover reaches both agents;
+- an entity alice never held tells her nothing;
+- a missed release stays quiet and causes no false receipt later;
+- repeated syncs deliver nothing twice.
+
+Unit tests cover the compare-and-set race and the full holder listing.
 
 ## Mote adapter slice 5b: Mote events into attention (2026-09-30)
 

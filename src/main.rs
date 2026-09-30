@@ -998,6 +998,16 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             10,
         )
     };
+    let ingest_reconcile = |after: Option<&str>, cursor: &str, reconcile: Vec<Value>| {
+        send(
+            home,
+            actor,
+            "mote_ingest",
+            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":[],"claims":[],"reconcile":reconcile}),
+            None,
+            10,
+        )
+    };
     let moved = |e: &Error| e.code == "mote_cursor_moved";
     // Never move the cursor backwards, even with a skewed clock.
     let tail = |current: Option<&str>| {
@@ -1144,69 +1154,57 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
         }
     }
-    // Reconciliation for claims: the event feed can skip a late op, or a
-    // reseed can jump past events, so Mote's live board is the check. A
-    // mismatch is resolved from the entity's history (the last accepted claim
-    // is the op behind the current holder) and goes through the same ingest,
-    // under the same state keys, so nothing is delivered twice.
+    // Reconciliation for claims (section 6): the event feed can miss a
+    // change (a late op, a reseed, a release or expiry), so Mote's live
+    // board is the check. Every entity on the board or in Fray's record is
+    // compared holder by holder; a difference is sent with the holder Fray had,
+    // and the store applies it only if that is still what it records.
     let mut reconciled = 0;
+    let mut raced = 0;
     let mut reconcile_note = Value::Null;
-    match mote::run(&store, Some(actor), &["board"], mote::read_timeout()) {
-        mote::Outcome::Ok(board) => {
-            let live: Vec<(String, String)> = board["active_claims"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|c| {
-                    Some((
-                        c["id"].as_str()?.to_owned(),
-                        c["claimed_by"].as_str()?.to_owned(),
-                    ))
-                })
-                .take(1000)
-                .collect();
-            let entities: Vec<&str> = live.iter().map(|(e, _)| e.as_str()).collect();
-            let known = send(
-                home,
-                actor,
-                "mote_claims",
-                json!({"store_id":store_id,"entities":entities}),
-                None,
-                10,
-            )?["holders"]
-                .clone();
-            let mut claims = Vec::new();
-            for (entity, holder) in &live {
-                if known[entity.as_str()]["holder"].as_str() == Some(holder.as_str()) {
-                    continue;
+    let marker = tail(Some(&after));
+    let board = mote::run(&store, Some(actor), &["board"], mote::read_timeout());
+    let known = send(
+        home,
+        actor,
+        "mote_claims",
+        json!({"store_id":store_id}),
+        None,
+        10,
+    );
+    match (board, known) {
+        (mote::Outcome::Ok(board), Ok(known)) => {
+            let mut live: std::collections::BTreeMap<String, (String, String)> =
+                std::collections::BTreeMap::new();
+            for c in board["active_claims"].as_array().into_iter().flatten() {
+                if let (Some(id), Some(holder)) = (c["id"].as_str(), c["claimed_by"].as_str()) {
+                    let lease = c["lease_until_ts"].as_str().unwrap_or("").to_owned();
+                    live.insert(id.to_owned(), (holder.to_owned(), lease));
                 }
-                // Bounded per sync; the next sync continues with the rest.
-                if claims.len() >= 50 {
-                    reconcile_note =
-                        json!("more mismatches than one sync reconciles; the next sync continues");
-                    break;
-                }
-                let mote::Outcome::Ok(Value::Array(history)) = mote::run(
-                    &store,
-                    Some(actor),
-                    &["history", entity],
-                    mote::read_timeout(),
-                ) else {
-                    continue;
-                };
-                let Some(last) = history
-                    .iter()
-                    .rev()
-                    .find(|h| h["kind"] == "claim" && h["accepted"] == true)
-                else {
-                    continue;
-                };
-                claims.push(
-                    json!({"entity":entity,"to":holder,"by":last["actor"],"op_id":last["op_id"]}),
+            }
+            let recorded = known["holders"].as_object().cloned().unwrap_or_default();
+            if known["more"] == true {
+                reconcile_note = json!(
+                    "Fray records more than 10,000 claims; only the first 10,000 were compared"
                 );
             }
-            for chunk in claims.chunks(100) {
-                match ingest(Some(&after), &after, vec![], chunk.to_vec()) {
+            let mut entities: std::collections::BTreeSet<&str> =
+                live.keys().map(String::as_str).collect();
+            entities.extend(recorded.keys().map(String::as_str));
+            let mut entries = Vec::new();
+            for entity in entities {
+                let had = recorded.get(entity).and_then(Value::as_str);
+                let (now, lease) = match live.get(entity) {
+                    Some((h, l)) => (Some(h.as_str()), l.as_str()),
+                    None => (None, ""),
+                };
+                if had != now {
+                    entries.push(json!({"entity":entity,"expect":had,"holder":now,
+                        "lease_until":lease,"marker":marker}));
+                }
+            }
+            for chunk in entries.chunks(100) {
+                match ingest_reconcile(Some(&after), &after, chunk.to_vec()) {
                     Ok(r) => {
                         created.extend(r["created"].as_array().cloned().unwrap_or_default());
                         unknown.extend(
@@ -1216,7 +1214,9 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                                 .unwrap_or_default(),
                         );
                         invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
-                        reconciled += chunk.len();
+                        let lost = r["raced"].as_array().map_or(0, Vec::len);
+                        raced += lost;
+                        reconciled += chunk.len() - lost;
                     }
                     Err(e) if moved(&e) => {
                         reconcile_note = json!(
@@ -1224,18 +1224,36 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                         );
                         break;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        reconcile_note = json!(format!(
+                            "claim reconciliation failed: {}: {}",
+                            e.code, e.message
+                        ));
+                        break;
+                    }
                 }
             }
+            if raced > 0 && reconcile_note.is_null() {
+                reconcile_note = json!(format!(
+                    "{raced} claims changed during reconciliation; the next sync rechecks them"
+                ));
+            }
         }
-        other => reconcile_note = json!(format!("claim reconciliation skipped: {other:?}")),
+        (mote::Outcome::Ok(_), Err(e)) => {
+            reconcile_note = json!(format!("claim reconciliation skipped: the daemon cannot list recorded claims ({}); restart it on this build", e.code));
+        }
+        (other, _) => {
+            reconcile_note = json!(format!(
+                "claim reconciliation skipped: mote board {other:?}"
+            ))
+        }
     }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
-        "reconciled_claims":reconciled,"reconcile_note":reconcile_note}}),
+        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note}}),
     )
 }
 
@@ -2556,7 +2574,7 @@ fn human(v: &Value, out: &mut String) {
             }
             if m["reconciled_claims"].as_i64().unwrap_or(0) > 0 {
                 out.push_str(&format!(
-                    "  Reconciled {} claims the event feed had missed\n",
+                    "  Reconciled {} claims with Mote's board\n",
                     m["reconciled_claims"]
                 ));
             }

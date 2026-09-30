@@ -1927,7 +1927,17 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // Mote events become attention exactly once per recipient, and the
             // cursor moves only forward, in the same transaction
             // (docs/design/mote-adapter.md section 6).
-            check_fields(a, &["store_id", "after", "cursor", "items", "claims"])?;
+            check_fields(
+                a,
+                &[
+                    "store_id",
+                    "after",
+                    "cursor",
+                    "items",
+                    "claims",
+                    "reconcile",
+                ],
+            )?;
             let store_id = string(a, "store_id")?;
             let bound = mote_binding(conn)?;
             if bound.is_null() || bound["store_id"] != store_id {
@@ -2026,6 +2036,62 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         "priority":1,"refs":[entity]}));
                 }
             }
+            // Reconciliation against Mote's live board (section 6). The board
+            // is the truth when it was read; each entry applies only if Fray
+            // still records the holder the reader saw (compare-and-set), so a
+            // concurrent sync is never overwritten. History is not consulted:
+            // it cannot tell a handoff from a renewal, and op order can be
+            // overturned by a late op. Cards say what changed, never who did it.
+            let reconcile = match a.get("reconcile") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(v) => v
+                    .as_array()
+                    .filter(|c| c.len() <= 100)
+                    .ok_or_else(|| Error::invalid("reconcile must be an array of at most 100"))?
+                    .clone(),
+            };
+            let mut raced = Vec::new();
+            for r in &reconcile {
+                check_fields(r, &["entity", "expect", "holder", "lease_until", "marker"])?;
+                let entity = string(r, "entity")?;
+                text(entity, "entity", 200, false)?;
+                let marker = string(r, "marker")?;
+                let expect = r["expect"].as_str();
+                let holder = r["holder"].as_str();
+                let stored: Option<Option<String>> = conn
+                    .query_row(
+                        "SELECT holder FROM mote_claims WHERE store_id=? AND entity=?",
+                        params![store_id, entity],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if stored.clone().flatten().as_deref() != expect {
+                    raced.push(entity.to_owned());
+                    continue;
+                }
+                conn.execute(
+                    "INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",
+                    params![store_id, entity, holder, marker],
+                )?;
+                // A release or expiry the feed missed is recorded quietly:
+                // nobody is told anything that might be false.
+                let Some(holder) = holder else { continue };
+                let key = format!(
+                    "claimstate:{entity}:{holder}:{}",
+                    r["lease_until"].as_str().unwrap_or("")
+                );
+                let was = expect.unwrap_or("nobody");
+                items.push(json!({"key":key,"recipient":holder,
+                    "title":format!("Mote: you now hold {entity}"),
+                    "summary":format!("Mote records you as the holder of the claim on {entity}; Fray last saw {was}. Found by reconciliation against Mote's board, so how it changed hands is not known. `mote show {entity}` for the work."),
+                    "priority":1,"refs":[entity]}));
+                if let Some(prev) = expect {
+                    items.push(json!({"key":key,"recipient":prev,
+                        "title":format!("Mote: {entity} is now held by {holder}"),
+                        "summary":format!("Mote now records {holder} as the holder of the claim on {entity}, which Fray last saw you holding. Found by reconciliation, so how it changed hands is not known; if you did not expect it, check with {holder}."),
+                        "priority":1,"refs":[entity]}));
+                }
+            }
             let (mut created, mut duplicate, mut unknown, mut invalid) =
                 (Vec::new(), 0, Vec::new(), Vec::new());
             for item in &items {
@@ -2100,7 +2166,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             unknown.sort();
             unknown.dedup();
             Ok(
-                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"cursor":cursor,"synced_by":actor}),
+                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"raced":raced,"cursor":cursor,"synced_by":actor}),
             )
         }
         "mote_sync_failed" => {
@@ -2532,29 +2598,25 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             Ok(json!({"binding":mote_binding(conn)?}))
         }
         "mote_claims" => {
-            // The last holder Fray has seen for each entity, for reconciliation
+            // Every holder Fray has recorded for a store, for reconciliation
             // against Mote's live board (docs/design/mote-adapter.md section 6).
-            check_fields(a, &["store_id", "entities"])?;
+            check_fields(a, &["store_id"])?;
             let store_id = string(a, "store_id")?;
-            let entities = a["entities"]
-                .as_array()
-                .filter(|e| e.len() <= 1000)
-                .ok_or_else(|| Error::invalid("entities must be an array of at most 1000"))?;
-            let mut holders = serde_json::Map::new();
-            for e in entities {
-                let Some(entity) = e.as_str() else { continue };
-                if let Some((holder, op_id)) = conn
-                    .query_row(
-                        "SELECT holder,op_id FROM mote_claims WHERE store_id=? AND entity=?",
-                        params![store_id, entity],
-                        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
-                    )
-                    .optional()?
-                {
-                    holders.insert(entity.to_owned(), json!({"holder":holder,"op_id":op_id}));
-                }
-            }
-            Ok(json!({"holders":holders}))
+            let mut s = conn.prepare(
+                "SELECT entity,holder FROM mote_claims WHERE store_id=? ORDER BY entity LIMIT 10001",
+            )?;
+            let rows = s
+                .query_map([store_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let more = rows.len() > 10_000;
+            let holders: serde_json::Map<String, Value> = rows
+                .into_iter()
+                .take(10_000)
+                .map(|(e, h)| (e, json!(h)))
+                .collect();
+            Ok(json!({"holders":holders,"more":more}))
         }
         "stats" => {
             check_fields(a, &["window_ms"])?;

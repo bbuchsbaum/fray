@@ -270,12 +270,17 @@ Candidate reviews follow the rule in 7.3.
   Names that fold to it (such as `Mote`) cannot join. Any joined agent can
   call `mote_ingest`: like the rest of Fray, this guards against collision,
   not against a hostile process running as the same OS user.
-- **Claim reconciliation** (implemented in slice 5c-a). Each sync compares
-  `board --json` with `mote_claims`. A mismatch becomes the transition
-  `{to: board holder, by: actor of the last accepted claim in history, op_id:
-  that claim's op}` through the same ingest, bounded to 50 per sync.
-  Reservation expiry is not reconciled, because Mote's live views drop
-  expired reservations.
+- **Claim reconciliation** (implemented in slice 5c-a) is a comparison of
+  state, not a replay of history.
+  - Each sync compares Mote's live board with every holder Fray has recorded,
+    across every entity in either.
+  - Each difference is sent with the holder Fray had, and the store applies
+    it only if that is still what it records (compare-and-set).
+  - The cards say what changed ("you now hold E", "E is now held by X"),
+    keyed `claimstate:E:<holder>:<lease_until>`.
+  - A release or expiry is recorded without cards.
+  - `mote history` is not used. It cannot tell a handoff from a renewal, and
+    a late op can overturn the op order it implies (review of 637458b).
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries
