@@ -1089,7 +1089,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             return match ingest(Some(&cursor), &seed, vec![], vec![]) {
                 Ok(_) => Ok(
                     json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":[],
-                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Claims are reconciled against Mote's board on every sync; reservation events in between are not recovered."}}),
+                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Claims and pending candidates are reconciled against Mote on every sync; reservation expiries and candidates that ended in between are not recovered."}}),
                 ),
                 Err(e) if moved(&e) => Ok(
                     json!({"mote_sync":{"note":"another sync advanced the cursor first","created":[]}}),
@@ -1099,6 +1099,74 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         }
         other => return Err(failed("events", other)),
     };
+    // Candidates that left the pending list during these events (landed,
+    // superseded, abandoned) are reported now, before the cursor moves past
+    // their events: if this ingest loses the race, the sync that won saw the
+    // same events and reports them itself.
+    let mut candidate_notes: Vec<String> = Vec::new();
+    // Candidate reporting needs a daemon that keeps per-recipient state; an
+    // older one (not yet restarted) must never stop claim and reservation sync.
+    let subjects_ok = send(home, actor, "ping", json!({}), None, 10)
+        .map(|p| {
+            p["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|x| x == "mote_subjects"))
+        })
+        .unwrap_or(false);
+    if !subjects_ok {
+        candidate_notes.push(
+            "candidate reporting skipped: the daemon predates it; restart it on this build"
+                .to_owned(),
+        );
+    }
+    let terminal = if subjects_ok {
+        mote::terminal_candidates(&events)
+    } else {
+        Vec::new()
+    };
+    if terminal.len() > 20 {
+        candidate_notes.push(format!(
+            "{} candidates left the pending list; only 20 were reported",
+            terminal.len()
+        ));
+    }
+    let mut terminal_items = Vec::new();
+    let mut unread = Vec::new();
+    for id in terminal.iter().take(20) {
+        match mote::run(
+            &store,
+            Some(actor),
+            &["candidate", "show", id],
+            mote::read_timeout(),
+        ) {
+            mote::Outcome::Ok(c) => terminal_items.extend(mote::candidate_items(&c)),
+            _ => unread.push(id.clone()),
+        }
+    }
+    if !unread.is_empty() {
+        candidate_notes.push(format!(
+            "could not read {} to report how they ended",
+            unread.join(", ")
+        ));
+    }
+    let mut early_created = Vec::new();
+    for chunk in terminal_items.chunks(100) {
+        match ingest(Some(&cursor), &cursor, chunk.to_vec(), vec![]) {
+            Ok(r) => early_created.extend(r["created"].as_array().cloned().unwrap_or_default()),
+            Err(e) if moved(&e) => {
+                return Ok(
+                    json!({"mote_sync":{"note":"another sync advanced the cursor; it reports these events","created":early_created}}),
+                )
+            }
+            Err(e) => {
+                candidate_notes.push(format!(
+                    "ended candidates not reported: {}: {}",
+                    e.code, e.message
+                ));
+                break;
+            }
+        }
+    }
     let newest = events
         .iter()
         .filter_map(|e| e["event_id"].as_str())
@@ -1107,7 +1175,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         .unwrap_or(&cursor)
         .to_owned();
     let (mut created, mut duplicate, mut unknown, mut invalid) =
-        (Vec::new(), 0, Vec::new(), Vec::new());
+        (early_created, 0, Vec::new(), Vec::new());
     let chunks: Vec<&[Value]> = if events.is_empty() {
         vec![&[]]
     } else {
@@ -1163,8 +1231,11 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     let mut raced = 0;
     let mut reconcile_note = Value::Null;
     let board = mote::run(&store, Some(actor), &["board"], mote::read_timeout());
-    // Taken after the board read: an op published during the read then
-    // sorts at or below the marker only if the board already shows it.
+    // Taken after the board read, which closes most of the window in which
+    // one change could be reported twice. An op landing between the read and
+    // this marker sorts below it but is not on the board; the feed then drops
+    // it and the next reconciliation reports the new state (self-healing, as
+    // for a slow clock).
     let marker = tail(Some(&after));
     let known = send(
         home,
@@ -1250,12 +1321,66 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             ))
         }
     }
+    // Candidates (section 6): cards come from each candidate's current
+    // state, so one listing both reports and reconciles; the state keys
+    // dedupe what earlier syncs already delivered.
+    let mut cand_items = Vec::new();
+    let pending = if subjects_ok {
+        mote::run(
+            &store,
+            Some(actor),
+            &["candidate", "list", "--phase", "pending"],
+            mote::read_timeout(),
+        )
+    } else {
+        mote::Outcome::Ok(Value::Array(Vec::new()))
+    };
+    match pending {
+        mote::Outcome::Ok(Value::Array(list)) => {
+            if list.len() > 200 {
+                candidate_notes.push(
+                    "more than 200 pending candidates; only the first 200 were read".to_owned(),
+                );
+            }
+            for c in list.iter().take(200) {
+                cand_items.extend(mote::candidate_items(c));
+            }
+        }
+        other => {
+            candidate_notes.push(format!("candidates skipped: mote candidate list {other:?}"));
+        }
+    }
+    for chunk in cand_items.chunks(100) {
+        match ingest(Some(&after), &after, chunk.to_vec(), vec![]) {
+            Ok(r) => {
+                created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                duplicate += r["duplicate"].as_i64().unwrap_or(0);
+                unknown.extend(
+                    r["unknown_recipients"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
+            }
+            Err(e) if moved(&e) => {
+                candidate_notes
+                    .push("another sync advanced the cursor; candidates deferred to it".to_owned());
+                break;
+            }
+            Err(e) => {
+                candidate_notes.push(format!("candidates failed: {}: {}", e.code, e.message));
+                break;
+            }
+        }
+    }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
-        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note}}),
+        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,
+        "candidate_note":if candidate_notes.is_empty() { Value::Null } else { json!(candidate_notes.join("; ")) }}}),
     )
 }
 
@@ -2581,6 +2706,9 @@ fn human(v: &Value, out: &mut String) {
                 ));
             }
             if let Some(n) = m["reconcile_note"].as_str() {
+                out.push_str(&format!("  {}\n", clean(n)));
+            }
+            if let Some(n) = m["candidate_note"].as_str() {
                 out.push_str(&format!("  {}\n", clean(n)));
             }
             if let Some(u) = m["unknown_recipients"].as_array().filter(|u| !u.is_empty()) {

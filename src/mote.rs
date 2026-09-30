@@ -414,9 +414,10 @@ pub fn parse_lines(stdout: &str) -> std::result::Result<Value, String> {
         .map(Value::Array)
 }
 
-/// The event categories a sync reads (section 6). Candidates join in the
-/// reconciliation slice, where their landability is re-read.
-pub const SYNC_KINDS: &str = "claim,reservation";
+/// The event categories a sync reads (section 6). Candidate events only mark
+/// candidates that left the pending list; their cards come from the
+/// candidate's current state.
+pub const SYNC_KINDS: &str = "claim,reservation,candidate";
 
 /// An op-id-shaped cursor for this instant. `events --after` compares ids as
 /// strings, so seeding here skips history (section 6: start at the tail).
@@ -521,4 +522,207 @@ pub fn claim_transitions(events: &[Value]) -> Vec<Value> {
             }
         })
         .collect()
+}
+
+/// Candidate events after which the candidate leaves the pending list.
+pub fn terminal_candidates(events: &[Value]) -> Vec<String> {
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e["type"].as_str(),
+                Some(
+                    "candidate.landed"
+                        | "candidate.landed_out_of_band"
+                        | "candidate.superseded"
+                        | "candidate.abandoned"
+                )
+            )
+        })
+        .filter_map(|e| e["data"]["candidate_id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// A short stable hash (FNV-1a, 32 bits) for state keys.
+fn short_hash(text: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in text.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08x}")
+}
+
+/// Attention for one candidate, from its current state as `candidate show`
+/// or `candidate list` reports it (section 6).
+///
+/// - Each named reviewer who has not reviewed a pending candidate is asked,
+///   once per policy version.
+/// - The proposer and authorizer hear the candidate's status: landability
+///   and each blocking reason with its subject. Status items carry a
+///   `subject`, and the store sends one whenever the state differs from the
+///   last delivered, so a return to an earlier state is reported too, while
+///   evidence that changes nothing sends nothing (review of 05dfbc2).
+/// - Everyone involved hears when the candidate lands or is superseded
+///   (naming the successor) or abandoned.
+pub fn candidate_items(c: &Value) -> Vec<Value> {
+    let Some(id) = c["candidate_id"].as_str() else {
+        return Vec::new();
+    };
+    let entity = c["entity"].as_str().unwrap_or("");
+    let proposer = c["proposer"].as_str();
+    let authorizer = c["policy"]["authorizer"].as_str();
+    let reviewers: Vec<&str> = c["policy"]["reviewers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let phase = c["phase"]["value"].as_str().unwrap_or("unknown");
+    let phase_op = c["phase"]["op_id"].as_str().unwrap_or("");
+    let policy_op = c["policy"]["op_id"].as_str().unwrap_or("");
+    let landable = c["landability"]["landable"] == true;
+    let reasons_all: Vec<&Value> = c["landability"]["reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["blocking"] == true)
+        .collect();
+    let mut codes: Vec<&str> = reasons_all
+        .iter()
+        .filter_map(|r| r["code"].as_str())
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    // The reported state: landability and each blocking reason with its
+    // subject, so "which reviewer is missing" changing is a change.
+    let mut state: Vec<String> = reasons_all
+        .iter()
+        .map(|r| {
+            format!(
+                "{}@{}",
+                r["code"].as_str().unwrap_or("?"),
+                r["subject"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    state.sort_unstable();
+    let reasons: Vec<String> = reasons_all
+        .iter()
+        .take(5)
+        .map(|r| {
+            let code = r["code"].as_str().unwrap_or("?");
+            let detail = r["detail"].as_str().unwrap_or("");
+            match r["subject"].as_str().filter(|s| !s.is_empty()) {
+                Some(subject) => format!("{code} ({subject}): {detail}"),
+                None => format!("{code}: {detail}"),
+            }
+        })
+        .collect();
+    let reviews: Vec<String> = c["reviews"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(who, r)| format!("{who}: {}", r["verdict"].as_str().unwrap_or("?")))
+        .collect();
+    let commit = c["identity"]["commit_oid"].as_str().unwrap_or("");
+    let short = &commit[..commit.len().min(12)];
+    let context = format!(
+        "Candidate {id} for {entity} (commit {short}, proposed by {}). Reviews: {}. Mote owns landing: `mote candidate show {id}`.",
+        proposer.unwrap_or("?"),
+        if reviews.is_empty() {
+            "none yet".to_owned()
+        } else {
+            reviews.join(", ")
+        }
+    );
+    let status_subject = format!("cand-status:{id}");
+    let mut items = Vec::new();
+    let mut push =
+        |key: String, to: &str, title: String, summary: String, subject: Option<&str>| {
+            let mut item = serde_json::json!({"key": key, "recipient": to, "title": title,
+                "summary": summary, "priority": 1, "refs": [id, entity]});
+            if let Some(subject) = subject {
+                item["subject"] = serde_json::json!(subject);
+            }
+            items.push(item);
+        };
+    if phase == "pending" {
+        for reviewer in &reviewers {
+            if c["reviews"].get(*reviewer).is_none() {
+                push(
+                    format!("cand-review:{id}:{reviewer}:{policy_op}"),
+                    reviewer,
+                    format!("Mote: review requested on {id} ({entity})"),
+                    format!(
+                        "You are a named reviewer. {context} Review with `mote candidate review {id}`."
+                    ),
+                    None,
+                );
+            }
+        }
+        let key = format!(
+            "cand:{id}:{phase_op}:{}",
+            short_hash(&format!("{landable}:{}", state.join(",")))
+        );
+        let (title, summary) = if landable {
+            (
+                format!("Mote: {id} is landable"),
+                format!("{context} Nothing blocks landing."),
+            )
+        } else {
+            (
+                format!("Mote: {id} is blocked ({})", codes.join(", ")),
+                format!("{context} Blocking: {}.", reasons.join("; ")),
+            )
+        };
+        let mut told = Vec::new();
+        for to in [proposer, authorizer].into_iter().flatten() {
+            if !told.contains(&to) {
+                told.push(to);
+                push(
+                    key.clone(),
+                    to,
+                    title.clone(),
+                    summary.clone(),
+                    Some(&status_subject),
+                );
+            }
+        }
+    } else {
+        let key = format!("cand:{id}:{phase_op}:{phase}");
+        let successor = c["supersession"]["successor_id"].as_str();
+        let (title, summary) = match successor {
+            Some(next) => (
+                format!("Mote: {id} is {phase} by {next}"),
+                format!("{context} Superseded by {next}."),
+            ),
+            None => (format!("Mote: {id} is {phase}"), context.clone()),
+        };
+        let mut told = Vec::new();
+        for to in [proposer, authorizer]
+            .into_iter()
+            .flatten()
+            .chain(reviewers.iter().copied())
+        {
+            if !told.contains(&to) {
+                told.push(to);
+                push(
+                    key.clone(),
+                    to,
+                    title.clone(),
+                    summary.clone(),
+                    Some(&status_subject),
+                );
+            }
+        }
+        // Final: a slower sync can never replace it with an older state.
+        for item in &mut items {
+            item["final"] = serde_json::json!(true);
+        }
+    }
+    items
 }

@@ -854,6 +854,173 @@ fn reconciliation_applies_only_if_fray_still_records_what_the_reader_saw() {
     assert_eq!(all["holders"]["bd-1"], "bob");
 }
 
+fn candidate(
+    landable: bool,
+    codes: &[&str],
+    reviews: Value,
+    phase: &str,
+    policy_op: &str,
+) -> Value {
+    json!({"candidate_id":"cand-1","entity":"bd-9","proposer":"bob",
+        "policy":{"authorizer":"alice","reviewers":["carol"],"op_id":policy_op},
+        "phase":{"value":phase,"op_id":"P1"},
+        "reviews":reviews,
+        "identity":{"commit_oid":"0123456789abcdef"},
+        "landability":{"landable":landable,"reason_codes":codes,
+            "reasons":codes.iter().map(|c| json!({"blocking":true,"code":c,"detail":"d"})).collect::<Vec<_>>()}})
+}
+
+fn to_and_keys(items: &[Value]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .map(|i| {
+            (
+                i["recipient"].as_str().unwrap().to_owned(),
+                i["key"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_pending_candidate_asks_unreviewed_reviewers_and_reports_landability() {
+    let c = candidate(false, &["review_missing"], json!({}), "pending", "POL1");
+    let items = mote::candidate_items(&c);
+    let got = to_and_keys(&items);
+    assert_eq!(
+        got[0],
+        ("carol".into(), "cand-review:cand-1:carol:POL1".into())
+    );
+    assert_eq!(got[1].0, "bob");
+    assert_eq!(got[2].0, "alice");
+    assert_eq!(got[1].1, got[2].1, "one status key for everyone told");
+    assert!(items[1]["title"]
+        .as_str()
+        .unwrap()
+        .contains("blocked (review_missing)"));
+    // Once carol reviews, she is not asked again; landability changing
+    // (without a new phase op) gives a new status key.
+    let reviewed = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve","op_id":"R1"}}),
+        "pending",
+        "POL1",
+    );
+    let after = mote::candidate_items(&reviewed);
+    assert!(after.iter().all(|i| i["recipient"] != "carol"));
+    assert_ne!(after[0]["key"], items[1]["key"]);
+    assert!(after[0]["title"].as_str().unwrap().ends_with("is landable"));
+    // Evidence that changes nothing keeps the same status key: no new card.
+    let same = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve","op_id":"R1"}}),
+        "pending",
+        "POL1",
+    );
+    assert_eq!(mote::candidate_items(&same)[0]["key"], after[0]["key"]);
+    // An amended policy asks again.
+    let amended = candidate(false, &["review_missing"], json!({}), "pending", "POL2");
+    assert_eq!(
+        mote::candidate_items(&amended)[0]["key"],
+        "cand-review:cand-1:carol:POL2"
+    );
+}
+
+#[test]
+fn a_candidate_leaving_pending_tells_everyone_involved_once() {
+    let landed = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve","op_id":"R1"}}),
+        "landed",
+        "POL1",
+    );
+    let got = to_and_keys(&mote::candidate_items(&landed));
+    let who: Vec<&str> = got.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(who, vec!["bob", "alice", "carol"]);
+    assert!(got.iter().all(|(_, k)| k == "cand:cand-1:P1:landed"));
+    let events = vec![
+        json!({"type":"candidate.landed","data":{"candidate_id":"cand-1"}}),
+        json!({"type":"candidate.reviewed","data":{"candidate_id":"cand-2"}}),
+        json!({"type":"candidate.landed","data":{"candidate_id":"cand-1"}}),
+    ];
+    assert_eq!(mote::terminal_candidates(&events), vec!["cand-1"]);
+}
+
+#[test]
+fn candidates_reach_their_reviewer_and_proposer_through_the_real_mote() {
+    let Some(p) = Project::new("cand") else {
+        return;
+    };
+    p.fray(&[], "carol", &["join"]);
+    // A candidate needs a commit in the repository that backs the store.
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&p.t.0)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "work"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    let work = p.bead("bob");
+    assert!(p.mote("bob", &["claim", &work]).status.success());
+    p.sync(&[], "alice").unwrap();
+    let out = p.mote(
+        "bob",
+        &[
+            "candidate",
+            "propose",
+            "--issue",
+            &work,
+            "--commit",
+            &head,
+            "--base",
+            &base,
+            "--reviewer",
+            "carol",
+            "--authorizer",
+            "alice",
+            "--idempotency-key",
+            "k1",
+            "--path",
+            "src/",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = p.sync(&[], "alice").unwrap();
+    assert!(s["candidate_note"].is_null(), "{s}");
+    let carol = p.titles("carol");
+    assert!(
+        carol
+            .iter()
+            .any(|t| t.starts_with("Mote: review requested on cand-")),
+        "{carol:?}"
+    );
+    let bob = p.titles("bob");
+    assert!(bob.iter().any(|t| t.contains("is blocked")), "{bob:?}");
+    // A second sync delivers nothing twice.
+    let before = (p.titles("carol").len(), p.titles("bob").len());
+    p.sync(&[], "bob").unwrap();
+    assert_eq!((p.titles("carol").len(), p.titles("bob").len()), before);
+}
+
 #[test]
 fn released_claims_are_not_listed_for_reconciliation() {
     // Review of 1f57c49: released rows counted toward the listing limit and
@@ -871,4 +1038,267 @@ fn released_claims_are_not_listed_for_reconciliation() {
     );
     let r = at(&mut b, "bob", "mote_claims", json!({"store_id":"st-A"})).unwrap();
     assert_eq!(r["holders"], json!({"bd-1":"alice"}));
+}
+
+#[test]
+fn a_candidate_returning_to_an_earlier_state_is_reported_again() {
+    // Review of 05dfbc2: landable -> blocked -> landable within one phase
+    // re-used a delivered key, so bob's newest card said "blocked".
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    ingest(&mut b, Value::Null, "c0", vec![]).unwrap();
+    let reviewed = json!({"carol":{"verdict":"approve","op_id":"R1"}});
+    let states = [
+        candidate(true, &[], reviewed.clone(), "pending", "POL1"),
+        candidate(
+            false,
+            &["authorization_revoked"],
+            reviewed.clone(),
+            "pending",
+            "POL1",
+        ),
+        candidate(true, &[], reviewed.clone(), "pending", "POL1"),
+    ];
+    for c in &states {
+        ingest(&mut b, json!("c0"), "c0", mote::candidate_items(c)).unwrap();
+    }
+    let bob = mote_titles(&mut b, "bob");
+    assert_eq!(
+        bob,
+        vec![
+            "Mote: cand-1 is landable",
+            "Mote: cand-1 is blocked (authorization_revoked)",
+            "Mote: cand-1 is landable"
+        ],
+        "{bob:?}"
+    );
+    // Re-reading the same state (evidence that changes nothing) sends nothing.
+    let r = ingest(&mut b, json!("c0"), "c0", mote::candidate_items(&states[2])).unwrap();
+    assert!(r["created"].as_array().unwrap().is_empty(), "{r}");
+}
+
+#[test]
+fn blocked_reasons_name_their_subject() {
+    let mut c = candidate(false, &["review_missing"], json!({}), "pending", "POL1");
+    c["landability"]["reasons"][0]["subject"] = json!("dave");
+    let items = mote::candidate_items(&c);
+    let status = items.iter().find(|i| i["recipient"] == "bob").unwrap();
+    assert!(
+        status["summary"]
+            .as_str()
+            .unwrap()
+            .contains("review_missing (dave)"),
+        "{status}"
+    );
+    // A different missing reviewer is a different state.
+    let mut other = c.clone();
+    other["landability"]["reasons"][0]["subject"] = json!("erin");
+    let other_status = mote::candidate_items(&other)
+        .into_iter()
+        .find(|i| i["recipient"] == "bob")
+        .unwrap();
+    assert_ne!(status["key"], other_status["key"]);
+}
+
+#[test]
+fn a_candidate_that_is_revoked_and_reauthorized_through_the_real_mote_is_reported_each_time() {
+    let Some(p) = Project::new("cand-aba") else {
+        return;
+    };
+    p.fray(&[], "carol", &["join"]);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&p.t.0)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "work"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    let work = p.bead("bob");
+    assert!(p.mote("bob", &["claim", &work]).status.success());
+    p.sync(&[], "alice").unwrap();
+    let out = p.mote(
+        "bob",
+        &[
+            "--json",
+            "candidate",
+            "propose",
+            "--issue",
+            &work,
+            "--commit",
+            &head,
+            "--base",
+            &base,
+            "--reviewer",
+            "carol",
+            "--authorizer",
+            "alice",
+            "--idempotency-key",
+            "k1",
+            "--path",
+            "src/",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cand = serde_json::from_slice::<Value>(&out.stdout).unwrap()["candidate_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.sync(&[], "alice").unwrap();
+    let last = |p: &Project| p.titles("bob").last().cloned().unwrap_or_default();
+    // Each step changes the candidate's state; bob's newest card must match it.
+    let step = |p: &Project, actor: &str, args: &[&str]| {
+        let out = p.mote(actor, args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        p.sync(&[], "alice").unwrap();
+    };
+    step(
+        &p,
+        "carol",
+        &[
+            "candidate",
+            "review",
+            &cand,
+            "block",
+            "--idempotency-key",
+            "r1",
+        ],
+    );
+    assert!(
+        last(&p).contains("review_blocking"),
+        "{:?}",
+        p.titles("bob")
+    );
+    // A re-review names the reviewer's previous review (compare-and-set).
+    let shown = p.mote("carol", &["--json", "candidate", "show", &cand]);
+    let prior = serde_json::from_slice::<Value>(&shown.stdout).unwrap()["reviews"]["carol"]
+        ["op_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    step(
+        &p,
+        "carol",
+        &[
+            "candidate",
+            "review",
+            &cand,
+            "approve",
+            "--expect",
+            &prior,
+            "--idempotency-key",
+            "r2",
+        ],
+    );
+    assert!(
+        !last(&p).contains("review_blocking"),
+        "{:?}",
+        p.titles("bob")
+    );
+    let blocked_after_approve = last(&p);
+    let auth_op = |p: &Project| {
+        let shown = p.mote("alice", &["--json", "candidate", "show", &cand]);
+        serde_json::from_slice::<Value>(&shown.stdout).unwrap()["authorization"]["op_id"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    step(
+        &p,
+        "alice",
+        &[
+            "candidate",
+            "authorize",
+            &cand,
+            "--grantee",
+            "bob",
+            "--idempotency-key",
+            "a1",
+        ],
+    );
+    let after_authorize = last(&p);
+    assert_ne!(
+        after_authorize,
+        blocked_after_approve,
+        "{:?}",
+        p.titles("bob")
+    );
+    let op = auth_op(&p).expect("authorized");
+    step(
+        &p,
+        "alice",
+        &[
+            "candidate",
+            "revoke",
+            &cand,
+            "--expect",
+            &op,
+            "--idempotency-key",
+            "a2",
+        ],
+    );
+    assert!(
+        last(&p).contains("authorization_revoked"),
+        "{:?}",
+        p.titles("bob")
+    );
+    let op = auth_op(&p).expect("revocation recorded");
+    step(
+        &p,
+        "alice",
+        &[
+            "candidate",
+            "authorize",
+            &cand,
+            "--grantee",
+            "bob",
+            "--expect",
+            &op,
+            "--idempotency-key",
+            "a3",
+        ],
+    );
+    assert_eq!(
+        last(&p),
+        after_authorize,
+        "back to the earlier state is reported again: {:?}",
+        p.titles("bob")
+    );
+}
+
+#[test]
+fn a_final_candidate_state_is_never_replaced_by_an_older_one() {
+    // Review of 12cedd8: a slower sync that listed the candidate as pending
+    // could deliver that state after another delivered "landed".
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    ingest(&mut b, Value::Null, "c0", vec![]).unwrap();
+    let reviewed = json!({"carol":{"verdict":"approve","op_id":"R1"}});
+    let landed = candidate(true, &[], reviewed.clone(), "landed", "POL1");
+    ingest(&mut b, json!("c0"), "c0", mote::candidate_items(&landed)).unwrap();
+    let stale = candidate(true, &[], reviewed, "pending", "POL1");
+    let r = ingest(&mut b, json!("c0"), "c0", mote::candidate_items(&stale)).unwrap();
+    assert!(
+        r["created"].as_array().unwrap().is_empty(),
+        "nothing after a final state: {r}"
+    );
+    assert_eq!(mote_titles(&mut b, "bob"), vec!["Mote: cand-1 is landed"]);
 }

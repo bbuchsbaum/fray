@@ -2097,7 +2097,16 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             for item in &items {
                 check_fields(
                     item,
-                    &["key", "recipient", "title", "summary", "priority", "refs"],
+                    &[
+                        "key",
+                        "recipient",
+                        "title",
+                        "summary",
+                        "priority",
+                        "refs",
+                        "subject",
+                        "final",
+                    ],
                 )?;
                 let key = string(item, "key")?;
                 let recipient = string(item, "recipient")?;
@@ -2113,7 +2122,27 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     unknown.push(recipient.to_owned());
                     continue;
                 }
-                if conn.execute(
+                // A subject item reports current state: it is new when the state
+                // differs from the last one delivered to this recipient. Other
+                // items are new when their key has never been delivered.
+                let subject = item["subject"].as_str();
+                if let Some(subject) = subject {
+                    let last: Option<(String, bool)> = conn
+                        .query_row(
+                            "SELECT state,final FROM mote_subjects WHERE store_id=? AND subject=? AND recipient=?",
+                            params![store_id, subject, recipient],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()?;
+                    // Unchanged, or anything after a final state: nothing to say.
+                    if last
+                        .as_ref()
+                        .is_some_and(|(state, fin)| state == key || *fin)
+                    {
+                        duplicate += 1;
+                        continue;
+                    }
+                } else if conn.execute(
                     "INSERT OR IGNORE INTO mote_events(store_id,key,recipient) VALUES(?,?,?)",
                     params![store_id, key, recipient],
                 )? == 0
@@ -2142,16 +2171,24 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ) {
                     Ok(card) => card,
                     Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
-                        conn.execute(
-                            "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
-                            params![store_id, key, recipient],
-                        )?;
+                        if subject.is_none() {
+                            conn.execute(
+                                "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
+                                params![store_id, key, recipient],
+                            )?;
+                        }
                         invalid.push(json!({"key":key,"recipient":recipient,"error":e.message}));
                         continue;
                     }
                     Err(e) => return Err(e),
                 };
                 let id = card["card"]["id"].as_i64().unwrap_or(0);
+                if let Some(subject) = subject {
+                    conn.execute(
+                        "INSERT INTO mote_subjects(store_id,subject,recipient,state,final) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(store_id,subject,recipient) DO UPDATE SET state=excluded.state,final=excluded.final",
+                        params![store_id, subject, recipient, key, item["final"] == true],
+                    )?;
+                }
                 conn.execute(
                     "UPDATE mote_events SET card_id=? WHERE store_id=? AND key=? AND recipient=?",
                     params![id, store_id, key, recipient],
@@ -2326,7 +2363,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {

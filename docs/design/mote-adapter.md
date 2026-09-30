@@ -286,6 +286,37 @@ Candidate reviews follow the rule in 7.3.
     the resulting state with a generic card, so it heals itself.
   - `mote history` is not used. It cannot tell a handoff from a renewal, and
     a late op can overturn the op order it implies (review of 637458b).
+- **Candidates** (implemented in slice 5c-b). Each sync runs one `candidate
+  list --phase pending`, and cards come from each candidate's current state,
+  so that listing both reports and reconciles.
+  - Each named reviewer who has not reviewed is asked, under
+    `cand-review:<id>:<reviewer>:<policy.op_id>`. An amended policy asks
+    again.
+  - The proposer and the authorizer hear the candidate's status: landability,
+    plus each blocking reason with its subject.
+  - Status is reported as state, not as an event. Items carry a subject
+    (`cand-status:<id>`), and the store keeps the last state it delivered to
+    each recipient (`mote_subjects`). A card goes out whenever the state
+    differs, so landable, then blocked, then landable again is reported each
+    time (review of 05dfbc2). A re-read of an unchanged state, such as
+    evidence that changes nothing, sends nothing.
+  - This replaces the key table's `<latest op>` component for status cards.
+  - When a candidate lands, is superseded (the card names the successor) or
+    is abandoned, everyone involved hears once. The candidate is read with
+    `candidate show` when its `candidate.*` event is seen, and reported before
+    the cursor moves past that event. A sync that loses the cursor race
+    leaves the report to the sync that won.
+  - A terminal transition the feed never saw is not recovered, because the
+    candidate is no longer pending. The same is true after a reseed, beyond
+    20 per sync, and when `candidate show` fails for it; the last two are
+    noted.
+  - A final state (landed, superseded or abandoned) is sticky per recipient:
+    a slower sync that listed the candidate as pending can never replace it.
+  - Candidate reporting needs a daemon with the `mote_subjects` capability.
+    Against an older daemon, not yet restarted, it is skipped with a note, and
+    claim and reservation sync continue.
+  - Role-based review requirements are not routed to people yet.
+  - Review-request cards stay open after the candidate ends.
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries

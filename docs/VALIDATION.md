@@ -1,5 +1,50 @@
 # Validation
 
+## Mote adapter slice 5c-b: candidates (2026-09-30)
+
+`fray mote sync` reads the pending candidates once per sync (`mote
+candidate list --phase pending`). Their cards come from current state, so
+the listing both reports and reconciles.
+
+- Named reviewers who have not reviewed are asked.
+- The proposer and the authorizer hear status: landability, plus each
+  blocking reason with its subject (for example "review_missing (dave)").
+- Status is kept as the last state delivered per recipient, so a return to an
+  earlier state is reported again.
+- Candidates that land, are superseded (the card names the successor) or are
+  abandoned are reported to everyone involved. That happens before the cursor
+  moves past their events, and any truncation or failed read is noted.
+
+Independent review of `05dfbc2` found a blocking case, reproduced against the
+real `mote`: after a revoke and a re-authorization, the landable state reused
+a key already delivered, so bob's newest card still said "blocked". That is
+fixed by the last-state rule. The review also led to:
+
+- reason subjects shown in summaries and counted in the state;
+- terminal reports made safe against losing the cursor race;
+- the notes.
+
+Re-review of `12cedd8` verified that fix under about 400 concurrent syncs,
+with no card that disagreed with the live state. It found that a client
+talking to a daemon not yet restarted stopped all sync once a candidate
+ended. Candidate reporting is now gated on the daemon's `mote_subjects`
+capability, and when it is missing it is skipped with a note, while claims and
+reservations continue. Final states are also sticky per recipient, and notes
+accumulate instead of overwriting one another.
+
+`tests/mote_sync.rs` has 28 tests:
+
+- The unit tests cover:
+  - review requests and re-asking after a policy amendment;
+  - a return to an earlier state being reported again, while an unchanged
+    state sends nothing;
+  - subjects in reasons;
+  - terminal phases.
+- Against the real `mote 0.1.0`, in a git repository: a proposal (carol is
+  asked, bob is told it is blocked), then carol blocks and re-approves, and
+  alice authorizes, revokes and re-authorizes. Bob's newest card matches the
+  candidate's live state at every step.
+
 ## Mote adapter slice 5c-a: claim reconciliation (2026-09-30)
 
 Section 6 reconciliation, for claims, as state comparison. After ingesting

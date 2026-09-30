@@ -209,4 +209,18 @@ CREATE TABLE IF NOT EXISTS mote_claims(
     op_id TEXT NOT NULL,
     PRIMARY KEY(store_id, entity)
 );
+-- For attention that reports a subject's current state (a candidate's
+-- landability): the last state delivered per recipient. A card goes out
+-- whenever the state differs from the last one delivered, so a return to an
+-- earlier state is reported too (review of 05dfbc2).
+CREATE TABLE IF NOT EXISTS mote_subjects(
+    store_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    state TEXT NOT NULL,
+    -- A final state (a candidate landed, superseded or abandoned) is sticky:
+    -- a slower sync can never replace it with an older pending state.
+    final INTEGER NOT NULL DEFAULT 0 CHECK(final IN (0,1)),
+    PRIMARY KEY(store_id, subject, recipient)
+);
 PRAGMA user_version = 3;
