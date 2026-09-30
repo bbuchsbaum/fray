@@ -851,24 +851,34 @@ fn repo_relative(top: &Path, prefix: &str, typed: &str) -> Result<String> {
     }
 }
 
-/// Declared lanes plus observed edits in every other worktree of this repo.
 /// `fray mote status` (docs/design/mote-adapter.md sections 1-3).
 fn mote_status(home: &Path, actor: &str) -> Result<Value> {
     use fray::mote;
     let cwd = std::env::current_dir()?;
     let Some(path) = mote::locate(home, &cwd)? else {
         return Ok(json!({"mote":{"adopted":false,
-            "note":"No Mote store for this board; Fray works as without Mote."}}));
+            "note":"No Mote store is paired with this board. Fray works as without Mote; set MOTE_STORE to pair one."}}));
     };
-    let version = mote::version()?;
     let store_id = mote::store_id(&path)?;
     let store = mote::Store {
         path: path.clone(),
         store_id: store_id.clone(),
     };
     let mut warnings = Vec::new();
-    let binding = if actor.is_empty() {
-        // Without an identity nothing is written; the binding is only compared.
+    // Only a joined agent binds; without one (or as the owner, who never acts
+    // in Mote through the adapter) the binding is only compared.
+    let writer = !actor.is_empty() && actor != fray::store::OWNER;
+    let binding = if writer {
+        send(
+            home,
+            actor,
+            "mote_bind",
+            json!({"store":path.display().to_string(),"store_id":store_id}),
+            None,
+            10,
+        )?["binding"]
+            .clone()
+    } else {
         let bound = send(home, actor, "mote_binding", json!({}), None, 10)?["binding"].clone();
         if !bound.is_null() && bound["store_id"] != store_id.as_str() {
             return Err(Error::new(
@@ -881,50 +891,59 @@ fn mote_status(home: &Path, actor: &str) -> Result<Value> {
                 ),
             ));
         }
+        if bound.is_null() {
+            warnings.push(
+                "Not bound yet: the first joined agent to run this binds the board.".to_owned(),
+            );
+        }
         warnings.push(
-            "No Fray identity: the store is not bound and Mote writes are refused.".to_owned(),
+            "No agent identity: Mote reads and writes through the adapter need --as NAME."
+                .to_owned(),
         );
         bound
-    } else {
-        send(
-            home,
-            actor,
-            "mote_bind",
-            json!({"store":path.display().to_string(),"store_id":store_id}),
-            None,
-            10,
-        )?["binding"]
-            .clone()
     };
-    if let Some(env_actor) = std::env::var("MOTE_ACTOR").ok().filter(|a| !a.is_empty()) {
-        if env_actor != actor {
+    if writer {
+        if let Some(env_actor) = std::env::var("MOTE_ACTOR")
+            .ok()
+            .filter(|a| !a.is_empty() && a != actor)
+        {
             warnings.push(format!(
                 "MOTE_ACTOR is {env_actor} but your Fray identity is {actor}: manual mote commands would act as a second actor whose reservations conflict with yours."
             ));
         }
     }
-    // One real read through the adapter's transport.
-    let reads = match mote::run(
-        &store,
-        (!actor.is_empty()).then_some(actor),
-        &["board"],
-        mote::READ_TIMEOUT,
-    ) {
-        mote::Outcome::Ok(board) => json!({"ok":true,
-            "active_claims":board["active_claims"].as_array().map_or(0, Vec::len)}),
-        other => {
-            let why = format!("{other:?}");
+    // A missing or unsupported Mote degrades to advisory; it is reported, not fatal.
+    let version = match mote::version() {
+        Ok(v) => Some(v),
+        Err(e) => {
             warnings.push(format!(
-                "Mote unavailable ({why}); lanes stay advisory only."
+                "{}: {}; lanes stay advisory only.",
+                e.code, e.message
             ));
-            json!({"ok":false,"error":why})
+            None
         }
+    };
+    // One real read through the adapter's transport, as this agent.
+    let reads = match (&version, writer) {
+        (Some(_), true) => match mote::run(&store, Some(actor), &["board"], mote::READ_TIMEOUT) {
+            mote::Outcome::Ok(board) => json!({"ok":true,
+                "active_claims":board["active_claims"].as_array().map_or(0, Vec::len)}),
+            other => {
+                let why = format!("{other:?}");
+                warnings.push(format!(
+                    "Mote unavailable ({why}); lanes stay advisory only."
+                ));
+                json!({"ok":false,"error":why})
+            }
+        },
+        _ => json!({"ok":false,"skipped":true}),
     };
     Ok(
         json!({"mote":{"adopted":true,"store":path.display().to_string(),"store_id":store_id,
         "version":version,"actor":actor,"binding":binding,"reads":reads,"warnings":warnings}}),
     )
 }
+/// Declared lanes plus observed edits in every other worktree of this repo.
 fn preflight(home: &Path, actor: &str, typed: Vec<String>, staged: bool) -> Result<Value> {
     let here = std::env::current_dir()?;
     let Some(top) = git_lines(&here, &["rev-parse", "--show-toplevel"])
@@ -2220,7 +2239,7 @@ fn human(v: &Value, out: &mut String) {
         } else {
             out.push_str(&format!(
                 "Mote: {} ({})\n  store {}\n  bound {}\n  reads {}\n",
-                clean(m["version"].as_str().unwrap_or("")),
+                clean(m["version"].as_str().unwrap_or("mote unavailable")),
                 clean(m["store_id"].as_str().unwrap_or("")),
                 clean(m["store"].as_str().unwrap_or("")),
                 if m["binding"].is_null() {
@@ -2230,6 +2249,8 @@ fn human(v: &Value, out: &mut String) {
                 },
                 if m["reads"]["ok"] == true {
                     format!("ok, {} active claims", m["reads"]["active_claims"])
+                } else if m["reads"]["skipped"] == true {
+                    "not attempted".to_owned()
                 } else {
                     "failing".to_owned()
                 }

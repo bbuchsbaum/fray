@@ -205,17 +205,19 @@ Fray carries the attention around them (`docs/design/mote-adapter.md`).
 fray mote status     # which store, whether Mote is reachable, the binding
 ```
 
-`status` finds the store with the rules the board itself uses:
+`status` pairs the board with a store only through the rules that chose the
+board:
 
 - a sibling `.mote/` of an ancestor `.fray/`;
-- otherwise `.mote/` in the main worktree;
-- `MOTE_STORE` for bare repositories and submodules.
+- `.mote/` in the main worktree for the repository's own board;
+- `MOTE_STORE` for anything else, including bare repositories, submodules and
+  boards named with an explicit `--home`.
 
 On first use it binds the board to that store's id. From then on a different
 store at the same path is refused, never followed. Fray runs `mote` itself,
 always passing an explicit `--store`, `--json` and `--actor`. It never runs
-`mote` from the daemon. If Mote is unreachable, reads degrade to advisory with
-a warning.
+`mote` from the daemon. If Mote is missing, unsupported or unreachable, that
+is reported and reads degrade to advisory.
 
 ### Is collaboration working?
 

@@ -1890,7 +1890,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     return Err(Error::new(
                         "mote_store_mismatch",
                         format!(
-                            "this board is bound to Mote store {} at {}; {store} is {store_id}. Set MOTE_STORE to the bound store, or rebind deliberately",
+                            "this board is bound to Mote store {} at {}; {store} is {store_id}. Set MOTE_STORE to the bound store. There is no rebind; a different store needs a different board",
                             bound["store_id"].as_str().unwrap_or(""),
                             bound["store"].as_str().unwrap_or("")
                         ),
@@ -1902,7 +1902,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 "INSERT INTO meta(key,value) VALUES('mote_store',?1),('mote_store_id',?2)",
                 params![store, store_id],
             )?;
-            Ok(json!({"binding":{"store":store,"store_id":store_id,"bound_by":actor},"new":true}))
+            Ok(json!({"binding":{"store":store,"store_id":store_id},"new":true}))
         }
         "set_status" => {
             // One current status line per agent, updated in place; empty clears.
@@ -2669,11 +2669,6 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
         || a.starts_with(&format!("{b}/"))
 }
 
-/// Whether an agent is still present, meaning reachable: a live session or
-/// recent write, an armed (connected) listener or running drive loop, which
-/// will hear a lane notice, or a recent presentation of receipts (inbox, wait,
-/// thread or hook). Polling an empty inbox is not recorded; arm a wait or set
-/// a status instead.
 /// The Mote store this board is bound to, or null.
 fn mote_binding(conn: &Connection) -> Result<Value> {
     let get = |key: &str| -> Result<Option<String>> {
@@ -2686,6 +2681,11 @@ fn mote_binding(conn: &Connection) -> Result<Value> {
         _ => Value::Null,
     })
 }
+/// Whether an agent is still present, meaning reachable: a live session or
+/// recent write, an armed (connected) listener or running drive loop, which
+/// will hear a lane notice, or a recent presentation of receipts (inbox, wait,
+/// thread or hook). Polling an empty inbox is not recorded; arm a wait or set
+/// a status instead.
 pub(crate) fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
     let last = last_active(conn, agent)?;
     let active = last.is_some_and(|t| now - t < IDENTITY_TTL_MS);

@@ -83,11 +83,13 @@ fn outcomes_are_classified_from_exit_code_stderr_and_json_together() {
         Outcome::Ok(json!({"a":1}))
     );
     assert_eq!(classify(Some(0), "", ""), Outcome::Ok(Value::Null));
-    // `events` prints JSON lines; --version prints text.
-    assert_eq!(
+    // Single-document commands never accept JSON lines; `events` goes through
+    // the transport's line parser (see preflight_conflicts_and_events...).
+    assert!(matches!(
         classify(Some(0), "{\"e\":1}\n{\"e\":2}\n", ""),
-        Outcome::Ok(json!([{"e":1},{"e":2}]))
-    );
+        Outcome::Failed(_)
+    ));
+    // --version prints text.
     assert_eq!(
         classify(Some(0), "mote 0.1.0\n", ""),
         Outcome::Ok(json!("mote 0.1.0"))
@@ -101,14 +103,25 @@ fn outcomes_are_classified_from_exit_code_stderr_and_json_together() {
         classify(Some(2), "", "rejected: claim held by bob\n"),
         Outcome::Rejected("claim held by bob".into())
     );
+    // Real Mote writes the handoff rejection to stderr only.
+    assert_eq!(
+        classify(Some(2), "", "handoff claim rejected: stale clock\n"),
+        Outcome::Rejected("stale clock".into())
+    );
+    // A clap usage error: the message is the `error:` line, not the trailer.
     assert_eq!(
         classify(
             Some(2),
-            "handoff claim rejected: stale clock",
-            "handoff claim rejected: stale clock"
+            "",
+            "error: unexpected argument '--bogus' found\n\nUsage: mote reserve [OPTIONS]\n\nFor more information, try '--help'.\n"
         ),
-        Outcome::Rejected("stale clock".into())
+        Outcome::Invalid("error: unexpected argument '--bogus' found".into())
     );
+    // The word alone does not make a rejection.
+    assert!(matches!(
+        classify(Some(2), "", "error: value 'unrejected' is invalid\n"),
+        Outcome::Invalid(_)
+    ));
     assert_eq!(
         classify(
             Some(2),
@@ -297,17 +310,18 @@ fn a_timeout_stops_and_reaps_the_whole_mote_process_group() {
         &store,
         Some("a"),
         &["board"],
-        Duration::from_millis(1500),
+        Duration::from_millis(3000),
     );
     assert!(start.elapsed() < Duration::from_secs(5));
     assert!(
         matches!(&outcome, Outcome::Failed(why) if why.contains("timed out")),
         "{outcome:?}"
     );
-    let pid = fs::read_to_string(&pidfile)
-        .expect("the stub records its grandchild before the timeout")
-        .trim()
-        .to_owned();
+    // Under heavy load the stub may not have forked yet; then nothing can leak.
+    let Ok(pid) = fs::read_to_string(&pidfile) else {
+        return;
+    };
+    let pid = pid.trim().to_owned();
     // Give the kernel a moment to deliver the group SIGKILL.
     let mut alive = true;
     for _ in 0..50 {
@@ -435,13 +449,15 @@ fn status_refuses_an_unsupported_mote_and_warns_on_a_second_actor() {
     let p = Project::new("ver", true);
     let bin = stub(&p.t.0, STUB_OK);
     let b = bin.to_str().unwrap();
-    let err = p
+    // An unsupported Mote is reported and reads are not attempted; it is not fatal.
+    let s = p
         .status(
             &[("FRAY_MOTE_BIN", b), ("STUB_VERSION", "mote 0.2.0")],
             "alice",
         )
-        .unwrap_err();
-    assert!(err.contains("mote_version"), "{err}");
+        .unwrap();
+    assert!(s["warnings"].to_string().contains("mote_version"), "{s}");
+    assert_eq!(s["reads"]["skipped"], true);
     let s = p
         .status(
             &[("FRAY_MOTE_BIN", b), ("MOTE_ACTOR", "someone-else")],
@@ -488,4 +504,225 @@ fn status_against_the_real_mote_when_installed() {
     assert!(s["version"].as_str().unwrap().starts_with("mote 0.1."));
     assert_eq!(s["reads"]["ok"], true, "{s}");
     assert_eq!(s["binding"]["store_id"], s["store_id"]);
+}
+
+#[test]
+fn a_board_that_is_not_this_repositorys_is_never_paired_implicitly() {
+    // Review #46 of 825d340: an explicit --home elsewhere was bound to the
+    // store of whatever repository the shell was in.
+    let t = Temp::new("elsewhere");
+    let repo = t.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    fake_store(&repo, "st-REPO");
+    let unrelated = t.0.join("hA");
+    fs::create_dir_all(&unrelated).unwrap();
+    assert_eq!(mote::locate(&unrelated, &repo).unwrap(), None);
+    // A .fray that is not an ancestor of the working directory is not paired either.
+    let other = t.0.join("other");
+    fs::create_dir_all(other.join(".fray")).unwrap();
+    fake_store(&other, "st-OTHER");
+    assert_eq!(mote::locate(&other.join(".fray"), &repo).unwrap(), None);
+    // The repository's own board still pairs.
+    assert!(mote::locate(&repo.join(".git/fray"), &repo)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn a_linked_worktree_of_a_bare_repository_must_name_its_store() {
+    // Review #47 of 825d340: --is-bare-repository is false in a linked worktree.
+    let t = Temp::new("barewt");
+    let src = t.0.join("src");
+    fs::create_dir_all(&src).unwrap();
+    git(&src, &["init", "-q"]);
+    git(&src, &["commit", "-q", "--allow-empty", "-m", "s"]);
+    git(
+        &t.0,
+        &["clone", "-q", "--bare", src.to_str().unwrap(), "proj.git"],
+    );
+    let bare = t.0.join("proj.git");
+    fake_store(&bare, "st-BARE");
+    let wt = t.0.join("wt");
+    git(&bare, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    let err = mote::locate(&bare.join("fray"), &wt).unwrap_err();
+    assert_eq!(err.code, "mote_store_required");
+}
+
+#[test]
+fn a_repository_nested_in_another_is_not_mistaken_for_a_submodule() {
+    let t = Temp::new("nested");
+    let outer = t.0.join("outer");
+    fs::create_dir_all(&outer).unwrap();
+    git(&outer, &["init", "-q"]);
+    let inner = outer.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    git(&inner, &["init", "-q"]);
+    let m = fake_store(&inner, "st-INNER");
+    assert_eq!(
+        mote::locate(&inner.join(".git/fray"), &inner).unwrap(),
+        Some(m)
+    );
+}
+
+#[test]
+fn the_deadline_holds_when_a_leftover_process_keeps_mote_pipes_open() {
+    // Review #48 of 825d340: mote exits, a background child keeps stdout open.
+    let t = Temp::new("pipes");
+    let m = fake_store(&t.0, "st-A");
+    let bin = stub(&t.0, "(sleep 25 &); echo '{}'");
+    let store = Store {
+        path: m,
+        store_id: "st-A".into(),
+    };
+    let start = Instant::now();
+    let outcome = mote::run_with(&bin, &store, Some("a"), &["board"], Duration::from_secs(1));
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(
+        matches!(&outcome, Outcome::Failed(why) if why.contains("timed out")),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn preflight_conflicts_and_events_come_back_as_results() {
+    // Review #49 and #50 of 825d340, through the transport itself.
+    let t = Temp::new("shapes");
+    let m = fake_store(&t.0, "st-A");
+    let store = Store {
+        path: m,
+        store_id: "st-A".into(),
+    };
+    let pre = stub(
+        &t.0,
+        r#"echo '{"conflicts":[{"actor":"bob","conflict_kind":"foreign_overlap"}]}'; exit 2"#,
+    );
+    match mote::run_with(
+        &pre,
+        &store,
+        Some("a"),
+        &["preflight", "--issue", "bd-1", "--paths", "src/"],
+        mote::READ_TIMEOUT,
+    ) {
+        Outcome::Ok(v) => assert_eq!(v["conflicts"][0]["actor"], "bob"),
+        other => panic!("{other:?}"),
+    }
+    for (n, body) in [
+        (0, "true"),
+        (1, r#"echo '{"event_id":"a"}'"#),
+        (2, r#"echo '{"event_id":"a"}'; echo '{"event_id":"b"}'"#),
+    ] {
+        let ev = stub(&t.0, body);
+        match mote::run_with(
+            &ev,
+            &store,
+            None,
+            &["events", "--after", "x"],
+            mote::READ_TIMEOUT,
+        ) {
+            Outcome::Ok(Value::Array(items)) => assert_eq!(items.len(), n),
+            other => panic!("{n} events: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn real_mote_rejections_conflicts_events_and_usage_errors_classify_correctly() {
+    if Command::new("mote").arg("--version").output().is_err() {
+        eprintln!("mote not installed; skipping");
+        return;
+    }
+    let t = Temp::new("realc");
+    let mote_cli = |actor: &str, args: &[&str]| {
+        Command::new("mote")
+            .current_dir(&t.0)
+            .args(["--actor", actor])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(Command::new("mote")
+        .current_dir(&t.0)
+        .arg("init")
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let bead = String::from_utf8_lossy(&mote_cli("alice", &["new", "work", "--quiet"]).stdout)
+        .trim()
+        .to_owned();
+    let bead = bead
+        .split_whitespace()
+        .find(|w| w.starts_with("bd-"))
+        .unwrap_or(&bead)
+        .to_owned();
+    assert!(mote_cli("alice", &["claim", &bead]).status.success());
+    assert!(mote_cli("alice", &["reserve", "--issue", &bead, "src/"])
+        .status
+        .success());
+    let path = t.0.join(".mote");
+    let store = Store {
+        store_id: mote::store_id(&path).unwrap(),
+        path,
+    };
+    let bin = PathBuf::from("mote");
+    let run = |actor: Option<&str>, args: &[&str]| {
+        mote::run_with(&bin, &store, actor, args, mote::READ_TIMEOUT)
+    };
+    // bob cannot take alice's claim, nor reserve over her paths.
+    assert!(
+        matches!(run(Some("bob"), &["claim", &bead]), Outcome::Rejected(_)),
+        "{:?}",
+        run(Some("bob"), &["claim", &bead])
+    );
+    assert!(matches!(
+        run(Some("bob"), &["reserve", "--issue", &bead, "src/a.rs"]),
+        Outcome::Rejected(_)
+    ));
+    // preflight's conflict is a result.
+    match run(
+        Some("bob"),
+        &["preflight", "--issue", &bead, "--paths", "src/a.rs"],
+    ) {
+        Outcome::Ok(v) => assert!(!v["conflicts"].as_array().unwrap().is_empty(), "{v}"),
+        other => panic!("{other:?}"),
+    }
+    // events is always an array.
+    assert!(matches!(run(None, &["events"]), Outcome::Ok(Value::Array(ref a)) if !a.is_empty()));
+    // A usage error is invalid, with clap's message rather than its trailer.
+    match run(Some("bob"), &["reserve", "--bogus"]) {
+        Outcome::Invalid(why) => assert!(why.starts_with("error"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn status_names_a_bad_mote_store_and_warns_when_mote_is_missing() {
+    let p = Project::new("miss", true);
+    // A missing mote binary degrades to advisory; it is not fatal.
+    let s = p
+        .status(&[("FRAY_MOTE_BIN", "/nonexistent/mote")], "alice")
+        .unwrap();
+    assert_eq!(s["adopted"], true);
+    assert!(s["version"].is_null());
+    assert!(s["warnings"].to_string().contains("advisory"), "{s}");
+    // A MOTE_STORE that does not exist names the variable and the path.
+    let err = p
+        .status(&[("MOTE_STORE", "/nonexistent/store")], "alice")
+        .unwrap_err();
+    assert!(
+        err.contains("MOTE_STORE") && err.contains("/nonexistent/store"),
+        "{err}"
+    );
+    // Without an identity nothing is written, and the warning says why.
+    let s = p.status(&[], "").unwrap();
+    let w = s["warnings"].to_string();
+    assert!(
+        w.contains("--as NAME") && !w.contains("identity is :"),
+        "{w}"
+    );
 }

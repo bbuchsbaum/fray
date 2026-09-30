@@ -13,6 +13,7 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -77,41 +78,80 @@ fn mote_dir(path: &Path) -> PathBuf {
     }
 }
 
-/// Where this board's Mote store is (section 2), or None when Mote is not
-/// adopted. Uses the same resolution that chose the board: an ancestor
-/// `.fray/` pairs with its sibling `.mote/`; a `<git-common-dir>/fray` board
-/// pairs with `.mote/` in the main worktree. Bare repositories and submodules
-/// must name the store with `MOTE_STORE`.
+/// Where this board's Mote store is (section 2), or None when this board is
+/// not paired with one. Pairing follows the resolution that chose the board,
+/// and only that:
+///
+/// - `MOTE_STORE`, if set, names the store for any board;
+/// - a board `<root>/.fray` that is an ancestor of the working directory pairs
+///   with `<root>/.mote`;
+/// - the board this directory's own repository selects (`<git-common-dir>/fray`)
+///   pairs with `.mote/` in that repository's main worktree.
+///
+/// Any other board (an explicit `--home` or `FRAY_HOME` elsewhere) is never
+/// paired implicitly with whatever repository the shell is in. Bare
+/// repositories and submodules must name their store with `MOTE_STORE`.
 pub fn locate(board: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
-    if let Some(explicit) = env::var_os("MOTE_STORE").filter(|v| !v.is_empty()) {
-        let explicit = PathBuf::from(explicit);
-        let explicit = if explicit.is_absolute() {
-            explicit
+    if let Some(raw) = env::var_os("MOTE_STORE").filter(|v| !v.is_empty()) {
+        let given = PathBuf::from(&raw);
+        let dir = mote_dir(&if given.is_absolute() {
+            given
         } else {
-            cwd.join(explicit)
+            cwd.join(given)
+        });
+        let named = |why: &str| {
+            Error::new(
+                "mote_store",
+                format!(
+                    "MOTE_STORE={} ({}): {why}",
+                    raw.to_string_lossy(),
+                    dir.display()
+                ),
+            )
         };
-        return Ok(Some(mote_dir(&explicit)));
-    }
-    let candidate = if board.file_name().is_some_and(|n| n == ".fray") {
-        board.parent().map(|root| root.join(".mote"))
-    } else {
-        if git(cwd, &["rev-parse", "--is-bare-repository"]).as_deref() == Some("true")
-            || git(cwd, &["rev-parse", "--show-superproject-working-tree"])
-                .is_some_and(|s| !s.is_empty())
-        {
-            return Err(Error::new(
-                "mote_store_required",
-                "a bare repository or submodule must name its Mote store with MOTE_STORE",
-            ));
+        let dir = fs::canonicalize(&dir).map_err(|e| named(&e.to_string()))?;
+        if !dir.join("FORMAT.json").is_file() {
+            return Err(named("not a Mote store (no FORMAT.json)"));
         }
-        git(cwd, &["worktree", "list", "--porcelain"]).and_then(|list| {
-            list.lines()
-                .next()
-                .and_then(|l| l.strip_prefix("worktree "))
-                .map(|main| Path::new(main).join(".mote"))
-        })
+        return Ok(Some(dir));
+    }
+    let canonical = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (board, cwd) = (canonical(board), canonical(cwd));
+    let store = |root: &Path| Some(root.join(".mote")).filter(|p| p.join("FORMAT.json").is_file());
+    if board.file_name().is_some_and(|n| n == ".fray") {
+        if let Some(root) = board.parent().filter(|root| cwd.starts_with(root)) {
+            return Ok(store(root));
+        }
+    }
+    if crate::client::git_home(&cwd).map(|b| canonical(&b)) != Some(board) {
+        return Ok(None);
+    }
+    let Some(list) = git(&cwd, &["worktree", "list", "--porcelain"]) else {
+        return Ok(None);
     };
-    Ok(candidate.filter(|p| p.join("FORMAT.json").is_file()))
+    // The first entry is the main worktree, or the bare repository itself;
+    // this holds from any linked worktree, unlike --is-bare-repository.
+    let main: Vec<&str> = list.lines().take_while(|l| !l.is_empty()).collect();
+    let common = git(
+        &cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let submodule = common.as_deref().is_some_and(|dir| {
+        let parts: Vec<_> = Path::new(dir).components().collect();
+        parts
+            .windows(2)
+            .any(|w| w[0].as_os_str() == ".git" && w[1].as_os_str() == "modules")
+    });
+    if main.contains(&"bare") || submodule {
+        return Err(Error::new(
+            "mote_store_required",
+            "a bare repository or submodule must name its Mote store with MOTE_STORE",
+        ));
+    }
+    Ok(main
+        .iter()
+        .find_map(|l| l.strip_prefix("worktree "))
+        .and_then(|root| store(Path::new(root))))
 }
 
 /// The store id from `FORMAT.json`: the one file Fray reads directly.
@@ -201,37 +241,63 @@ fn run_raw(
     };
     let pgid = child.id();
     // Drain both pipes on threads so a chatty Mote cannot block on a full pipe.
-    let drain = |mut pipe: Box<dyn Read + Send>| {
+    // A background process Mote left behind can hold them open after Mote
+    // exits, so collecting them is bounded by the same deadline.
+    let (tx, rx) = mpsc::channel();
+    for (index, pipe) in [
+        (
+            0,
+            Box::new(child.stdout.take().expect("piped stdout")) as Box<dyn Read + Send>,
+        ),
+        (1, Box::new(child.stderr.take().expect("piped stderr"))),
+    ] {
+        let tx = tx.clone();
+        let mut pipe = pipe;
         thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = pipe.read_to_end(&mut buf);
-            buf
-        })
+            let _ = tx.send((index, buf));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + timeout;
+    let timed_out = |child: &mut std::process::Child| {
+        // Stop and reap the whole group before anyone re-reads (section 1).
+        kill_group(pgid);
+        let _ = child.wait();
+        Outcome::Failed(format!(
+            "mote {} timed out after {:?}",
+            args.first().unwrap_or(&""),
+            timeout
+        ))
     };
-    let stdout = drain(Box::new(child.stdout.take().expect("piped stdout")));
-    let stderr = drain(Box::new(child.stderr.take().expect("piped stderr")));
-    let start = Instant::now();
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if start.elapsed() >= timeout => break None,
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => return timed_out(&mut child),
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(e) => return Outcome::Failed(format!("waiting for mote: {e}")),
         }
     };
-    let Some(status) = status else {
-        // Stop and reap the whole group before anyone re-reads (section 1).
-        kill_group(pgid);
-        let _ = child.wait();
-        return Outcome::Failed(format!(
-            "mote {} timed out after {:?}",
-            args.first().unwrap_or(&""),
-            timeout
-        ));
-    };
-    let out = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
-    let err = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
-    classify(status.code(), &out, &err)
+    let mut pipes = [Vec::new(), Vec::new()];
+    for _ in 0..2 {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((index, buf)) => pipes[index] = buf,
+            Err(_) => return timed_out(&mut child),
+        }
+    }
+    let out = String::from_utf8_lossy(&pipes[0]).into_owned();
+    let err = String::from_utf8_lossy(&pipes[1]).into_owned();
+    match args.first().copied() {
+        // `events` prints JSON lines: always an array, `[]` when empty.
+        Some("events") if status.code() == Some(0) => match parse_lines(&out) {
+            Ok(v) => Outcome::Ok(v),
+            Err(e) => Outcome::Failed(format!("unparseable mote events: {e}")),
+        },
+        // `preflight` reports conflicts with exit 2: that is its result.
+        Some("preflight") => classify_result(status.code(), &out, &err),
+        _ => classify(status.code(), &out, &err),
+    }
 }
 
 fn kill_group(pgid: u32) {
@@ -248,20 +314,32 @@ fn kill_group(pgid: u32) {
         .status();
 }
 
-/// Section 4. Exit 2 is shared by reducer rejections and usage errors; only
-/// `rejected` in stderr, or `accepted:false` in JSON, makes it a rejection.
-/// Commands whose exit 2 is a result (`preflight`) use [`classify_result`].
+/// Section 4. Exit 2 is shared by reducer rejections and usage errors; only a
+/// `rejected:` line in stderr, or `accepted:false` in JSON, makes it a
+/// rejection. The transport uses [`classify_result`] for `preflight`, whose
+/// exit 2 is a result.
 pub fn classify(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
     let parsed = parse(stdout);
-    let reason = || {
-        let line = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    // Clap ends a usage error with "For more information, try '--help'";
+    // the message is the `error:` line.
+    let message = || {
+        lines
+            .iter()
+            .find(|l| l.starts_with("error"))
+            .or(lines.first())
+            .copied()
             .unwrap_or("")
-            .trim();
-        line.to_owned()
+            .to_owned()
     };
+    let rejection = lines.iter().find_map(|l| {
+        l.strip_prefix("rejected:")
+            .or_else(|| l.split_once(" rejected: ").map(|(_, why)| why))
+    });
     match code {
         Some(0) => match parsed {
             Ok(v) => Outcome::Ok(v),
@@ -275,20 +353,13 @@ pub fn classify(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
                     );
                 }
             }
-            if stderr.contains("rejected") {
-                let r = reason();
-                Outcome::Rejected(
-                    r.split_once("rejected:")
-                        .map_or(r.as_str(), |(_, why)| why)
-                        .trim()
-                        .to_owned(),
-                )
-            } else {
-                Outcome::Invalid(reason())
+            match rejection {
+                Some(why) => Outcome::Rejected(why.trim().to_owned()),
+                None => Outcome::Invalid(message()),
             }
         }
-        Some(3) => Outcome::Invalid(reason()),
-        Some(code) => Outcome::Failed(format!("mote exited {code}: {}", reason())),
+        Some(3) => Outcome::Invalid(message()),
+        Some(code) => Outcome::Failed(format!("mote exited {code}: {}", message())),
         None => Outcome::Failed("mote was killed by a signal".into()),
     }
 }
@@ -306,24 +377,26 @@ pub fn classify_result(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome
     classify(code, stdout, stderr)
 }
 
-/// Mote prints one JSON document, several JSON lines (`events`), plain text
-/// (`--version`), or nothing (commands without JSON output).
+/// One JSON document, plain text (`--version`), or nothing (commands without
+/// JSON output print nothing on success).
 fn parse(stdout: &str) -> std::result::Result<Value, String> {
     let text = stdout.trim();
     if text.is_empty() {
         return Ok(Value::Null);
     }
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
-        return Ok(v);
-    }
-    let lines: std::result::Result<Vec<Value>, _> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(serde_json::from_str)
-        .collect();
-    match lines {
-        Ok(lines) => Ok(Value::Array(lines)),
+    match serde_json::from_str::<Value>(text) {
+        Ok(v) => Ok(v),
         Err(_) if !text.starts_with(['{', '[']) => Ok(Value::String(text.to_owned())),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// JSON lines (`events`): always an array, whatever the count.
+pub fn parse_lines(stdout: &str) -> std::result::Result<Value, String> {
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).map_err(|e| e.to_string()))
+        .collect::<std::result::Result<Vec<Value>, _>>()
+        .map(Value::Array)
 }

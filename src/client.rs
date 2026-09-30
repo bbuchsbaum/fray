@@ -31,7 +31,7 @@ pub fn home(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
     Ok(cwd.join(".fray"))
 }
-fn git_home(directory: &Path) -> Option<PathBuf> {
+pub(crate) fn git_home(directory: &Path) -> Option<PathBuf> {
     // All Git worktrees use the common directory, not their private .git file.
     let out = Command::new("git")
         .current_dir(directory)
