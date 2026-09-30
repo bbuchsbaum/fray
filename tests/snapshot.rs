@@ -4,14 +4,21 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
+        // Nanoseconds alone collide on macOS, whose clock ticks in
+        // microseconds, when parallel tests start together: add the process
+        // and a per-process counter.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let p = std::env::temp_dir().join(format!(
-            "fray-snapshot-test-{}",
+            "fray-snapshot-test-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
