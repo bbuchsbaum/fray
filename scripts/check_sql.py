@@ -28,7 +28,8 @@ def extract(prefix):
 
 # Compile every actual static SQL literal used in the Rust implementation.
 statements = []
-for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', source):
+sql_source = source + '\n' + '\n'.join((ROOT / path).read_text() for path in ['src/presence.rs', 'src/review.rs'])
+for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', sql_source):
     value = json.loads('"' + match.group(1).replace('\n', '\\n') + '"')
     if not re.match(r'^(SELECT|INSERT|UPDATE|DELETE)\b', value) or re.search(r'\{[A-Za-z_][^{}]*\}', value) or value.rstrip().endswith('='):
         continue

@@ -120,6 +120,43 @@ class Integration(unittest.TestCase):
         self.assertEqual(overridden['payload']['detail']['open_objections'], [follow_up])
         handoff = self.cli('manager', 'send', 'deepseek', 'Please verify the linked objection.', '--ask', '--ref', 'mote:parser-42')
         self.assertEqual(self.cli('deepseek', 'query', '--ref', 'mote:parser-42')['items'][0]['id'], handoff['card']['id'])
+    def test_pairing_reply_ack_warning_and_thread_revision(self):
+        sent = self.cli('alice', 'send', 'bob', 'Review the first candidate')
+        id_ = str(sent['card']['id'])
+        read = self.cli('bob', 'thread', id_, '--unread')
+        newer = self.cli('alice', 'reply', id_, 'The candidate changed')
+        result = subprocess.run(
+            [str(BINARY), '--home', self.home, '--as', 'bob', 'reply', id_,
+             'Answer to the first candidate', '--ack-batch', read['batch']],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('Warning: Reply posted', result.stdout)
+        self.assertIn('Acknowledged #', result.stdout)
+        remaining = self.cli('bob', 'inbox')
+        self.assertEqual(remaining['items'][0]['through_seq'], newer['event_seq'])
+        self.assertEqual(remaining['items'][0]['ack_seq'], sent['event_seq'])
+        for view in ['--unread', '--bodies']:
+            result = subprocess.run(
+                [str(BINARY), '--home', self.home, '--as', 'bob', 'thread', id_, view],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.startswith(f'#{id_} r1 '), result.stdout)
+        read = self.cli('bob', 'thread', id_, '--unread')
+        result = self.cli('bob', 'reply', id_, 'Now reviewed the change', '--ack-batch', read['batch'])
+        self.assertNotIn('reply_warning', result)
+        self.assertEqual(self.cli('bob', 'inbox')['total'], 0)
+
+    def test_pairing_help_and_pending_roster_cleanup(self):
+        for command in ['join', 'enter']:
+            result = subprocess.run([str(BINARY), command, '--help'],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('worker, steward, reviewer', result.stdout)
+        sent = self.cli('alice', 'send', 'typo', 'Never mind', '--pending')
+        self.cli('alice', 'patch', str(sent['card']['id']), '--expect', '1', '--status', 'withdrawn')
+        self.assertNotIn('typo', [a['name'] for a in self.cli('alice', 'agents')['items']])
+        self.assertIn('typo', [a['name'] for a in self.cli('alice', 'agents', '--all')['items']])
+
     def test_reply_refs_survive_restart_and_are_searchable(self):
         sent = self.cli('alice', 'send', 'bob', 'Review', '--ref', 'mote:original')
         id_ = str(sent['card']['id'])
@@ -606,5 +643,85 @@ for item in call('inbox',{})['items']:
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertLessEqual(len(r.stdout.rstrip(b'\n')),2000)
         self.assertTrue(json.loads(r.stdout)['budget_truncated'])
+
+    def test_peer_only_hook_notice_and_stop_nonblocking(self):
+        session='test:peer-hooks'
+        self.cli('bob','--session',session,'peers')
+        self.call('join','late-codex',{'role':'reviewer'})
+        env={**os.environ,'FRAY_HOME':self.home,'FRAY_AGENT':'bob'}
+        env.pop('FRAY_DRIVE',None)
+        def hook(event):
+            r=subprocess.run([str(BINARY),'--session',session,'hook'],
+                input=json.dumps({'hook_event_name':event}),text=True,capture_output=True,env=env,timeout=10)
+            self.assertEqual(r.returncode,0,r.stderr)
+            return json.loads(r.stdout)
+        self.assertEqual(hook('Stop'),{},'roster news alone must not block stopping')
+        first=hook('PostToolUse')['hookSpecificOutput']['additionalContext']
+        data=json.loads(first.split('\n',1)[1])
+        self.assertEqual([p['name'] for p in data['new_peers']['peers']],['late-codex'])
+        self.assertEqual(data['attention']['total'],0)
+        self.assertEqual(hook('PostToolUse'),{})
+        self.call('leave','late-codex');self.call('join','late-codex')
+        self.assertIn('late-codex',hook('PostToolUseFailure')['hookSpecificOutput']['additionalContext'])
+
+    def test_peer_hints_respect_brief_budget_and_failed_output_does_not_consume(self):
+        session='test:peer-budget'
+        self.cli('bob','--session',session,'peers')
+        for i in range(12):
+            self.call('join',f'late-{i:02}-'+('x'*60))
+            self.post(f'budget task {i}',summary='🧠'*300)
+        r=subprocess.run([str(BINARY),'--home',self.home,'--as','bob','--session',session,'--json','brief','--budget','2000'],capture_output=True,timeout=10)
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertLessEqual(len(r.stdout.rstrip(b'\n')),2000)
+        shown={p['name'] for p in json.loads(r.stdout).get('new_peers',{}).get('peers',[])}
+        remaining=self.cli('bob','--session',session,'peers')
+        self.assertTrue(remaining['peers'])
+        self.assertTrue(shown.isdisjoint(p['name'] for p in remaining['peers']))
+        # Closed output cannot consume a newly presented page.
+        reader,writer=os.pipe();os.close(reader)
+        try:
+            failed=subprocess.run([str(BINARY),'--home',self.home,'--as','bob','--session',session,'--json','peers'],stdout=writer,stderr=subprocess.PIPE,timeout=10)
+        finally:
+            os.close(writer)
+        self.assertNotEqual(failed.returncode,0)
+        self.assertTrue(self.cli('bob','--session',session,'peers')['peers'])
+
+    def test_enter_keeps_roster_available_to_child_session_start(self):
+        child=pathlib.Path(self.home)/'peer_child.py'
+        child.write_text('''import json, os, subprocess
+r=subprocess.run([os.environ['TEST_FRAY_BINARY'],'hook'],input=json.dumps({'hook_event_name':'SessionStart'}),text=True,capture_output=True,check=True)
+print(r.stdout,end='')
+''')
+        env={**os.environ,'TEST_FRAY_BINARY':str(BINARY)}
+        env.pop('FRAY_DRIVE',None)
+        r=subprocess.run([str(BINARY),'--home',self.home,'--as','new-reader','--session','test:enter-peers','enter','--',sys.executable,str(child)],env=env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(r.returncode,0,r.stderr)
+        context=json.loads(r.stdout)['hookSpecificOutput']['additionalContext']
+        data=json.loads(context.split('\n',1)[1])
+        self.assertEqual({p['name'] for p in data['new_peers']['peers']},{'alice','bob'})
+
+    def test_snapshot_cli_and_review_candidate_round_trip(self):
+        root=pathlib.Path(self.home)/'fixture-repo';root.mkdir()
+        def git(*args):
+            subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True)
+        git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid')
+        (root/'source.txt').write_text('base');git('add','.');git('commit','-qm','base')
+        first=self.cli('alice','snapshot','create','--root',str(root),'--paths','source.txt')
+        (root/'source.txt').write_text('candidate')
+        second=self.cli('alice','snapshot','create','--root',str(root),'--paths','source.txt')
+        self.assertNotEqual(first['manifest'],second['manifest'])
+        self.assertEqual(self.cli('bob','snapshot','verify',second['manifest'])['manifest'],second['manifest'])
+        request=self.cli('alice','review','request','--to','bob','--baseline',first['manifest'],'--candidate',second['manifest'],'--title','Source review','Check bytes','--ref','mote:source-1')
+        card=str(request['card']['id'])
+        approved=self.cli('bob','review','verdict',card,'approve','--at',second['manifest'],'--expect','1','Verified bundled source')
+        self.assertEqual(approved['card']['status'],'open')
+        self.cli('alice','review','subject',card,'--expect','1','--at',first['manifest'])
+        self.server.kill();self.server.wait();self.launch()
+        text=subprocess.run([str(BINARY),'--home',self.home,'--as','bob','thread',card,'--bodies'],text=True,capture_output=True,timeout=10)
+        self.assertEqual(text.returncode,0,text.stderr)
+        self.assertIn('[STALE]',text.stdout);self.assertIn('s2',text.stdout)
+        self.assertIn(second['manifest'],text.stdout);self.assertIn(first['manifest'],text.stdout)
+        # Snapshot capture is local; no hidden conversation was created for it.
+        self.assertEqual(self.call('query')['total'],1)
 
 if __name__=='__main__': unittest.main(verbosity=2)

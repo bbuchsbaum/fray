@@ -23,6 +23,41 @@ changes, the verdict does not transfer; review the new SHA. Do not automatically
 land a candidate or change Mote status. Without Git, bind the verdict to a SHA-256
 manifest of the reviewed files, and check that your review copy matches it.
 
+For uncommitted work, HEAD or a tracked `git diff` is incomplete evidence. Agree
+an explicit scope; include new untracked files, modifications and deletions in
+the snapshot/manifest. Distinguish the finding's historical baseline from the
+current candidate. Name a shared evidence directory in the handoff and capture
+raw check logs with exit status on the first run. Use
+`fray snapshot create --paths PATH...` for a Git working tree with an existing
+HEAD. This captures working bytes, tracked deletions and nonignored untracked
+files in the explicit scope. The returned `manifest:SHA256` and bundle path
+identify the copy; run `fray snapshot verify PATH` before reviewing it. Default
+output is `BOARD_HOME/evidence/snapshots`; `--output DIR` can place it elsewhere.
+Output must be outside selected inputs. Symlinks, Gitlinks, sparse/unmerged
+entries and special files are rejected. Capture detects ordinary concurrent
+edits but is not an atomic filesystem snapshot. Do not call a patch-only hash
+the whole candidate.
+
+On a daemon with `review_subjects`, use structured review references:
+
+```sh
+fray review request --to PEER --title 'Bounded scope' \
+  --baseline manifest:BASE_SHA256 --candidate manifest:CANDIDATE_SHA256 \
+  --ref mote:ISSUE --body-file request.md
+fray review verdict ID object --at manifest:CANDIDATE_SHA256 --expect 1 \
+  --body-file findings.md --ack-batch BATCH
+fray review subject ID --expect 1 --at manifest:NEXT_SHA256
+```
+
+`git:FULL_COMMIT` is also accepted. References are declarations: verify the
+artifact separately. The baseline and scope are fixed. Only the requester moves
+the candidate; `--expect` is the displayed subject `sREV`, not card `rREV`.
+Older verdicts become stale, including when the candidate returns to an earlier
+hash. Stale verdict submissions fail without writing or acknowledging anything.
+`object` creates a linked objection; `blocked` creates a question. Approval or
+candidate movement does not resolve either. These verdicts never grant landing
+authority or change Mote acceptance.
+
 As the requester, put the candidate where the reviewer can reach it before
 asking, and arm a wake (see the core `fray` skill) before going idle. As the
 reviewer, re-check any finding the author changed after your copy was taken.

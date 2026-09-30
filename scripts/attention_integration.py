@@ -377,6 +377,38 @@ class Attention(unittest.TestCase):
         self.assertEqual(thread['history'][0]['payload']['detail']['body'],body)
         self.assertEqual(self.call('inbox','bob')['total'],1)
 
+    def test_notification_previews_latest_reply_instead_of_opening_title(self):
+        sent = self.send('Opening hello', ask=True)
+        reply = self.call('annotate', 'alice', {
+            'id': sent['card']['id'], 'kind': 'evidence',
+            'body': '\nThe regression now passes\nRaw log: fixture.log',
+        })
+        with self.watch('--notification', '--once') as (_, lines):
+            notice = lines.get(timeout=3)
+            self.assertEqual(notice['titles'][0]['title'], 'Opening hello')
+            self.assertEqual(notice['titles'][0]['preview']['kind'], 'evidence')
+            self.assertEqual(notice['titles'][0]['preview']['body'], 'The regression now passes')
+            self.assertEqual(notice['titles'][0]['preview']['seq'], reply['event_seq'])
+        batch = self.cli('bob', 'batch', notice['batch'])
+        self.assertEqual(batch['items'][0]['receipt']['through_seq'], reply['event_seq'])
+        self.assertFalse(batch['items'][0]['handled'])
+
+    def test_review_candidate_and_stale_verdict_survive_bounded_wake(self):
+        a='manifest:'+('a'*64);b='manifest:'+('b'*64);c='manifest:'+('c'*64)
+        review=self.call('review_request','alice',{'to':'bob','title':'Source review','body':'Verify source',
+            'baseline':a,'candidate':b})
+        card=review['card']['id']
+        self.call('annotate','bob',{'id':card,'kind':'evidence','body':'Checked B',
+            'review_verdict':{'verdict':'approve','at':b,'expect':1}})
+        changed=self.call('review_subject','alice',{'id':card,'at':c,'expect':1})
+        with self.watch('--once','--budget','2000') as (_,lines):
+            packet=lines.get(timeout=3)
+            self.assertLessEqual(len(json.dumps(packet,separators=(',',':'),ensure_ascii=False).encode())+1,2000)
+            subject=packet['items'][0]['card']['review']
+            self.assertEqual((subject['baseline'],subject['candidate'],subject['subject_rev']),(a,c,2))
+            self.assertTrue(subject['latest_verdict']['stale'])
+            self.assertEqual(packet['items'][0]['receipt']['through_seq'],changed['event_seq'])
+
     def test_doctor_is_read_only_and_distinguishes_manual_and_expired_activation(self):
         def snapshot():
             with contextlib.closing(sqlite3.connect(str(pathlib.Path(self.home)/'state.db'))) as db:

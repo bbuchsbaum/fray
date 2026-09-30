@@ -40,6 +40,8 @@ sleep 5; kill -s 0 -- "-$1" 2>/dev/null && kill -s KILL -- "-$1" 2>/dev/null; ex
 pub struct Options {
     #[arg(long, default_value_t = 12)]
     max_turns: usize,
+    /// Exit after this many idle seconds without selected attention (0: do not wait).
+    /// Does not limit a running child; use --child-timeout for that.
     #[arg(long, default_value_t = 300)]
     idle_timeout: u64,
     #[arg(long, default_value_t = 100)]
