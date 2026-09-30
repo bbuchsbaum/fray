@@ -277,8 +277,8 @@ fn holders(home: &Path, actor: &str, paths: &[String]) -> std::result::Result<Ve
     }
 }
 
-/// `fray guard pre-commit` and `fray guard pre-push`: exit status 1 only when
-/// blocking is on and another holder was found. Everything else, including
+/// `fray guard pre-commit` and `fray guard pre-push`: exit status `REFUSED`
+/// only when blocking is on and another holder was found. Everything else, including
 /// an unreachable Fray or Mote, is a warning and exit 0.
 pub fn check(home: &Path, actor: &str, stage: &str) -> Result<(Value, bool)> {
     let here = std::env::current_dir()?;
@@ -291,6 +291,7 @@ pub fn check(home: &Path, actor: &str, stage: &str) -> Result<(Value, bool)> {
             false,
         ));
     };
+    let mut not_checked: Vec<String> = Vec::new();
     let paths = if stage == "pre-push" {
         let mut input = Vec::new();
         std::io::stdin().read_to_end(&mut input)?;
@@ -299,6 +300,7 @@ pub fn check(home: &Path, actor: &str, stage: &str) -> Result<(Value, bool)> {
                 for note in &unchecked {
                     eprintln!("fray guard: {note}");
                 }
+                not_checked = unchecked;
                 paths
             }
             Err(why) => {
@@ -310,7 +312,11 @@ pub fn check(home: &Path, actor: &str, stage: &str) -> Result<(Value, bool)> {
         staged_paths(&top)
     };
     if paths.is_empty() {
-        return Ok((json!({"guard":{"paths":[],"conflicts":[]}}), false));
+        return Ok((
+            json!({"guard":{"paths":[],"conflicts":[],
+                "unchecked":(!not_checked.is_empty()).then_some(&not_checked)}}),
+            false,
+        ));
     }
     // Without FRAY_AGENT, the Mote actor, if set, is who "you" are.
     let me = if actor.is_empty() {
@@ -377,7 +383,8 @@ pub fn check(home: &Path, actor: &str, stage: &str) -> Result<(Value, bool)> {
             // quiet, and anyone may release it.
             let refuse = block && conflicts.iter().any(|c| c["stale"] != true);
             Ok((
-                json!({"guard":{"paths":paths,"conflicts":conflicts,"blocked":refuse}}),
+                json!({"guard":{"paths":paths,"conflicts":conflicts,"blocked":refuse,
+                    "unchecked":(!not_checked.is_empty()).then_some(&not_checked)}}),
                 refuse,
             ))
         }

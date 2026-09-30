@@ -265,7 +265,7 @@ impl Run<'_> {
             {
                 self.detail_ok.set(false);
                 eprintln!(
-                    "fray drive: this daemon predates controller detail, so a crashed run's owned process group is not recorded: the orphan check before a restart cannot see it, and `fray agents` shows no child for this run. Each turn's child is still printed on stderr. Restart the daemon on this build to restore both; the run continues without them."
+                    "fray drive: this daemon predates controller detail, so a crashed run's owned process group is not recorded: the orphan check before a restart cannot see it, and `fray agents` shows no child for this run. Each turn's child is still printed on stderr when the turn ends. Restart the daemon on this build to restore both; the run continues without them."
                 );
                 if let Some(args) = args.as_object_mut() {
                     args.remove("detail");
