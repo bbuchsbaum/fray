@@ -189,6 +189,13 @@ CREATE TABLE IF NOT EXISTS agent_waits(
     session TEXT,
     refreshed_ms INTEGER NOT NULL
 );
+-- The subset of waits with no card, kind, priority, addressed or unresolved
+-- filter: they wake for anything assigned (reachability "wakeable",
+-- docs/design/no-silent-stalls.md R1). Additive, so older boards gain it.
+CREATE TABLE IF NOT EXISTS wake_waits(
+    agent TEXT PRIMARY KEY,
+    refreshed_ms INTEGER NOT NULL
+);
 -- Mote events already turned into attention, once per recipient
 -- (docs/design/mote-adapter.md section 6). Additive: a board without Mote
 -- never writes here.

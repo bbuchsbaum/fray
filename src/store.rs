@@ -287,11 +287,35 @@ impl Store {
     /// A wait in progress: the agent is reachable (it will hear what
     /// arrives), which is not the same as active. It never touches the
     /// activity timestamps, so the WAIT_HOLD_MS window cannot renew itself.
-    pub fn touch(&self, actor: &str, session: Option<&str>, now: i64) -> Result<()> {
+    /// An `unfiltered` wait (no card, kind, priority, addressed or
+    /// unresolved filter) will wake for anything assigned to the agent, so it
+    /// also makes the agent wakeable (see `reachability`).
+    pub fn touch(
+        &self,
+        actor: &str,
+        session: Option<&str>,
+        unfiltered: bool,
+        now: i64,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO agent_waits(agent,session,refreshed_ms) SELECT name,?2,?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET session=excluded.session,refreshed_ms=excluded.refreshed_ms",
             params![actor, session, now],
         )?;
+        if unfiltered {
+            self.conn.execute(
+                "INSERT INTO wake_waits(agent,refreshed_ms) SELECT name,?2 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
+                params![actor, now],
+            )?;
+        } else {
+            self.conn
+                .execute("DELETE FROM wake_waits WHERE agent=?", [actor])?;
+        }
+        Ok(())
+    }
+    /// The wait has returned: it no longer makes the agent wakeable.
+    pub fn wait_returned(&self, actor: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM wake_waits WHERE agent=?", [actor])?;
         Ok(())
     }
     pub fn identity(&self) -> Result<String> {
@@ -826,6 +850,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )?;
             if req.op == "leave" {
                 conn.execute("DELETE FROM agent_waits WHERE agent=?", [actor])?;
+                conn.execute("DELETE FROM wake_waits WHERE agent=?", [actor])?;
                 conn.execute("UPDATE controllers SET state='stopped',updated_ms=?,reason='left' WHERE agent=?", params![now,actor])?;
                 conn.execute("UPDATE listeners SET connected=0 WHERE agent=?", [actor])?;
             }
@@ -963,6 +988,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 json!({"body":body}),
                 now,
             )?;
+            if target != OWNER && target != actor {
+                result["reachability"] = json!(reachability(conn, target, now)?.as_str());
+            }
             if let Some(notice) = absence_notice(conn, target, actor, now)? {
                 result["notice"] = json!(notice);
             }
@@ -1255,14 +1283,28 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     .flatten()
                     .filter(|who| who != actor)
                     .collect();
-                // Prefer a party who is present; if none is, keep the first
-                // and say so, rather than leave the question with nobody.
-                let mut target = None;
+                // Prefer a party who can be woken, then one who is present;
+                // if none is either, keep the first and say so, rather than
+                // leave the question with nobody.
+                let mut reach = Vec::new();
                 for who in &candidates {
-                    if who == OWNER || agent_reachable(conn, who, now)? {
-                        target = Some(who.clone());
-                        break;
-                    }
+                    reach.push(if who == OWNER {
+                        Reach::Wakeable
+                    } else {
+                        reachability(conn, who, now)?
+                    });
+                }
+                let pick = |want: Reach| {
+                    candidates
+                        .iter()
+                        .zip(&reach)
+                        .find(|(_, r)| **r == want)
+                        .map(|(who, _)| who.clone())
+                };
+                let mut target = pick(Reach::Wakeable);
+                if target.is_none() {
+                    target = pick(Reach::Present);
+                    routed_absent.clone_from(&target);
                 }
                 let target = match target {
                     Some(who) => who,
@@ -3069,19 +3111,61 @@ pub(crate) fn agent_waiting(conn: &Connection, agent: &str, now: i64) -> Result<
     )?)
 }
 
-/// Whether a message to the agent will be heard soon: active, or waiting
-/// (however long it has been idle). Used for routing, not for lanes.
-fn agent_reachable(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
-    Ok(
-        last_active(conn, agent)?.is_some_and(|t| now - t < IDENTITY_TTL_MS)
-            || agent_waiting(conn, agent, now)?,
-    )
+/// Whether a card assigned to the agent will reach it, and when.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reach {
+    /// Something armed will wake it: a live drive controller, an armed
+    /// listener under the strict `idle_readiness` test, or an unfiltered
+    /// `fray wait` in progress.
+    Wakeable,
+    /// Recently active, but nothing armed: it sees new mail only at its next
+    /// turn, if it has one.
+    Present,
+    /// Neither.
+    Absent,
+}
+impl Reach {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Reach::Wakeable => "wakeable",
+            Reach::Present => "present",
+            Reach::Absent => "absent",
+        }
+    }
 }
 
-/// A note for a sender when the recipient is not present, naming who is.
-/// None when the recipient is present, is the owner, or is the sender.
+/// The one reachability test (docs/design/no-silent-stalls.md, R1), used for
+/// routing, send notices and friction. Not for lanes, which ask whether the
+/// holder is still working (`agent_live`).
+pub(crate) fn reachability(conn: &Connection, agent: &str, now: i64) -> Result<Reach> {
+    if wake_state(conn, agent, now)?.2 {
+        return Ok(Reach::Wakeable);
+    }
+    let waiting_unfiltered: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wake_waits w JOIN agents a ON a.name=w.agent WHERE w.agent=?1 AND a.enabled=1 AND w.refreshed_ms>?2)",
+        params![agent, now - WAIT_FRESH_MS],
+        |r| r.get(0),
+    )?;
+    if waiting_unfiltered {
+        return Ok(Reach::Wakeable);
+    }
+    if last_active(conn, agent)?.is_some_and(|t| now - t < IDENTITY_TTL_MS)
+        || agent_waiting(conn, agent, now)?
+    {
+        return Ok(Reach::Present);
+    }
+    Ok(Reach::Absent)
+}
+
+/// A note for a sender when nothing will wake the recipient, naming who can
+/// be woken. None when the recipient is wakeable, is the owner, or is the
+/// sender.
 fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result<Option<String>> {
-    if who == OWNER || who == actor || agent_reachable(conn, who, now)? {
+    if who == OWNER || who == actor {
+        return Ok(None);
+    }
+    let reach = reachability(conn, who, now)?;
+    if reach == Reach::Wakeable {
         return Ok(None);
     }
     let seen: i64 = conn
@@ -3098,9 +3182,14 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
         .unwrap_or(false);
     let when = if !enabled && seen <= 0 {
         "has not joined yet; it will see this when it joins".to_owned()
+    } else if reach == Reach::Present {
+        format!(
+            "is present (last active {} min ago) but has nothing armed to wake it; it will see this at its next turn, if it has one",
+            (now - seen).max(0) / 60_000
+        )
     } else {
         format!(
-            "was last active {} min ago and is not waiting; it will see this when it next reads",
+            "was last active {} min ago and has nothing armed; it will see this when it next reads",
             (now - seen).max(0) / 60_000
         )
     };
@@ -3109,16 +3198,28 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
     let names = s
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut present = Vec::new();
+    let (mut wakeable, mut present) = (Vec::new(), Vec::new());
     for name in names {
-        if name != who && name != actor && name != OWNER && agent_reachable(conn, &name, now)? {
-            present.push(name);
+        if name == who || name == actor || name == OWNER {
+            continue;
+        }
+        match reachability(conn, &name, now)? {
+            Reach::Wakeable => wakeable.push(name),
+            Reach::Present => present.push(name),
+            Reach::Absent => {}
         }
     }
-    let present = if present.is_empty() {
+    let mut others = Vec::new();
+    if !wakeable.is_empty() {
+        others.push(format!("wakeable now: {}", wakeable.join(", ")));
+    }
+    if !present.is_empty() {
+        others.push(format!("present, nothing armed: {}", present.join(", ")));
+    }
+    let present = if others.is_empty() {
         "nobody else is present".to_owned()
     } else {
-        format!("present now: {}", present.join(", "))
+        others.join("; ")
     };
     Ok(Some(format!("{who} {when} ({present}).")))
 }
@@ -3684,7 +3785,10 @@ fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
     }
     Ok(json!({"items":items,"more":more}))
 }
-fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
+/// The strict "armed" test: `(enabled, listening, armed)`. A live drive
+/// controller, or a live, unexpired, unfiltered listener whose host wake
+/// mechanism is declared (managed, native-monitor or background-completion).
+fn wake_state(conn: &Connection, actor: &str, now: i64) -> Result<(bool, Value, bool)> {
     let enabled: bool = conn
         .query_row("SELECT enabled FROM agents WHERE name=?", [actor], |r| {
             r.get(0)
@@ -3718,6 +3822,11 @@ fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
             Some("managed" | "native-monitor" | "background-completion")
         )
         && (listening["transport"] == "managed-runner" || unfiltered);
+    Ok((enabled, listening, armed))
+}
+
+fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
+    let (enabled, listening, armed) = wake_state(conn, actor, now)?;
     let outgoing: i64 = conn.query_row(&format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)"), [actor], |r| r.get(0))?;
     let mut out = json!({"enabled":enabled,"open_requests_awaiting_others":outgoing,"armed":armed,"listening":listening,"model_response_guaranteed":false});
     if enabled && outgoing > 0 && !armed {
