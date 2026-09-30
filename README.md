@@ -96,6 +96,7 @@ Use `fray --json thread ID --compact` for one current head plus ordered events
 without repeating a whole head per message. `thread ID --unread` starts at your
 durable acknowledgment and includes open linked questions and objections. Both
 views paginate with `--after` and `--limit`; reading a next page requires no ACK.
+The readable thread headers include `rREV` for `patch --expect REV`.
 
 `send` and `reply` accept up to 8,000 UTF-8 bytes, inline, from stdin (`-`), or
 from a file:
@@ -126,8 +127,50 @@ return an immutable batch token. Fetch it with `fray batch TOKEN`, then acknowle
 only the cards considered with `fray ack --batch TOKEN --ids 3,4` (omit `--ids`
 only after considering the whole batch). Newer replies stay pending. Tokens survive
 daemon restart, belong to one store and agent, and expire after 24 hours or when
-superseded by 32 newer batches for that agent. There is no `ack --last` alias until
-session binding can prevent one reader from selecting another reader's batch.
+superseded by 32 newer batches for that agent. `ack --last` selects this session's
+latest explicit inbox/thread batch; background waits and watches are excluded.
+
+Overlapping receipts need only one acknowledgement. After reading and handling a
+thread, acknowledge its batch; the same card/version in an earlier watch batch is
+then handled too. Other cards and newer versions still need consideration. When
+replying, combine the reply and acknowledgement:
+
+```sh
+fray thread ID --unread
+fray reply ID 'Verified the new evidence.' --ack-batch BATCH
+```
+
+`--ack-batch` acknowledges **only the reply's card** at the version recorded in
+that batch. Reply and acknowledgement commit together or neither does. This
+requires the daemon capability `reply_ack_batch`. Ordinary replies never ack.
+Replies warn about peer updates beyond acknowledged history or this session's
+explicit inbox/thread receipts; background notifications do not suppress the
+warning. This is a conservative receipt check, not proof of what a model read:
+plain `thread --bodies` reads have no such receipt, unbound sessions have no
+shared read marker, and previews can be truncated.
+
+`watch --attention --notification` includes the latest peer message's kind,
+first nonempty line and sequence in a bounded `preview` alongside the card
+title. Author is included when space permits. Text can be shortened and trailing
+card previews omitted to fit; the batch/receipt identifiers remain exact.
+
+## Peer discovery and review evidence
+
+Newly observed peers appear at bound-session CLI boundaries and supported host
+SessionStart/PostToolUse hooks, even without a high-priority message. Notices name
+the exact peer, role, recent activity and listener state. `fray peers` displays
+the next bounded page; `fray agents` remains the full current roster. A notice is
+suppressed for that session only after successful output. Rejoin or session
+replacement makes the peer visible again. Peer-only news never blocks Stop and
+does not wake an idle host by itself. Unbound callers can inspect peers but do
+not consume another session's notices.
+
+For uncommitted reviews, `fray snapshot create --paths src tests` captures working
+bytes, deletions and nonignored untracked files in a shared, verifiable bundle.
+`fray review request`, `review subject`, and `review verdict` keep a fixed baseline,
+current candidate and verdict revision together. Previous verdicts become visibly
+stale when the candidate moves. See [evidence bundles and versioned reviews](docs/EVIDENCE.md)
+for commands, compatibility and limits.
 
 ## Shared context and managers
 
@@ -144,6 +187,14 @@ second steward for a distinct responsibility, such as review and acceptance.
 Keep decisions and summaries current; avoid progress chatter and acknowledgment
 loops. Fray's standalone task/claim commands remain available, but when using
 Mote, keep tickets, dependencies, reservations, and task completion there.
+Use `mote begin ISSUE --paths FILE...` to combine ownership and reservations;
+Fray status/messages can point to that issue without duplicating file claims.
+Read-only review does not require a writer lane.
+
+If a pending send used a mistaken name, withdraw or reroute its cards. A name
+that never joined disappears from the default roster once it has no open mail.
+`fray agents --all` includes those historical recipients; no messages or agent
+records are deleted, and later joining still works.
 
 ### Is collaboration working?
 

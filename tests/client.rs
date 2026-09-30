@@ -36,6 +36,21 @@ fn batch_and_compact_operations_require_capability_before_sending() {
         ),
         ("show", json!({"id":1,"compact":true}), "thread_compact"),
         ("show", json!({"id":1,"unread":true}), "thread_unread"),
+        ("agents", json!({"all":true}), "agents_all"),
+        ("peers", json!({}), "peer_discovery"),
+        (
+            "peer_present",
+            json!({"store_id":"store","peers":[]}),
+            "peer_discovery",
+        ),
+        ("review_request", json!({}), "review_subjects"),
+        ("review_subject", json!({}), "review_subjects"),
+        ("annotate", json!({"review_verdict":{}}), "review_subjects"),
+        (
+            "annotate",
+            json!({"id":1,"body":"Handled","ack_batch":"0123456789abcdef0123456789abcdef"}),
+            "reply_ack_batch",
+        ),
         (
             "ack",
             json!({"batch":"0123456789abcdef0123456789abcdef"}),
@@ -261,6 +276,35 @@ fn reply_refs_require_capability_before_sending_mutation() {
 
     let mut metadata = hello("new", json!(2));
     metadata["capabilities"] = json!(["reply_refs"]);
+    let mock = Mock::new(vec![metadata]);
+    assert_eq!(
+        client::rpc(&mock.home, &request, 5).unwrap()["args"],
+        request.args
+    );
+    assert_eq!(mock.requests()[0].len(), 2);
+}
+
+#[test]
+fn reply_ack_with_refs_requires_both_capabilities() {
+    let request = Request::new(
+        "annotate",
+        "fixture",
+        json!({
+            "id":1,"body":"Evidence","refs":["mote:42"],"ack_batch":"0123456789abcdef0123456789abcdef"
+        }),
+    );
+    for capabilities in [json!(["reply_refs"]), json!(["reply_ack_batch"])] {
+        let mut metadata = hello("new", json!(2));
+        metadata["capabilities"] = capabilities;
+        let mock = Mock::new(vec![metadata]);
+        assert_eq!(
+            client::rpc(&mock.home, &request, 5).unwrap_err().code,
+            "unsupported_capability"
+        );
+        assert_eq!(mock.requests()[0].len(), 1);
+    }
+    let mut metadata = hello("new", json!(2));
+    metadata["capabilities"] = json!(["reply_refs", "reply_ack_batch"]);
     let mock = Mock::new(vec![metadata]);
     assert_eq!(
         client::rpc(&mock.home, &request, 5).unwrap()["args"],

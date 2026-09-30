@@ -152,10 +152,41 @@ CREATE TABLE IF NOT EXISTS agent_status(
     text TEXT NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+-- Displayed peer generations are session-local exposure, never card ACKs.
+CREATE TABLE IF NOT EXISTS peer_generations(
+    agent TEXT PRIMARY KEY REFERENCES agents(name),
+    generation INTEGER NOT NULL CHECK(generation>0),
+    session TEXT,
+    joined_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS peer_seen(
+    reader TEXT NOT NULL REFERENCES agents(name),
+    session TEXT NOT NULL,
+    peer TEXT NOT NULL REFERENCES agents(name),
+    generation INTEGER NOT NULL CHECK(generation>0),
+    PRIMARY KEY(reader,session,peer)
+);
+-- Review subjects and verdicts are conversation evidence, not acceptance.
+CREATE TABLE IF NOT EXISTS review_subjects(
+    card_id INTEGER PRIMARY KEY REFERENCES cards(id),
+    baseline TEXT NOT NULL,
+    candidate TEXT NOT NULL,
+    subject_rev INTEGER NOT NULL CHECK(subject_rev>0),
+    mote_ref TEXT
+);
+CREATE TABLE IF NOT EXISTS review_verdicts(
+    event_seq INTEGER PRIMARY KEY REFERENCES events(seq),
+    card_id INTEGER NOT NULL REFERENCES cards(id),
+    reviewer TEXT NOT NULL REFERENCES agents(name),
+    subject_rev INTEGER NOT NULL,
+    version TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK(verdict IN ('approve','object','blocked'))
+);
+CREATE INDEX IF NOT EXISTS review_verdicts_card ON review_verdicts(card_id,event_seq);
 -- A wait in progress, refreshed every minute: reachability, not activity.
 CREATE TABLE IF NOT EXISTS agent_waits(
     agent TEXT PRIMARY KEY,
     session TEXT,
     refreshed_ms INTEGER NOT NULL
 );
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

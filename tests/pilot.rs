@@ -325,7 +325,7 @@ fn migration_preserves_receipts_but_only_backfills_contributors_once() {
             s.conn
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
         assert_eq!(
             s.conn

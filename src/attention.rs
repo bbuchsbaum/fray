@@ -113,6 +113,10 @@ impl Store {
         for (id, pending, ack) in rows.iter().take(options.limit) {
             let card = crate::store::get_card(&self.conn, *id)?;
             let mut head = card.compact(now);
+            let review = crate::review::context(&self.conn, *id, false)?;
+            if !review.is_null() {
+                head["review"] = review;
+            }
             head["summary"] = json!(card.summary);
             head["summary_truncated"] = json!(false);
             let count: i64 = self.conn.query_row(

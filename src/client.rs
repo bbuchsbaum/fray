@@ -212,6 +212,11 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             }
         }
         let capability = match wire_request.op.as_str() {
+            "peers" | "peer_present" => Some(("peer_discovery", "session peer discovery")),
+            "review_request" | "review_subject" => {
+                Some(("review_subjects", "version-bound peer review"))
+            }
+            "agents" if req.args.get("all").is_some() => Some(("agents_all", "agents --all")),
             "join" if wire_request.args.get("takeover").is_some() => {
                 Some(("sessions", "join --takeover"))
             }
@@ -259,6 +264,12 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             _ => None,
         };
         let mut capabilities: Vec<_> = capability.into_iter().collect();
+        if req.op == "annotate" && req.args.get("review_verdict").is_some() {
+            capabilities.push(("review_subjects", "version-bound peer verdict"));
+        }
+        if req.op == "annotate" && req.args.get("ack_batch").is_some() {
+            capabilities.push(("reply_ack_batch", "reply --ack-batch"));
+        }
         if req.op == "wait" && req.args.get("timeout") == Some(&Value::Null) {
             capabilities.push(("wait_indefinite", "wait --timeout none"));
         }
