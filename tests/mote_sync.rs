@@ -1302,3 +1302,87 @@ fn a_final_candidate_state_is_never_replaced_by_an_older_one() {
     );
     assert_eq!(mote_titles(&mut b, "bob"), vec!["Mote: cand-1 is landed"]);
 }
+
+#[test]
+fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
+    // Background sync (section 6): a runner syncs Mote itself, paced for the
+    // whole board, so an armed listener hears a handoff with no manual sync.
+    let Some(p) = Project::new("bg") else {
+        return;
+    };
+    let mut watch = Command::new(env!("CARGO_BIN_EXE_fray"))
+        .current_dir(&p.t.0)
+        .env_remove("FRAY_AGENT")
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .env("FRAY_SESSION", "test:bob")
+        .env("FRAY_MOTE_SYNC_INTERVAL_MS", "300")
+        .args([
+            "--home",
+            p.t.0.join(".fray").to_str().unwrap(),
+            "--as",
+            "bob",
+        ])
+        .args(["watch", "--attention", "--notification"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = watch.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    // Wait until the background sync has run once (seeding the cursor), so
+    // the handoff below is new to it.
+    let seeded = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (ok, out) = p.fray(
+            &[],
+            "bob",
+            &["rpc", r#"{"op":"mote_binding","actor":"bob","args":{}}"#],
+        );
+        let synced = serde_json::from_str::<serde_json::Value>(&out)
+            .ok()
+            .is_some_and(|v| v["binding"]["last_sync_ms"].is_i64());
+        if ok && synced {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < seeded,
+            "the background sync never ran: {out}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let w = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &w]).status.success());
+    assert!(p
+        .mote("alice", &["handoff", &w, "--to", "bob"])
+        .status
+        .success());
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut heard = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            // Either path delivers it: the handoff event, or, when one sync
+            // reads events just before the handoff and the board just after,
+            // reconciliation (section 6), which then supersedes the event.
+            if line.contains(&format!("alice handed you {w}"))
+                || line.contains(&format!("you now hold {w}"))
+            {
+                heard = Some(line);
+                break;
+            }
+        }
+    }
+    let _ = watch.kill();
+    let _ = watch.wait();
+    assert!(heard.is_some(), "bob's watch never showed the handoff");
+}
