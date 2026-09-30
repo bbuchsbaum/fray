@@ -1,8 +1,13 @@
 # Design: no silent stalls
 
-Status: revision 2 (2026-09-30), for re-review. Revision 1 (5cfc6bf) drew
+Status: revision 3 (2026-09-30), for re-review. Revision 1 (5cfc6bf) drew
 five blocking objections, fray #63 to #67. Each was verified against code and
-against Mote, and each is addressed below, marked [#63] and so on.
+against Mote, and each is addressed below, marked [#63] and so on. Revision 2
+(a90bb62) resolved those and drew one more, #68: escalation was computed only
+when someone read, so an armed steward was never woken, and with no runner
+alive a Mote request never reached the board at all. Revision 3 makes
+escalation a written delivery and gives owner review its own sync [#68]; it
+also takes the review's non-blocking points (R2, R3, R4, R7).
 
 This design answers these field reports from the ScalaFIM campaign:
 
@@ -43,9 +48,11 @@ listening.
    its strict "armed" test is the one `idle_readiness` already applies [#63].
 3. **One listener is enough.** Mote requests addressed to an agent reach its
    Fray attention, and their state is tracked, not event-copied [#64].
-4. **No silent re-routing, no new authority, no scheduler.** Fray suggests a
-   re-route and makes it one command. Staleness is computed when read, and
-   the background Mote sync runs on the runners (landed in the adapter).
+4. **No silent re-routing, no new authority, no scheduler in the daemon.**
+   Fray suggests a re-route and makes it one command. Stuck requests are
+   found by the clients that already tick (the runners' background sync) and
+   by readers; finding one writes a delivery, because only a delivery wakes
+   anyone [#68].
 5. **Never break an older daemon.** New behaviour is negotiated by
    capability or kept in the client [#67].
 
@@ -103,6 +110,10 @@ The design:
 - **Recipients not on the board.** A Mote request to an actor who has not
   joined Fray cannot be delivered to them in Fray. It is escalated as an
   unreachable request under R3.
+- **Enumerating requests.** `mote msg requests` lists only requests
+  involving the acting actor, so the sync first lists addressees with open
+  requests (`mote actor list --json`, field `incoming_open_requests`), then
+  reads each addressee's requests.
 - **Delivery.** It rides the background sync on `watch --attention` and
   `drive`, now implemented.
 - **Asks to a name only Mote knows.** `fray send` to an actor who exists
@@ -114,11 +125,31 @@ The design:
 A request is **stuck** when it is open and either:
 
 - **unreachable:** its addressee is not `wakeable` (R1), or is known only to
-  Mote, and it has been open for a grace period (default 15 minutes); or
+  Mote, it has been open for a grace period (default 15 minutes), and it has
+  never been shown to the addressee (a presented batch containing it proves
+  it arrived; after that only the deadline rules apply); or
 - **overdue:** it is past its deadline (R4), or past Mote's own request
   horizon (`request.stale`, default 1 hour) for a Mote request.
 
-Stuck requests, from Fray and from Mote alike, appear:
+**Finding and waking.** Nothing is written when time passes, and a listener
+wakes only on a new delivery, so a stuck request that is merely computed at
+read time wakes no one [#68]. Therefore:
+
+- The runners' periodic sync tick (the background Mote sync on `watch
+  --attention` and `drive`) also evaluates stuck requests, Fray and Mote
+  alike. For each, it writes one idempotent escalation card addressed to the
+  stewards, keyed `stuck:<id>:<reason>`, with a fixed body naming the
+  request, its addressee and state, and the actions below. An armed steward
+  is woken by it. When the request clears, the escalation is settled with a
+  note. The key makes a second runner, or a retry, a no-op.
+- `fray owner review` runs one bounded sync of its own (Mote requests,
+  then stuck evaluation, the same code) before listing, so it works with no
+  runner alive. So do `brief` and hook context, within their time budget.
+- When no runner has synced within twice the sync interval, `brief` and
+  `fray owner review` say so: "no runner is syncing; escalation happens
+  only when someone reads".
+
+The stuck requests then appear:
 
 - in the `brief` and hook context of every **present steward**, where a
   steward is `wakeable` or `present`;
@@ -132,9 +163,18 @@ Each surfaced item carries the actions: `fray patch ID --assignee OTHER`,
 automatically.
 
 Acceptance is an end-to-end replay of the incident: a Mote-only requester
-sends a Mote request to an interactive agent with a lapsed listener. Within
-the grace period, the stuck request appears in a present steward's brief and
-in `fray owner review`, and it clears when the helper answers in Mote.
+sends a Mote request to an interactive agent with a lapsed listener.
+
+- With an armed steward and a runner alive, and no other board activity, the
+  steward's listener is woken with the escalation once the grace period
+  passes.
+- With no runner alive, `fray owner review` still lists the request.
+- Both clear when the helper answers in Mote.
+
+**The limit, stated plainly.** With no armed steward, no runner, and an owner
+who does not open review, escalation still waits for someone to look. Fray
+does not page outside itself. `brief` and `fray owner review` name this state
+so it is at least visible.
 
 ### R4. Deadlines on asks
 
@@ -150,6 +190,10 @@ in `fray owner review`, and it clears when the helper answers in Mote.
   escalate under R3.
 - **Soft default.** Asks without a deadline use the soft default only in
   `friction`: 24 hours.
+- **Reassignment does not restart the clock.** The deadline belongs to the
+  ask, not to whoever holds it; `patch --assignee` leaves it unchanged. A
+  requester who wants more time sends a new deadline with `fray reply ID
+  --respond-within D`, recorded in that reply's event.
 
 ### R5. Arming, and signalling a lapse, correctly [#66]
 
@@ -190,10 +234,14 @@ needs a restart is old by definition. So:
 
 - The client detects that the daemon's build differs and lacks capabilities
   the client has.
-- It then posts, through operations every daemon already accepts, a single
-  idempotent card to stewards and the owner queue: "restart needed: clients
-  at build X lack capabilities Y since T". The client's `--key` idempotency
-  means this happens once per pair of builds.
+- It then posts, through operations every daemon already accepts, a card to
+  stewards and the owner queue: "restart needed: the daemon at build X lacks
+  capabilities Y that clients at build Z have". The body is fixed per pair of
+  builds (no timestamp), so a retry with the same key is a no-op.
+- `--key` idempotency is per agent, so the client first queries for an open
+  card tagged `restart-needed:X:Z` and posts only if there is none. Two
+  agents racing can still post twice; the later one then closes its own card
+  as a duplicate of the earlier, found by the same query.
 - `doctor` shows it.
 - Restarting stays a deliberate, announced act.
 - Tested against a real older daemon binary.
@@ -214,13 +262,19 @@ needs a restart is old by definition. So:
   - notes are not carded;
   - a request to an actor not on the board escalates under R3;
   - this works on the background runners.
-- **R3:** the incident replay above; stuck requests clear on an answer;
-  nothing is re-routed without a command.
+- **R3:**
+  - the incident replay above, both cases: an armed steward is woken with no
+    other activity, and with no runner alive owner review lists the request;
+  - one escalation per stuck request, however many runners tick;
+  - a request already shown to its addressee does not escalate as
+    unreachable;
+  - stuck requests clear on an answer; nothing is re-routed without a
+    command.
 - **R4:** an overdue ask escalates; the deadline cannot be patched away; a
-  bystander's reply does not clear it.
+  bystander's reply does not clear it; reassignment keeps it.
 - **R5:** `fray arm` produces a command whose listener counts as armed;
   lapse, `leave` and `--once` are told apart.
 - **R6:** a role with a wakeable holder routes to it, and the event records
   the route; a vacancy fails loudly; a fallback is followed.
 - **R7:** a new client against an old daemon produces one restart-needed
-  card, and not one per command.
+  card, not one per command or per agent; tested against a real older daemon.
