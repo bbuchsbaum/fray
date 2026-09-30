@@ -476,5 +476,56 @@ class Drive(unittest.TestCase):
         self.assertGreater(newer["through_seq"], pointer["through_seq"])
 
 
+    def test_child_using_the_terminal_fails_fast_instead_of_hanging(self):
+        command = self.drive('--bootstrap', '--max-turns', '1', '--idle-timeout', '0',
+                             '--child-timeout', '60',
+                             child=['-c', 'import os; os.system("stty -echo </dev/tty")'])
+        # A real controlling terminal; the owned group is not its foreground.
+        if sys.platform == 'darwin':
+            wrapped = ['script', '-q', '/dev/null', *command]
+        else:
+            wrapped = ['script', '-qec', ' '.join(map(repr, command)), '/dev/null']
+        started = time.monotonic()
+        result = subprocess.run(wrapped, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=40)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertIn('child_stopped', result.stdout + result.stderr)
+        controller = self.controller('bob')
+        self.assertEqual(controller['reason'], 'child_stopped')
+        self.assertTrue(controller['detail']['child']['disposition']['verified'])
+
+    def test_new_objection_is_seen_behind_many_presented_urgent_items(self):
+        for i in range(8):
+            self.call('post', 'alice', {'kind': 'task', 'title': f'Urgent {i}', 'summary': 'Now',
+                                        'assignee': 'bob', 'priority': 0})
+        record = pathlib.Path(self.home) / 'turns.jsonl'
+        runner = self.keep(subprocess.Popen(
+            self.drive('--max-turns', '2', '--child-timeout', '60', '--budget', '64000',
+                       '--on-urgent', 'interrupt',
+                       child=[self.script('turns.py', TURNS), str(record)]),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        self.await_controller('bob', 'running')
+        self.assertEqual(len(self.controller('bob')['detail']['presented']), 8)
+        self.objection_for_bob()
+        _, stderr = runner.communicate(timeout=30)
+        metrics = [json.loads(line.removeprefix('fray drive: '))
+                   for line in stderr.splitlines() if line.startswith('fray drive: ')]
+        self.assertEqual(metrics[0]['exit_reason'], 'preempted', stderr)
+
+    def test_pointer_with_control_character_title_fits_minimum_budget(self):
+        body = '\x01' * 160 + '🧠' * 400
+        sent = self.call('send', 'alice', {'to': 'bob', 'body': body, 'ask': True})
+        record = pathlib.Path(self.home) / 'turns.jsonl'
+        result = subprocess.run(
+            self.drive('--budget', '2000', '--max-turns', '1',
+                       child=[str(AGENT), str(record), '--ignore']),
+            text=True, capture_output=True, timeout=10)
+        self.assertNotIn('prompt_budget', result.stderr)
+        turn = json.loads(record.read_text())
+        self.assertLessEqual(turn['prompt_bytes'], 2000)
+        self.assertTrue(turn['attention']['items'][0]['omitted'])
+        self.assertEqual(turn['attention']['items'][0]['card']['id'], sent['card']['id'])
+
+
 if __name__ == "__main__":
     unittest.main(argv=sys.argv[:1], verbosity=2)

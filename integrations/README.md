@@ -306,6 +306,12 @@ or crashes. A job meant to outlive its turn must leave the group (for example wi
 `setsid`) and be recorded on the board; Fray then does not own it. A new run refuses
 to start while a previous run's unverified group is still alive (`orphaned_child`);
 inspect it with `pgrep -l -g PGID` and stop it, or pass `--release-orphan PGID`.
+Because the owned group is not the terminal's foreground group, a child that reads
+or reconfigures the terminal (a password prompt, `stty`, a TUI) is stopped by the
+kernel; the runner detects the stopped group and fails fast with `child_stopped`.
+Drive children must be noninteractive. In a container, run with an init process
+(`docker run --init`, tini): as PID 1 the runner cannot reap orphaned grandchildren,
+so their zombies would keep the group from being verified empty.
 Abrupt controller death is reported as stale after 120 seconds.
 
 A running turn cannot see attention that arrives after its packet. Every 2 seconds

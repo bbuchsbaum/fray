@@ -90,13 +90,38 @@ fn signal_group(pgid: u32, signal: &str) -> Group {
         .output();
     match out {
         Ok(out) if out.status.success() => Group::Live,
-        Ok(out) if String::from_utf8_lossy(&out.stderr).contains("No such process") => Group::Empty,
+        // bash/dash say "No such process"; zsh and ksh use lower case.
+        Ok(out)
+            if String::from_utf8_lossy(&out.stderr)
+                .to_lowercase()
+                .contains("no such process") =>
+        {
+            Group::Empty
+        }
         _ => Group::Unknown,
     }
 }
 
 fn probe(pgid: u32) -> Group {
     signal_group(pgid, "0")
+}
+
+/// Whether a member of the group is stopped (ps state T), typically by
+/// SIGTTIN/SIGTTOU: the owned group is not the terminal's foreground group,
+/// so a child that reads or reconfigures the terminal stops instead of running.
+fn group_stopped(pgid: u32) -> bool {
+    let Ok(out) = Command::new("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next() == Some(&pgid.to_string()) && fields.next().is_some_and(|s| s.starts_with('T'))
+    })
 }
 
 /// Stop what remains of the owned group and verify it is empty. The leader
@@ -168,7 +193,7 @@ fn pointer(item: &Value, omitted_bytes: usize) -> Value {
     let card = &item["card"];
     let id = &card["id"];
     json!({
-        "card":{"id":id,"rev":card["rev"],"kind":card["kind"],"status":card["status"],"priority":card["priority"],"author":card["author"],"assignee":card["assignee"],"title":clip_bytes(card["title"].as_str().unwrap_or(""),120)},
+        "card":{"id":id,"rev":card["rev"],"kind":card["kind"],"status":card["status"],"priority":card["priority"],"author":card["author"],"assignee":card["assignee"],"title":clip_bytes(&card["title"].as_str().unwrap_or("").replace(char::is_control, " "),120)},
         "through_seq":item["through_seq"],"ack_seq":item["ack_seq"],"receipt":item["receipt"],
         "omitted":true,"omitted_bytes":omitted_bytes,
         "fetch":format!("fray thread {id} --unread"),
@@ -344,7 +369,8 @@ impl Run<'_> {
     fn queued_urgent(&self, given: &[(i64, i64)]) -> Result<Vec<Value>> {
         let page = self.call(
             "inbox",
-            json!({"selection":self.options.selection,"limit":8,"min_priority":URGENT_PRIORITY}),
+            // Presented items still sort among the urgent ones; page past them.
+            json!({"selection":self.options.selection,"limit":given.len()+8,"min_priority":URGENT_PRIORITY}),
             10,
         )?;
         let boundary = if self.options.on_urgent == "interrupt" {
@@ -367,7 +393,7 @@ impl Run<'_> {
             })
             .collect())
     }
-    fn child(&self, prompt: &str, receipts: &[Value]) -> Result<Turn> {
+    fn child(&self, prompt: &str, receipts: &[Value], cursor: i64) -> Result<Turn> {
         // An unlinked private file avoids a blocked pipe write when a child never
         // reads stdin. It is reclaimed on close/crash, and is not a durable prompt log.
         let path = self.home.join(format!("prompt-{}", random_key()?));
@@ -422,10 +448,10 @@ impl Run<'_> {
         self.detail.borrow_mut()["queued_urgent"] = json!([]);
         let started = Instant::now();
         let mut heartbeat = Instant::now();
-        // Poll at once: urgent attention already waiting but not presented is
-        // queued, and only attention arriving after that can interrupt.
+        // Poll at once. Urgent attention already on the board when the packet
+        // was built (at or before `cursor`) but not presented is only queued;
+        // attention that arrives later can interrupt.
         let mut urgent_poll = started - URGENT_POLL;
-        let mut baseline: Option<Vec<Value>> = None;
         // Record the child identity before anything else can fail, then mark
         // exactly what was handed over as exposed (read is not ack).
         let recorded = self.state("running", false, None).and_then(|_| {
@@ -461,11 +487,25 @@ impl Run<'_> {
             }
             if urgent_poll.elapsed() >= URGENT_POLL {
                 urgent_poll = Instant::now();
-                let queued = self.queued_urgent(&given)?;
-                let known = baseline.get_or_insert_with(|| queued.clone());
+                if group_stopped(pgid) {
+                    return Err(Error::new(
+                        "child_stopped",
+                        "the child stopped, usually by reading or reconfiguring the terminal it does not own (SIGTTIN/SIGTTOU); drive children must be noninteractive",
+                    ));
+                }
+                // A transient board error only delays the report; it must not end the turn.
+                let queued = match self.queued_urgent(&given) {
+                    Ok(queued) => queued,
+                    Err(e) => {
+                        eprintln!("fray drive: {}", json!({"run_id":self.id,"urgent_poll_error":e.code}));
+                        continue;
+                    }
+                };
                 if json!(queued) != self.detail.borrow()["queued_urgent"] {
                     let preempt = self.options.on_urgent == "interrupt"
-                        && queued.iter().any(|q| !known.contains(q));
+                        && queued
+                            .iter()
+                            .any(|q| q["through_seq"].as_i64().is_some_and(|seq| seq > cursor));
                     self.detail.borrow_mut()["queued_urgent"] = json!(queued);
                     self.state("running", false, None)?;
                     heartbeat = Instant::now();
@@ -518,11 +558,12 @@ impl Run<'_> {
                     continue;
                 }
             }
+            let cursor = page["cursor"].as_i64().unwrap_or(i64::MAX);
             let (prompt, receipts) = self.packet(page, bootstrap)?;
             turn += 1;
             self.detail.borrow_mut()["turn"] = json!(turn);
             let started = Instant::now();
-            let child = self.child(&prompt, &receipts);
+            let child = self.child(&prompt, &receipts, cursor);
             let detail = self.detail.borrow().clone();
             let exit_reason = match &child {
                 Ok(Turn::Done) => "success",
@@ -585,6 +626,12 @@ pub fn run(home: &Path, actor: &str, options: &Options) -> Result<()> {
     runner.state("waiting", true, None)?;
     let result = runner.drive();
     let reason = result.as_ref().copied().unwrap_or_else(|e| e.code.as_str());
+    // No next managed turn follows a finished run.
+    if let Some(queued) = runner.detail.borrow_mut()["queued_urgent"].as_array_mut() {
+        for item in queued {
+            item["next_boundary"] = json!("a new drive run");
+        }
+    }
     let cleanup = runner.state(
         if result.is_ok() { "stopped" } else { "failed" },
         false,
