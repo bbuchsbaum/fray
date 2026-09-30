@@ -72,11 +72,11 @@ fn waiting_is_reachable_but_holds_lanes_only_for_a_while() {
     };
     // Two hours of waiting after real activity: still holding.
     let two_hours = NOW + 2 * 60 * 60_000;
-    s.touch("claude", None, true, two_hours).unwrap();
+    s.touch("claude", None, Some("w1"), two_hours).unwrap();
     assert_eq!(stale(&mut s, two_hours), false);
     // Past the hold window, still waiting: the lane is stale...
     let later = NOW + WAIT_HOLD_MS + 60_000;
-    s.touch("claude", None, true, later).unwrap();
+    s.touch("claude", None, Some("w1"), later).unwrap();
     assert_eq!(stale(&mut s, later), true);
     // ...but a message still reaches it without an absence notice.
     let sent = run(
@@ -180,7 +180,7 @@ fn review_a_session_bound_wait_cannot_renew_its_own_hold() {
     let mut t = NOW;
     while t < NOW + 2 * 60 * 60_000 {
         t += 60_000;
-        s.touch("claude", Some("claude:s1"), true, t).unwrap();
+        s.touch("claude", Some("claude:s1"), Some("w1"), t).unwrap();
     }
     run(&mut s, "codex", "heartbeat", json!({}), t).unwrap();
     assert_eq!(
@@ -194,7 +194,7 @@ fn review_a_session_bound_wait_cannot_renew_its_own_hold() {
     // Keep refreshing past the hold window: it does not renew itself.
     while t < NOW + WAIT_HOLD_MS + 5 * 60_000 {
         t += 60_000;
-        s.touch("claude", Some("claude:s1"), true, t).unwrap();
+        s.touch("claude", Some("claude:s1"), Some("w1"), t).unwrap();
     }
     run(&mut s, "codex", "heartbeat", json!({}), t).unwrap();
     assert_eq!(

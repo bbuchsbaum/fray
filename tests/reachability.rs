@@ -104,19 +104,25 @@ fn a_driven_agent_is_wakeable_even_mid_child() {
 #[test]
 fn only_an_unfiltered_wait_in_progress_is_wakeable() {
     let mut s = board();
-    s.touch("helper", None, false, NOW + 40 * MIN).unwrap();
+    s.touch("helper", None, None, NOW + 40 * MIN).unwrap();
     assert_eq!(
         reach(&mut s, NOW + 40 * MIN).0,
         "present",
         "a filtered wait (e.g. --card) is present, not wakeable"
     );
-    s.touch("helper", None, true, NOW + 41 * MIN).unwrap();
+    s.touch("helper", None, Some("w1"), NOW + 41 * MIN).unwrap();
     assert_eq!(reach(&mut s, NOW + 41 * MIN).0, "wakeable");
-    s.wait_returned("helper").unwrap();
+    // Each wait is its own row: a concurrent filtered wait, or a second
+    // unfiltered wait that ends, leaves the first one armed.
+    s.touch("helper", None, None, NOW + 41 * MIN).unwrap();
+    s.touch("helper", None, Some("w2"), NOW + 41 * MIN).unwrap();
+    s.wait_ended("w2").unwrap();
+    assert_eq!(reach(&mut s, NOW + 41 * MIN).0, "wakeable");
+    s.wait_ended("w1").unwrap();
     assert_eq!(
         reach(&mut s, NOW + 41 * MIN).0,
         "present",
-        "a wait that returned wakes no one"
+        "a wait that ended wakes no one"
     );
 }
 
@@ -152,7 +158,13 @@ fn a_question_goes_to_a_wakeable_party_first_and_names_who_else_is() {
         NOW + 6 * MIN,
     );
     assert_eq!(q["follow_up"]["assignee"], "steward", "{q}");
-    assert!(q["notice"].is_null(), "{q}");
+    // Passing over the author is said, with the way back.
+    let notice = q["notice"].as_str().unwrap();
+    assert!(
+        notice.contains("helper (present, nothing armed) was passed over for steward"),
+        "{notice}"
+    );
+    assert!(notice.contains("--assignee"), "{notice}");
 }
 
 #[test]

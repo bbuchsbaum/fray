@@ -287,35 +287,40 @@ impl Store {
     /// A wait in progress: the agent is reachable (it will hear what
     /// arrives), which is not the same as active. It never touches the
     /// activity timestamps, so the WAIT_HOLD_MS window cannot renew itself.
-    /// An `unfiltered` wait (no card, kind, priority, addressed or
-    /// unresolved filter) will wake for anything assigned to the agent, so it
-    /// also makes the agent wakeable (see `reachability`).
+    /// A wait with no card, kind, priority, addressed or unresolved filter
+    /// passes its own `wake` id: it will wake for anything assigned to the
+    /// agent, so its row makes the agent wakeable (see `reachability`) until
+    /// `wait_ended`. Each wait has its own row, so a filtered or finished
+    /// wait never hides another that is still armed.
     pub fn touch(
         &self,
         actor: &str,
         session: Option<&str>,
-        unfiltered: bool,
+        wake: Option<&str>,
         now: i64,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO agent_waits(agent,session,refreshed_ms) SELECT name,?2,?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET session=excluded.session,refreshed_ms=excluded.refreshed_ms",
             params![actor, session, now],
         )?;
-        if unfiltered {
+        if let Some(id) = wake {
             self.conn.execute(
-                "INSERT INTO wake_waits(agent,refreshed_ms) SELECT name,?2 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
-                params![actor, now],
+                "INSERT INTO wake_waits(wait_id,agent,refreshed_ms) SELECT ?1,name,?3 FROM agents WHERE name=?2 AND enabled=1 ON CONFLICT(wait_id) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
+                params![id, actor, now],
             )?;
-        } else {
-            self.conn
-                .execute("DELETE FROM wake_waits WHERE agent=?", [actor])?;
+            // Rows a stopped daemon never removed.
+            self.conn.execute(
+                "DELETE FROM wake_waits WHERE refreshed_ms<=?",
+                [now - WAIT_FRESH_MS],
+            )?;
         }
         Ok(())
     }
-    /// The wait has returned: it no longer makes the agent wakeable.
-    pub fn wait_returned(&self, actor: &str) -> Result<()> {
+    /// The wait has ended (answered, timed out, hung up or failed): it no
+    /// longer makes its agent wakeable.
+    pub fn wait_ended(&self, wake: &str) -> Result<()> {
         self.conn
-            .execute("DELETE FROM wake_waits WHERE agent=?", [actor])?;
+            .execute("DELETE FROM wake_waits WHERE wait_id=?", [wake])?;
         Ok(())
     }
     pub fn identity(&self) -> Result<String> {
@@ -1257,6 +1262,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             // An actionable annotation becomes a durable question, not a buried reply.
             let mut routed_absent = None;
+            let mut passed_over: Option<String> = None;
             let follow_up = if matches!(kind, "question" | "objection") {
                 // Route to the conversation partner. The author's question goes
                 // to whoever is working the card (lease owner, then assignee);
@@ -1305,6 +1311,18 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 if target.is_none() {
                     target = pick(Reach::Present);
                     routed_absent.clone_from(&target);
+                }
+                // Passing over the party the order names first is said, not
+                // silent: they may be the one actively working.
+                if let (Some(first), Some(chosen)) = (candidates.first(), &target) {
+                    if first != chosen {
+                        let state = reach[0].as_str();
+                        passed_over =
+                            Some(format!(
+                            "{first} ({state}, nothing armed) was passed over for {chosen}, who {}",
+                            if routed_absent.is_some() { "is present" } else { "can be woken" }
+                        ));
+                    }
                 }
                 let target = match target {
                     Some(who) => who,
@@ -1380,12 +1398,20 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 )?;
                 result["follow_up"] = child["card"].clone();
                 result["cursor"] = child["event_seq"].clone();
+                let mut notes = Vec::new();
+                if let Some(note) = passed_over {
+                    notes.push(format!("{note}."));
+                }
                 if let Some(who) = routed_absent {
                     if let Some(notice) = absence_notice(conn, &who, actor, now)? {
-                        result["notice"] = json!(format!(
-                            "{notice} Reroute with: fray patch {id} --expect 1 --assignee NAME"
-                        ));
+                        notes.push(notice);
                     }
+                }
+                if !notes.is_empty() {
+                    result["notice"] = json!(format!(
+                        "{} Reroute with: fray patch {id} --expect 1 --assignee NAME",
+                        notes.join(" ")
+                    ));
                 }
             }
             if let Some(ack) = acknowledged {
@@ -3781,7 +3807,7 @@ fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?,"detail":detail}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && (now-last<120000 || agent_waiting(conn,&name,now)?),"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && (now-last<120000 || agent_waiting(conn,&name,now)?),"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?,"reachability":reachability(conn,&name,now)?.as_str()}));
     }
     Ok(json!({"items":items,"more":more}))
 }
