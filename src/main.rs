@@ -974,8 +974,19 @@ fn background_mote_sync(home: &Path, actor: &str) {
         .filter(|ms| (100..=3_600_000).contains(ms))
         .map_or(Duration::from_secs(60), Duration::from_millis);
     let (home, actor) = (home.to_path_buf(), actor.to_owned());
+    // Runners started together must not stay in step: each starts at a
+    // random point in the interval and sleeps a jittered interval (0.75 to
+    // 1.25 of it), so one usually syncs and stamps before the others look.
+    let jitter = |span: Duration| -> Duration {
+        let r = fray::model::random_key()
+            .ok()
+            .and_then(|k| u64::from_str_radix(&k[..12], 16).ok())
+            .unwrap_or(0);
+        span.mul_f64((r % 1_000_000) as f64 / 1_000_000.0)
+    };
     std::thread::spawn(move || {
         let mut last_error: Option<std::time::Instant> = None;
+        std::thread::sleep(jitter(interval));
         loop {
             let recent = send(&home, &actor, "mote_binding", json!({}), None, 10)
                 .ok()
@@ -997,7 +1008,7 @@ fn background_mote_sync(home: &Path, actor: &str) {
                     }
                 }
             }
-            std::thread::sleep(interval);
+            std::thread::sleep(interval.mul_f64(0.75) + jitter(interval / 2));
         }
     });
 }
@@ -2390,7 +2401,11 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             wake,
         } => {
             if attention {
-                background_mote_sync(&home, &actor);
+                // Not for a one-shot packet (e.g. the rewake hook): its stderr
+                // may reach a model, and it exits before a sync would matter.
+                if !wake.once {
+                    background_mote_sync(&home, &actor);
+                }
                 client::watch_attention(&home, &actor, wake.value(), reconnect)?;
             } else {
                 if !wake.filters.is_empty() {
@@ -2444,8 +2459,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Cmd::Drive { options } => {
-            background_mote_sync(&home, &actor);
-            driver::run(&home, &actor, &options)?;
+            driver::run(&home, &actor, &options, || {
+                background_mote_sync(&home, &actor)
+            })?;
             return Ok(None);
         }
         Cmd::Rpc { request } => {

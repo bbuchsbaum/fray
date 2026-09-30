@@ -635,7 +635,9 @@ impl Run<'_> {
     }
 }
 
-pub fn run(home: &Path, actor: &str, options: &Options) -> Result<()> {
+/// `on_joined` runs once the daemon is up and `actor` has joined, before the
+/// first wait (the background Mote sync starts there, not before).
+pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()) -> Result<()> {
     if !valid_name(actor)
         || !(1..=1000).contains(&options.max_turns)
         || options.idle_timeout > 86400
@@ -647,6 +649,7 @@ pub fn run(home: &Path, actor: &str, options: &Options) -> Result<()> {
     }
     client::start(home, false)?;
     send(home, actor, "join", json!({}), None, 10)?;
+    on_joined();
     let runner = Run {
         home,
         actor,

@@ -1325,7 +1325,6 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
         ])
         .args(["watch", "--attention", "--notification"])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
     let stdout = watch.stdout.take().unwrap();
@@ -1341,8 +1340,27 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
             }
         }
     });
-    // Let the background sync seed the cursor first.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Wait until the background sync has run once (seeding the cursor), so
+    // the handoff below is new to it.
+    let seeded = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (ok, out) = p.fray(
+            &[],
+            "bob",
+            &["rpc", r#"{"op":"mote_binding","actor":"bob","args":{}}"#],
+        );
+        let synced = serde_json::from_str::<serde_json::Value>(&out)
+            .ok()
+            .is_some_and(|v| v["binding"]["last_sync_ms"].is_i64());
+        if ok && synced {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < seeded,
+            "the background sync never ran: {out}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let w = p.bead("alice");
     assert!(p.mote("alice", &["claim", &w]).status.success());
     assert!(p
@@ -1353,7 +1371,12 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
     let mut heard = None;
     while std::time::Instant::now() < deadline {
         if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            if line.contains(&format!("alice handed you {w}")) {
+            // Either path delivers it: the handoff event, or, when one sync
+            // reads events just before the handoff and the board just after,
+            // reconciliation (section 6), which then supersedes the event.
+            if line.contains(&format!("alice handed you {w}"))
+                || line.contains(&format!("you now hold {w}"))
+            {
                 heard = Some(line);
                 break;
             }
