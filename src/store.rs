@@ -3851,16 +3851,72 @@ fn wake_state(conn: &Connection, actor: &str, now: i64) -> Result<(bool, Value, 
     Ok((enabled, listening, armed))
 }
 
+/// The command that arms a wake for `actor`, the one source for `fray arm`
+/// and idle readiness. `host` is how the host wakes: "native-monitor" (a
+/// host monitor that runs the stream, e.g. Claude Code's Monitor tool) or
+/// "background-completion" (a host that resumes when a background command
+/// finishes, so the listener returns after one delivery). `expires_ms` is
+/// the absolute Unix time the host mechanism stops.
+pub fn arm_command(actor: &str, host: Option<&str>, expires_ms: Option<i64>) -> String {
+    let mut cmd =
+        format!("fray --as {actor} watch --attention --notification --selection involved");
+    match host {
+        Some("background-completion") => cmd.push_str(" --once --activation background-completion"),
+        Some(mode) => cmd.push_str(&format!(" --reconnect --activation {mode}")),
+        None => {}
+    }
+    if let (Some(_), Some(ms)) = (host, expires_ms) {
+        cmd.push_str(&format!(" --activation-expires-ms {ms}"));
+    }
+    cmd
+}
+
+/// Why nothing armed covers `actor` now: its declared activation expired, a
+/// one-shot listener returned after delivering (to be rearmed, not a lapse),
+/// or nothing was armed.
+fn unarmed_reason(listening: &Value, now: i64) -> (&'static str, String) {
+    let expires = listening["activation_expires_ms"].as_i64();
+    if listening["activation_expired"] == true {
+        let ago = (now - expires.unwrap_or(now)).max(0) / 60_000;
+        return (
+            "lapsed",
+            format!("your wake lapsed: its declared activation expired {ago} min ago"),
+        );
+    }
+    if listening["once"] == true && listening["live"] != true {
+        return (
+            "rearm",
+            "your one-shot listener delivered and returned; rearm it when you finish handling"
+                .into(),
+        );
+    }
+    ("unarmed", "nothing is armed to wake you".into())
+}
+
 fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
     let (enabled, listening, armed) = wake_state(conn, actor, now)?;
     let outgoing: i64 = conn.query_row(&format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)"), [actor], |r| r.get(0))?;
     let mut out = json!({"enabled":enabled,"open_requests_awaiting_others":outgoing,"armed":armed,"listening":listening,"model_response_guaranteed":false});
     if enabled && outgoing > 0 && !armed {
         out["warning"] = json!(format!("{outgoing} open requests awaiting others; no armed listener covering their replies. A connected transport or a hook alone cannot wake an idle host."));
-        out["arm_command"] = json!(format!(
-            "fray --as {actor} watch --attention --notification --selection involved"
-        ));
+        out["arm_command"] = json!(arm_command(actor, None, None));
         out["arm_guidance"] = json!("Run the command through the host's supported notification tool. Add --activation native-monitor or background-completion only when that mechanism is actually installed, and --activation-expires-ms for a bounded lifetime. In hosts without idle wake support, use an explicit fray wait --timeout none while the session is active; do not promise automatic wake after returning control.");
+    }
+    // Asks addressed to this agent that nothing will wake it for once its
+    // turn ends (no-silent-stalls R5). The next hook context says so first.
+    let incoming: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.assignee=?1 AND c.author<>?1"),
+        [actor],
+        |r| r.get(0),
+    )?;
+    if enabled && incoming > 0 && !armed {
+        let (kind, why) = unarmed_reason(&listening, now);
+        out["lapse"] = json!({
+            "kind": kind,
+            "open_asks_to_you": incoming,
+            "message": format!("{incoming} open ask(s) are addressed to you and {why}. When this turn ends nothing will bring you back for them. Run `fray --as {actor} arm` and start the command it prints through your host's monitor, or answer them now."),
+            "arm": format!("fray --as {actor} arm"),
+        });
     }
     Ok(out)
 }

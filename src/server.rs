@@ -649,6 +649,10 @@ fn watch_attention(stream: &mut UnixStream, shared: &Shared, req: &Request) -> R
     if let Some(activation) = activation {
         filters["activation"] = activation;
     }
+    if once {
+        // A one-shot listener that returns after a delivery is not a lapse.
+        filters["once"] = json!(true);
+    }
     let filters = filters.to_string();
     let store_id = {
         let store = shared.store.lock().map_err(|_| poisoned())?;

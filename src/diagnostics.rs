@@ -132,7 +132,7 @@ pub fn listening(agent: &Value, now: i64) -> Value {
         .unwrap_or(&listener["selection"]["activation"]);
     let mode = activation["mode"].as_str().unwrap_or("unknown");
     let expires = activation["expires_ms"].as_i64();
-    json!({"live":agent["enabled"] == true && listener["live"] == true,"state":listener["state"].as_str().unwrap_or("absent"),"transport":"listener","transport_expires_ms":listener["expires_ms"],"activation":mode,"activation_source":if mode == "unknown" {"none"} else {"adapter-declared"},"activation_expires_ms":expires,"activation_expired":expires.is_some_and(|end| now >= end),"model_response_guaranteed":false})
+    json!({"live":agent["enabled"] == true && listener["live"] == true,"state":listener["state"].as_str().unwrap_or("absent"),"transport":"listener","transport_expires_ms":listener["expires_ms"],"activation":mode,"activation_source":if mode == "unknown" {"none"} else {"adapter-declared"},"activation_expires_ms":expires,"activation_expired":expires.is_some_and(|end| now >= end),"once":listener["selection"]["once"] == true,"model_response_guaranteed":false})
 }
 fn add(report: &mut Value, code: &str, severity: &str, message: &str) {
     report["checks"]
