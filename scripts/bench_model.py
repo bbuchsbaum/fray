@@ -150,10 +150,14 @@ def main():
              "--idle-timeout", str(int(args.timeout)), "--child-timeout", str(int(args.timeout)),
              "--debounce-ms", "0", "--", *HOSTS[host]],
             stdout=log, stderr=log, env=e, cwd=root,
-            # Its own group, so a hang can stop the host under the runner too.
+            # Its own session keeps a terminal Ctrl-C from reaching the drive
+            # and host directly; the handler below stops them on purpose. The
+            # drive puts the host in a separate group and stops it through its
+            # watchdog when the drive itself exits (src/driver.rs).
             start_new_session=True,
         )
         outcome = {"ok": False, "reason": "not run"}
+        interrupted = None
         try:
             time.sleep(1.0)
             cursor = json.loads(fray("pub", "--json", "ping").stdout)["cursor"]
@@ -192,15 +196,35 @@ def main():
             outcome["sent_wall_ms"] = sent_wall_ms
         except Exception as exc:  # recorded, never fatal to the run
             outcome = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        except BaseException as exc:  # Ctrl-C: stop the paid host now, then leave
+            interrupted = exc
+            outcome = {"ok": False, "reason": "interrupted"}
         finally:
-            try:
-                drive.wait(args.timeout + 60)
-            except subprocess.TimeoutExpired:
+            def stop_drive():
+                # SIGTERM the drive; its watchdog then stops the host's group.
+                for sig in (15, 9):
+                    try:
+                        os.killpg(drive.pid, sig)
+                    except ProcessLookupError:
+                        return
+                    except OSError as err:
+                        # A sandbox may refuse signals; report instead of
+                        # raising, and fall back to the drive's own timeouts.
+                        print(f"bench: could not signal drive {drive.pid}: {err}", file=sys.stderr)
+                        return
+                    try:
+                        drive.wait(15)
+                        return
+                    except subprocess.TimeoutExpired:
+                        continue
+
+            if interrupted is not None:
+                stop_drive()
+            else:
                 try:
-                    os.killpg(drive.pid, 9)
-                except ProcessLookupError:
-                    pass
-                drive.wait()
+                    drive.wait(args.timeout + 60)
+                except subprocess.TimeoutExpired:
+                    stop_drive()
             log.close()
             started = drive_started_ms(log_path)
             if started is not None and "sent_wall_ms" in outcome:
@@ -213,6 +237,8 @@ def main():
                         fray(who, "ack", "--batch", page["batch"])
                 except Exception:
                     pass
+        if interrupted is not None:
+            raise interrupted
         return outcome
     fray("pub", "start")
     results = {}

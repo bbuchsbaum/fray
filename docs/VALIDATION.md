@@ -3,7 +3,9 @@
 ## Model response through Fray, real hosts (2026-09-30)
 
 `scripts/bench_model.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX) adds the
-model-response column that `bench_wake.py` leaves out. The owner approved a
+model-response column that `bench_wake.py` leaves out. The reply time is on
+one monotonic clock; the host-start time (since the fix below) is from the
+runner's wall-clock record. The owner approved a
 bounded run. Each trial works like this:
 
 1. A `fray drive --max-turns 1` agent waits with a real host as its child.
@@ -14,10 +16,10 @@ Times are measured on one monotonic clock from the moment the publisher's
 `send` returned. There were 5 declared trials per host, failures counted.
 
 Setup: release build `9a39118`, macOS 14.3 arm64, Claude Code 2.1.285
-(`claude -p`, allowed only `Bash(fray:*)`), Codex CLI 0.159.1 (`codex exec`,
+(`claude -p`, with `Bash(fray:*)` pre-approved), Codex CLI 0.159.1 (`codex exec`,
 workspace-write sandbox).
 
-| Host | Answered | Publish to host started, p50 / p95 | Publish to reply, p50 / p95 / max |
+| Host | Answered | Publish to host started, p50 / p95 (superseded, see below) | Publish to reply, p50 / p95 / max |
 |---|---|---|---|
 | Claude Code | 5/5 | 0.04 s / 0.05 s | 4.98 s / 6.33 s / 6.33 s |
 | Codex | 5/5 | 0.04 s / 0.05 s | 25.6 s / 34.7 s / 34.7 s |
