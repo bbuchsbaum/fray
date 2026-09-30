@@ -285,14 +285,34 @@ fn present_inbox(s: &mut Store, actor: &str, t: i64) {
 #[test]
 fn exposure_uses_the_first_time_a_version_was_shown() {
     let mut s = board();
-    ask(&mut s, "claude", "codex", "look", NOW);
+    // An earlier showing establishes codex's retained presentation history.
+    // It predates that history, so its own first showing is uncertain and
+    // left out.
+    ask(&mut s, "claude", "codex", "earlier", NOW - MIN);
+    present_inbox(&mut s, "codex", NOW);
+    ask(&mut s, "claude", "codex", "look", NOW + MIN);
     // Shown twice; only the first presentation counts.
-    present_inbox(&mut s, "codex", NOW + 2 * MIN);
+    present_inbox(&mut s, "codex", NOW + 3 * MIN);
     present_inbox(&mut s, "codex", NOW + 9 * MIN);
     let st = stats(&mut s, None, NOW + 10 * MIN);
     let e = &st["exposure"]["publish_to_first_shown"];
     assert_eq!(e["n"], 1, "{st}");
     assert_eq!(e["max_ms"], 2 * MIN);
+}
+
+#[test]
+fn a_pruned_first_showing_is_not_replaced_by_a_later_one() {
+    // Review O4 of c7ff681: shown at T+1m, then re-shown 33 times from T+60m;
+    // the retained "first" showing is an hour late.
+    let mut s = board();
+    ask(&mut s, "claude", "codex", "look", NOW);
+    present_inbox(&mut s, "codex", NOW + MIN);
+    for k in 0..33 {
+        present_inbox(&mut s, "codex", NOW + 60 * MIN + k * 1000);
+    }
+    let st = stats(&mut s, None, NOW + 70 * MIN);
+    let e = &st["exposure"]["publish_to_first_shown"];
+    assert_eq!(e["n"], 0, "an uncertain first showing is left out: {st}");
 }
 
 #[test]
@@ -376,4 +396,203 @@ fn the_cli_rejects_a_malformed_window_before_contacting_a_daemon() {
         .output()
         .unwrap();
     assert!(!String::from_utf8_lossy(&out.stderr).contains("window must be"));
+}
+
+#[test]
+fn a_bystander_note_is_not_an_answer() {
+    // Review O2 of c7ff681.
+    let mut s = board();
+    let a = ask(&mut s, "claude", "codex", "Is it safe?", NOW);
+    at(
+        &mut s,
+        "deepseek",
+        "annotate",
+        json!({"id": a, "body": "+1"}),
+        NOW + MIN,
+    );
+    let st = stats(&mut s, None, NOW + 5 * MIN);
+    assert_eq!(st["asks"]["responded"], 0, "{st}");
+    let f = at(&mut s, "claude", "friction", json!({}), NOW + 5 * MIN)["friction"].clone();
+    assert_eq!(f["unanswered_asks"]["total"], 1);
+    // The addressee's reply is the response.
+    at(
+        &mut s,
+        "codex",
+        "annotate",
+        json!({"id": a, "kind": "answer", "body": "yes"}),
+        NOW + 2 * MIN,
+    );
+    let st = stats(&mut s, None, NOW + 5 * MIN);
+    assert_eq!(st["asks"]["first_response"]["p50_ms"], 2 * MIN);
+    // An unaddressed question can be answered by anyone but its author.
+    let open = at(
+        &mut s,
+        "claude",
+        "post",
+        json!({"title": "Anyone?", "summary": "x", "kind": "question", "topic": "*"}),
+        NOW + 10 * MIN,
+    )["card"]["id"]
+        .as_i64()
+        .unwrap();
+    at(
+        &mut s,
+        "deepseek",
+        "annotate",
+        json!({"id": open, "kind": "answer", "body": "me"}),
+        NOW + 11 * MIN,
+    );
+    let st = stats(&mut s, None, NOW + 12 * MIN);
+    assert_eq!(st["asks"]["responded"], 2, "{st}");
+}
+
+#[test]
+fn owner_requests_wait_in_the_owner_queue_not_unreachable() {
+    // Review O1 of c7ff681: `fray ask-owner` sends a pending ask to the owner.
+    let mut s = board();
+    at(
+        &mut s,
+        "claude",
+        "send",
+        json!({"to": "owner", "body": "May I delete the fixtures?", "ask": true, "pending": true, "priority": 1, "refs": ["ask-owner"]}),
+        NOW,
+    );
+    let f = at(&mut s, "claude", "friction", json!({}), NOW + 3_600_000)["friction"].clone();
+    assert!(
+        f["unreachable_addressed"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|u| u["agent"] != "owner"),
+        "{f}"
+    );
+    let asks = f["unanswered_asks"]["items"].as_array().unwrap();
+    assert_eq!(asks[0]["awaiting_owner"], true, "{f}");
+    assert!(asks[0]["assignee_reachable"].is_null());
+}
+
+#[test]
+fn unacked_age_runs_from_the_oldest_unacknowledged_event() {
+    // Review O3 of c7ff681: a later third-party event must not reset the age.
+    let mut s = board();
+    let a = ask(&mut s, "claude", "codex", "status?", NOW);
+    at(
+        &mut s,
+        "deepseek",
+        "annotate",
+        json!({"id": a, "body": "also curious"}),
+        NOW + 50 * MIN,
+    );
+    let st = stats(&mut s, None, NOW + 60 * MIN);
+    let codex = st["attention"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["agent"] == "codex")
+        .cloned()
+        .unwrap();
+    assert_eq!(codex["oldest_age_ms"], 60 * MIN, "{st}");
+    // After acking the first version, the age restarts at the next unacked event.
+    at(
+        &mut s,
+        "codex",
+        "ack",
+        json!({"id": a, "through": 1}),
+        NOW + 60 * MIN,
+    );
+    let st = stats(&mut s, None, NOW + 60 * MIN);
+    let codex = st["attention"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["agent"] == "codex")
+        .cloned();
+    assert_eq!(codex.unwrap()["oldest_age_ms"], 10 * MIN, "{st}");
+}
+
+#[test]
+fn agents_who_left_and_muted_cards_are_not_unacked_attention() {
+    let mut s = board();
+    ask(&mut s, "claude", "codex", "one", NOW);
+    let note = at(
+        &mut s,
+        "claude",
+        "post",
+        json!({"title": "fyi", "summary": "x", "kind": "note", "topic": "*"}),
+        NOW,
+    )["card"]["id"]
+        .as_i64()
+        .unwrap();
+    at(&mut s, "deepseek", "mute", json!({"id": note}), NOW + MIN);
+    at(&mut s, "codex", "leave", json!({}), NOW + MIN);
+    let st = stats(&mut s, None, NOW + 2 * MIN);
+    let agents = st["attention"]["agents"].as_array().unwrap();
+    assert!(
+        agents
+            .iter()
+            .all(|a| a["agent"] != "codex" && a["agent"] != "deepseek"),
+        "{st}"
+    );
+}
+
+#[test]
+fn reopening_clears_resolution_and_kind_and_title_follow_the_card() {
+    // Review N1 and N3 of c7ff681.
+    let mut s = board();
+    let a = ask(&mut s, "claude", "codex", "first", NOW);
+    resolve(&mut s, "claude", a, NOW + 10 * MIN);
+    let rev = at(&mut s, "claude", "show", json!({"id": a}), NOW)["card"]["rev"].clone();
+    at(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id": a, "expect": rev, "status": "open", "title": "renamed"}),
+        NOW + 20 * MIN,
+    );
+    let st = stats(&mut s, None, NOW + 30 * MIN);
+    assert_eq!(st["asks"]["resolved"], 0, "{st}");
+    assert_eq!(st["asks"]["open"], 1);
+    let f = at(&mut s, "claude", "friction", json!({}), NOW + 30 * MIN)["friction"].clone();
+    assert_eq!(f["unanswered_asks"]["items"][0]["title"], "renamed", "{f}");
+    // A note patched into a question counts as an ask.
+    let n = at(
+        &mut s,
+        "claude",
+        "post",
+        json!({"title": "maybe", "summary": "x", "kind": "note"}),
+        NOW,
+    )["card"]["id"]
+        .as_i64()
+        .unwrap();
+    let rev = at(&mut s, "claude", "show", json!({"id": n}), NOW)["card"]["rev"].clone();
+    at(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id": n, "expect": rev, "kind": "question"}),
+        NOW + MIN,
+    );
+    assert_eq!(stats(&mut s, None, NOW + 30 * MIN)["asks"]["created"], 2);
+}
+
+#[test]
+fn a_friction_note_over_the_summary_limit_fails_before_sending() {
+    // Review N2 of c7ff681.
+    let body = "x".repeat(2500);
+    let out = Command::new(env!("CARGO_BIN_EXE_fray"))
+        .args([
+            "--home",
+            "/nonexistent/fray-stats-test",
+            "--as",
+            "t",
+            "friction",
+            &body,
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("friction note must contain"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

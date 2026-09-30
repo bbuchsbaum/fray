@@ -6,7 +6,7 @@
 //! truncated preview, host wake latency) is listed as unavailable, never
 //! reported as zero.
 use crate::model::*;
-use crate::store::{agent_live, agent_waiting, live_lanes};
+use crate::store::{agent_live, agent_waiting, live_lanes, OWNER};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -20,9 +20,11 @@ struct Hist {
     title: String,
     created_ms: i64,
     first_response_ms: Option<i64>,
+    /// When the card last became resolved; cleared if it is reopened.
     resolved_ms: Option<i64>,
     status: String,
     assignee: Option<String>,
+    lease_owner: Option<String>,
     /// The annotation that raised this card as a linked follow-up, if any.
     raised_by_kind: Option<String>,
     parent: Option<i64>,
@@ -49,74 +51,98 @@ struct Replay {
     order: Vec<i64>,
     reassignments: Vec<(i64, i64)>,
     overrides: Vec<(i64, i64)>,
-    events: i64,
 }
 
-fn replay(conn: &Connection) -> Result<Replay> {
-    let mut annotation_kind: HashMap<i64, String> = HashMap::new();
+/// Which cards to replay. Each selected card is replayed from its first event,
+/// so transitions always compare against the true previous state.
+enum Cards {
+    All,
+    /// Cards with any event at or after this time.
+    TouchedSince(i64),
+    /// Cards that are not closed now.
+    Open,
+}
+
+fn replay(conn: &Connection, cards: Cards) -> Result<Replay> {
     let mut r = Replay {
         cards: HashMap::new(),
         order: Vec::new(),
         reassignments: Vec::new(),
         overrides: Vec::new(),
-        events: 0,
     };
-    let mut s = conn.prepare(
-        "SELECT seq,ts_ms,actor,op,card_id,
-           json_extract(payload,'$.card.kind'),json_extract(payload,'$.card.status'),
-           json_extract(payload,'$.card.assignee'),json_extract(payload,'$.card.author'),
-           json_extract(payload,'$.card.created_ms'),json_extract(payload,'$.card.title'),
-           json_extract(payload,'$.detail.kind'),json_extract(payload,'$.detail.parent_card'),
-           json_extract(payload,'$.detail.annotation_seq'),
-           coalesce(json_array_length(payload,'$.detail.open_objections'),0)
-         FROM events ORDER BY seq",
-    )?;
-    let mut rows = s.query([])?;
+    let (filter, since) = match cards {
+        Cards::All => ("1", 0),
+        Cards::TouchedSince(t) => (
+            "e.card_id IN (SELECT card_id FROM events WHERE ts_ms>=?1)",
+            t,
+        ),
+        Cards::Open => (
+            "e.card_id IN (SELECT id FROM cards WHERE status NOT IN ('resolved','superseded','withdrawn'))",
+            0,
+        ),
+    };
+    // The kind of the annotation that raised a follow-up is read by primary
+    // key, so the parent card's history is not needed.
+    let mut s = conn.prepare(&format!(
+        "SELECT e.ts_ms,e.actor,e.op,e.card_id,
+           json_extract(e.payload,'$.card.kind'),json_extract(e.payload,'$.card.status'),
+           json_extract(e.payload,'$.card.assignee'),json_extract(e.payload,'$.card.author'),
+           json_extract(e.payload,'$.card.created_ms'),json_extract(e.payload,'$.card.title'),
+           json_extract(e.payload,'$.card.lease_owner'),
+           json_extract(e.payload,'$.detail.parent_card'),
+           CASE WHEN e.op='post' THEN (SELECT json_extract(a.payload,'$.detail.kind') FROM events a
+             WHERE a.seq=json_extract(e.payload,'$.detail.annotation_seq') AND a.op='annotate') END,
+           coalesce(json_array_length(e.payload,'$.detail.open_objections'),0)
+         FROM events e WHERE {filter} AND ?1>=0 ORDER BY e.seq"
+    ))?;
+    let mut rows = s.query([since])?;
     while let Some(row) = rows.next()? {
-        r.events += 1;
-        let seq: i64 = row.get(0)?;
-        let ts: i64 = row.get(1)?;
-        let actor: String = row.get(2)?;
-        let op: String = row.get(3)?;
-        let id: i64 = row.get(4)?;
-        let status: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
-        let assignee: Option<String> = row.get(7)?;
-        let detail_kind: Option<String> = row.get(11)?;
-        let parent: Option<i64> = row.get(12)?;
-        let annotation_seq: Option<i64> = row.get(13)?;
-        let overridden: i64 = row.get(14)?;
-        if op == "annotate" {
-            if let Some(kind) = &detail_kind {
-                annotation_kind.insert(seq, kind.clone());
+        let ts: i64 = row.get(0)?;
+        let actor: String = row.get(1)?;
+        let op: String = row.get(2)?;
+        let id: i64 = row.get(3)?;
+        let kind: Option<String> = row.get(4)?;
+        let status: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
+        let assignee: Option<String> = row.get(6)?;
+        let title: Option<String> = row.get(9)?;
+        let lease_owner: Option<String> = row.get(10)?;
+        let overridden: i64 = row.get(13)?;
+        let h = match r.cards.entry(id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                r.order.push(id);
+                e.insert(Hist {
+                    kind: String::new(),
+                    author: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    title: String::new(),
+                    created_ms: row.get::<_, Option<i64>>(8)?.unwrap_or(ts),
+                    first_response_ms: None,
+                    resolved_ms: None,
+                    status: String::new(),
+                    assignee: assignee.clone(),
+                    lease_owner: lease_owner.clone(),
+                    raised_by_kind: row.get(12)?,
+                    parent: row.get(11)?,
+                })
             }
-        }
-        let h = r.cards.entry(id).or_insert_with(|| {
-            r.order.push(id);
-            Hist {
-                kind: String::new(),
-                author: String::new(),
-                title: String::new(),
-                created_ms: ts,
-                first_response_ms: None,
-                resolved_ms: None,
-                status: String::new(),
-                assignee: None,
-                raised_by_kind: annotation_seq.and_then(|a| annotation_kind.get(&a).cloned()),
-                parent,
-            }
-        });
-        if h.kind.is_empty() {
-            h.kind = row.get::<_, Option<String>>(5)?.unwrap_or_default();
-            h.author = row.get::<_, Option<String>>(8)?.unwrap_or_default();
-            h.title = row.get::<_, Option<String>>(10)?.unwrap_or_default();
-            h.created_ms = row.get::<_, Option<i64>>(9)?.unwrap_or(ts);
-            h.assignee = assignee.clone();
-        }
+        };
+        // A response comes from whoever the card is addressed to (assignee or
+        // lease holder) or the owner; a bystander's note is not an answer.
+        // An unaddressed card may be answered by anyone but its author.
         if op == "annotate" && actor != h.author && h.first_response_ms.is_none() {
-            h.first_response_ms = Some(ts);
+            let addressed = h.assignee.is_some() || h.lease_owner.is_some();
+            if !addressed
+                || actor == OWNER
+                || h.assignee.as_deref() == Some(actor.as_str())
+                || h.lease_owner.as_deref() == Some(actor.as_str())
+            {
+                h.first_response_ms = Some(ts);
+            }
         }
-        if status == "resolved" && h.resolved_ms.is_none() {
+        if status == "resolved" && h.status != "resolved" {
             h.resolved_ms = Some(ts);
+        } else if status != "resolved" {
+            h.resolved_ms = None;
         }
         // Reassigning away from someone is a possible misroute: a signal, not
         // proof. A first assignment is not counted.
@@ -126,8 +152,15 @@ fn replay(conn: &Connection) -> Result<Replay> {
         if overridden > 0 {
             r.overrides.push((id, ts));
         }
+        if let Some(kind) = kind {
+            h.kind = kind;
+        }
+        if let Some(title) = title {
+            h.title = title;
+        }
         h.status = status;
         h.assignee = assignee;
+        h.lease_owner = lease_owner;
     }
     Ok(r)
 }
@@ -143,7 +176,15 @@ fn is_ask(h: &Hist) -> bool {
 /// `fray stats`: the plan's success metrics, computed from the store.
 pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Result<Value> {
     let since = window_ms.map_or(0, |w| now.saturating_sub(w));
-    let r = replay(conn)?;
+    let r = replay(
+        conn,
+        if window_ms.is_some() {
+            Cards::TouchedSince(since)
+        } else {
+            Cards::All
+        },
+    )?;
+    let events_total: i64 = conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
     let in_window = |h: &Hist| h.created_ms >= since;
     let (mut asks, mut objections) = (json!({}), json!({}));
     for (key, pick) in [
@@ -194,22 +235,34 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
     cards_reassigned.dedup();
 
     // First exposure of each published version: when a host was first shown
-    // it, not when the socket delivered it. Presented batches are retained for
-    // a bounded time, so this covers recent history only.
+    // it, not when the socket delivered it. Presented batches are pruned oldest
+    // first, so only versions published after an agent's oldest retained batch
+    // are certain to have their first showing retained; older ones would
+    // report a later re-showing as the first.
     let mut s = conn.prepare(
         "SELECT min(b.created_ms)-e.ts_ms FROM presented_items i
            JOIN presented_batches b ON b.batch=i.batch
            JOIN events e ON e.seq=i.through_seq
-         WHERE e.ts_ms>=? GROUP BY b.agent,i.card_id,i.through_seq",
+         WHERE e.ts_ms>=?1
+           AND e.ts_ms>=(SELECT min(o.created_ms) FROM presented_batches o WHERE o.agent=b.agent)
+         GROUP BY b.agent,i.card_id,i.through_seq",
     )?;
     let exposure = s
         .query_map([since], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    // Age runs from the oldest peer event the agent has not acknowledged, not
+    // from the card's newest one. Agents who left and cards muted by the
+    // agent are excluded, except a question assigned to it, whose outcome
+    // must still reach it.
     let mut s = conn.prepare(
-        "SELECT d.agent,count(*),max(?1-e.ts_ms) FROM deliveries d
-           JOIN events e ON e.seq=d.pending_seq
-         WHERE d.pending_seq>d.ack_seq GROUP BY d.agent ORDER BY 3 DESC,1",
+        "SELECT d.agent,count(*),max(?1-(SELECT min(e.ts_ms) FROM events e
+             WHERE e.card_id=d.card_id AND e.seq>d.ack_seq AND e.seq<=d.pending_seq AND e.actor<>d.agent))
+         FROM deliveries d JOIN agents a ON a.name=d.agent AND a.enabled=1
+         WHERE d.pending_seq>d.ack_seq
+           AND (NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=d.agent AND m.card_id=d.card_id)
+             OR EXISTS(SELECT 1 FROM cards c WHERE c.id=d.card_id AND c.kind='question' AND c.assignee=d.agent))
+         GROUP BY d.agent ORDER BY 3 DESC,1",
     )?;
     let unacked = s
         .query_map([now], |r| {
@@ -228,22 +281,15 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
         "live_queued": live.iter().filter(|l| l["state"] == "queued").count(),
         "live_stale": live.iter().filter(|l| l["stale"] == true).count(),
     });
-    let friction_notes = r
-        .order
-        .iter()
-        .filter(|id| in_window(&r.cards[id]))
-        .filter(|id| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM cards c, json_each(c.tags) t WHERE c.id=? AND t.value='friction')",
-                [**id],
-                |r| r.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
-        })
-        .count();
+    let friction_notes: i64 = conn.query_row(
+        "SELECT count(*) FROM cards c WHERE c.created_ms>=?
+           AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value='friction')",
+        [since],
+        |r| r.get(0),
+    )?;
 
     Ok(json!({"stats":{
-        "window":{"since_ms":since,"until_ms":now,"all_history":window_ms.is_none(),"events_total":r.events},
+        "window":{"since_ms":since,"until_ms":now,"all_history":window_ms.is_none(),"events_total":events_total},
         "asks":asks,
         "objections":objections,
         "routing":{"reassignments":reassigned.len(),"cards_reassigned":cards_reassigned.len(),
@@ -251,7 +297,7 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
         "exposure":{"publish_to_first_shown":summary(exposure),
             "note":"From presented batches, which are retained for a bounded time: recent history only. Exposure is not handling."},
         "attention":{"unacked_items":unacked.iter().map(|a| a["items"].as_i64().unwrap_or(0)).sum::<i64>(),
-            "agents":unacked,"note":"Current state, not windowed."},
+            "agents":unacked,"note":"Current state, not windowed. Excludes agents who left and cards they muted."},
         "lanes":lanes,
         "friction_notes":friction_notes,
         "unavailable":[
@@ -266,7 +312,7 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
 
 /// `fray friction` with no text: the worst current offenders, oldest first.
 pub(crate) fn friction(conn: &Connection, now: i64) -> Result<Value> {
-    let r = replay(conn)?;
+    let r = replay(conn, Cards::Open)?;
     let mut open: Vec<(i64, &Hist)> = r
         .order
         .iter()
@@ -274,21 +320,24 @@ pub(crate) fn friction(conn: &Connection, now: i64) -> Result<Value> {
         .filter(|(_, h)| !closed(&h.status))
         .collect();
     open.sort_by_key(|(id, h)| (h.created_ms, *id));
+    // The owner is reached through the owner queue (`fray owner review`), not
+    // a session; requests to it wait for the owner, they are not lost.
     let reachable = |agent: &str| -> Result<bool> {
-        Ok(agent_live(conn, agent, now)? || agent_waiting(conn, agent, now)?)
+        Ok(agent == OWNER || agent_live(conn, agent, now)? || agent_waiting(conn, agent, now)?)
     };
     let mut unanswered = Vec::new();
     for (id, h) in open
         .iter()
         .filter(|(_, h)| is_ask(h) && h.first_response_ms.is_none())
     {
-        let assignee_reachable = match &h.assignee {
+        let assignee_reachable = match h.assignee.as_deref() {
+            Some(OWNER) | None => None,
             Some(a) => Some(reachable(a)?),
-            None => None,
         };
         unanswered.push(
             json!({"id":id,"title":h.title,"author":h.author,"assignee":h.assignee,
-            "age_ms":now-h.created_ms,"assignee_reachable":assignee_reachable}),
+            "age_ms":now-h.created_ms,"assignee_reachable":assignee_reachable,
+            "awaiting_owner":h.assignee.as_deref()==Some(OWNER)}),
         );
     }
     let objections: Vec<Value> = open
@@ -453,7 +502,9 @@ pub fn friction_text(v: &Value, clean: fn(&str) -> String) -> String {
                 c(i["title"].as_str().unwrap_or("")),
                 c(i["author"].as_str().unwrap_or("")),
                 c(i["assignee"].as_str().unwrap_or("anyone")),
-                if i["assignee_reachable"] == false {
+                if i["awaiting_owner"] == true {
+                    ", in the owner queue"
+                } else if i["assignee_reachable"] == false {
                     ", unreachable"
                 } else {
                     ""

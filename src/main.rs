@@ -1415,6 +1415,8 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 ("friction", json!({}))
             } else {
                 let body = message_body(text, body_file)?;
+                // A friction note is a card summary, which holds 2,000 bytes.
+                fray::model::text(&body, "friction note", 2000, false)?;
                 let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                 let mut title = String::from("friction: ");
                 for c in first.trim().chars() {

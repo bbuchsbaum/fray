@@ -1,5 +1,26 @@
 # Validation
 
+## Finite waits without the hang-up floor (2026-09-30)
+
+A finite wait now replies as soon as it has a result, instead of first joining
+its hang-up observer, which can sit in a 100 ms bounded read. If the observer
+reads a byte after the reply, that byte begins the client's next request. It is
+handed back to the connection loop, not treated as pipelining. Input sent while
+the wait is in progress is still refused as a protocol error. The change is
+`wait_cancellable` in `src/server.rs`, with regression tests in
+`tests/wait_latency.rs`.
+
+Same machine and harness as the baseline below: release build of
+`claude/epic-wave1`, 30 declared trials per row.
+
+| Path | Priority | Before p50 / p95 ms | After p50 / p95 ms | Delivered after |
+|---|---|---|---|---|
+| wait (finite timeout) | p2 | 91.6 / 110.0 | 3.2 / 12.1 | 30/30, 0 duplicates |
+| wait (finite timeout) | p1 | 98.4 / 110.9 | 2.9 / 13.1 | 30/30, 0 duplicates |
+| watch --attention | p1 | 1.7 / 6.9 | 2.5 / 22.2 | 30/30, 0 duplicates |
+| watch --attention | p2 | 104.2 / 107.3 | 107.5 / 121.0 | 30/30 (settle window, unchanged by design) |
+| hook PostToolUse | p1 | 18.3 / 43.4 | 15.7 / 22.4 | 30/30 |
+
 ## Wake-path latency baseline (2026-09-30)
 
 `scripts/bench_wake.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX, step 0) publishes
@@ -56,8 +77,17 @@ target/release/fray --n 30 --home-parent /tmp`.
 `fray stats` and `fray friction` (Mote bd-01M3RZ9C6948DBVW30C1610F6W) replay the
 event log read-only. This is the "before" measurement that the roadmap requires
 ahead of the phases it judges. The baseline was taken from a read-only
-`.backup` copy of the shared board at event 169 (2026-09-30), served by a
+`.backup` copy of the shared board at event 185 (2026-09-30), served by a
 branch-built binary under a temporary home. The live board was not touched.
+
+These figures replace a first draft taken at event 169. Independent review of
+`c7ff681` objected to four metric definitions, all reproduced and now fixed:
+
+- **O1.** Requests to the owner were reported as unreachable.
+- **O2.** A bystander's note counted as the answer.
+- **O3.** Unacked age ran from a card's newest event, not from the oldest
+  unacknowledged one.
+- **O4.** A re-showing could stand in for a pruned first showing.
 
 The live board is at schema version 3, written by the installed binary built
 from the unmerged `codex/pairing-friction` branch (d3b1480). A `main` binary
@@ -65,32 +95,34 @@ refuses to open it (`schema_version`). Version 3 only adds tables
 (`peer_generations`, `peer_seen`, `review_subjects`, `review_verdicts`), so the
 private copy was relabelled version 2 for this read-only measurement.
 
-| Metric (all history, 169 events) | Value |
+| Metric (all history, 185 events) | Value |
 |---|---|
 | Asks created / responded / resolved / open | 10 / 7 / 3 / 7 |
 | Ask first response p50 / p90 / max | 8m / 38m / 38m (n=7) |
 | Ask resolution p50 / max | 14m / 17m (n=3) |
-| Oldest open ask; oldest unanswered | 7.0d; 6.8d |
-| Objections raised / resolved / open / overridden | 8 / 8 / 0 / 0 |
+| Oldest open ask; oldest unanswered | 7.0d; 6.9d |
+| Objections raised / resolved / open / overridden | 12 / 8 / 4 / 0 |
 | Objection resolution p50 / max | 12m / 17m (n=8) |
 | Reassignments (possible misroutes) | 4, on 4 cards |
-| Publish to first shown, p50 / p90 / max | 16s / 2m / 31m (n=30, retained batches only) |
-| Unacked attention now | 17 items: codex-attention-0923 11, storymodel-wake-gap 6 (oldest 6.9d) |
+| Publish to first shown, p50 / p90 / max | 13s / 2m / 31m (n=28, certain first showings only) |
+| Unacked attention now | 46 items across 4 agents; 3 absent agents hold 39, the oldest 7.0d |
 | Lanes taken / live | 0 / 0 |
 | Friction notes | 0 |
 
-`fray friction` lists two asks (#19 and #21) addressed to
-`codex-attention-0923`, unanswered for 6.8 days, and reports that nothing can
-reach that agent (five open requests). The most visible weakness is stale
-obligations to absent agents, not slow answers between agents who are present.
+The four open objections are the review of this very change. `fray friction`
+also lists two asks (#19 and #21) to `codex-attention-0923` that have been
+unanswered for 6.9 days, and reports that nothing can reach that agent (five
+open requests). The most visible weakness is stale obligations to absent agents,
+not slow answers between agents who are present.
 
 The store does not measure, and the command says so: host wake and model
 response latency (epic child 3), acknowledgment latency over time, truncation
 refetches, reviews per landing (child 1) and lane handovers.
 
-Checks at this change: formatting, strict Clippy, all Rust tests (10 new in
-`tests/stats.rs`), locked build, `integration.py`, `attention_integration.py`,
-`reliability_integration.py` and `check_sql.py` (22 checks) pass.
+Checks at this change: formatting, strict Clippy, 227 Rust tests (17 in
+`tests/stats.rs`, 3 in `tests/wait_latency.rs`), locked build,
+`integration.py`, `attention_integration.py`, `reliability_integration.py` and
+`check_sql.py` pass.
 
 ## Phase 1 client and attention candidate (2026-09-23)
 
