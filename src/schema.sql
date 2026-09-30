@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS controllers (
     updated_ms INTEGER NOT NULL,
     reason TEXT
 );
+-- A drive run's own diagnostics: its owned child process group, how that
+-- group was disposed of, and urgent attention queued behind a running turn.
+CREATE TABLE IF NOT EXISTS controller_details (
+    agent TEXT PRIMARY KEY REFERENCES agents(name),
+    run_id TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
 -- Muting is reversible attention suppression, never an acknowledgment.
 CREATE TABLE IF NOT EXISTS muted_cards (
     agent TEXT NOT NULL REFERENCES agents(name),

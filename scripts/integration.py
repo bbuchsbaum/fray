@@ -404,16 +404,18 @@ class Integration(unittest.TestCase):
         self.assertIsNone(metrics[0]['provider_usage'])
         self.assertEqual(metrics[0]['exit_reason'], 'success')
         self.assertNotIn('argv', metrics[0])
-    def test_oversize_receipt_fails_before_spawning_instead_of_empty_turns(self):
+    def test_oversize_receipt_becomes_a_pointer_instead_of_aborting(self):
         sent = self.cli('alice', 'send', 'bob', '🧠' * 300, '--ask')
         for _ in range(2):
             self.cli('alice', 'reply', str(sent['card']['id']), '🧠' * 300)
         record = pathlib.Path(self.home) / 'turns.jsonl'
-        result = self.run_agent(record, '--budget', '2000', '--max-turns', '1')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('prompt_budget', result.stderr)
-        self.assertFalse(record.exists())
+        result = self.run_agent(record, '--budget', '2000', '--max-turns', '1', agent_options=['--ignore'])
+        self.assertIn('stalled', result.stderr)
+        turn = json.loads(record.read_text())
+        self.assertLessEqual(turn['prompt_bytes'], 2000)
+        self.assertTrue(turn['attention']['items'][0]['omitted'])
         self.assertEqual(self.call('inbox', 'bob')['total'], 1)
+        record.unlink()
         result = self.run_agent(record, '--budget', '8000', '--max-turns', '1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLessEqual(json.loads(record.read_text())['prompt_bytes'], 8000)
