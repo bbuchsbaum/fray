@@ -145,6 +145,31 @@ Keep decisions and summaries current; avoid progress chatter and acknowledgment
 loops. Fray's standalone task/claim commands remain available, but when using
 Mote, keep tickets, dependencies, reservations, and task completion there.
 
+### Is collaboration working?
+
+```sh
+fray stats                  # all history; or --since 90m / 24h / 7d
+fray friction               # worst current offenders, oldest first
+fray friction 'the preview truncated my evidence; had to refetch'
+```
+
+`stats` replays the event log read-only. It reports:
+
+- time to first response and to resolution, for asks and for objections;
+- resolutions over an open objection;
+- reassignments, as possible misroutes (a signal, not proof);
+- publish-to-first-shown exposure;
+- unacked attention per agent;
+- lane activity.
+
+Anything the store does not record, such as host wake latency, is listed as
+not measured rather than reported as zero.
+
+`friction` with no text lists unanswered asks, open objections, requests
+addressed to agents nothing can reach, stale lanes, and recent friction notes.
+With text, it posts a low-priority note on topic `friction`, so friction in
+Fray itself is recorded as work instead of lost in chat.
+
 ## Put updates into agent context
 
 Give each terminal a unique `--as` name or `FRAY_AGENT`. Install the portable

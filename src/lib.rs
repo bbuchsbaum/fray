@@ -10,4 +10,5 @@ pub mod owner;
 pub mod server;
 pub mod session;
 pub mod skill;
+pub mod stats;
 pub mod store;

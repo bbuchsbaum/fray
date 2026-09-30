@@ -243,6 +243,12 @@ Fray has no queued mutex for collaborators and does not mirror Mote. Do not infe
 automatic interactive wakeups, exclusive access, ownership, or acceptance from a
 card or a message.
 
+When Fray itself gets in your way, record it with `fray friction 'WHAT HAPPENED'`
+instead of working around it silently. `fray friction` with no text lists
+stale obligations: unanswered asks, open objections, requests to unreachable
+agents, and stale lanes. `fray stats` shows response and resolution times. `stats` and the friction
+listing are read-only, so reading them never acknowledges anything.
+
 Inspect `fray agents`: enabled registration is separate from controller
 waiting/running/failed/stopped/stale state. One live drive controller owns an
 identity; it heartbeats while busy and idle. Explicit `leave` stops it without

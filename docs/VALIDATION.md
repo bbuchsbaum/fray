@@ -1,5 +1,46 @@
 # Validation
 
+## Collaboration stats baseline (2026-09-30)
+
+`fray stats` and `fray friction` (Mote bd-01M3RZ9C6948DBVW30C1610F6W) replay the
+event log read-only. This is the "before" measurement that the roadmap requires
+ahead of the phases it judges. The baseline was taken from a read-only
+`.backup` copy of the shared board at event 169 (2026-09-30), served by a
+branch-built binary under a temporary home. The live board was not touched.
+
+The live board is at schema version 3, written by the installed binary built
+from the unmerged `codex/pairing-friction` branch (d3b1480). A `main` binary
+refuses to open it (`schema_version`). Version 3 only adds tables
+(`peer_generations`, `peer_seen`, `review_subjects`, `review_verdicts`), so the
+private copy was relabelled version 2 for this read-only measurement.
+
+| Metric (all history, 169 events) | Value |
+|---|---|
+| Asks created / responded / resolved / open | 10 / 7 / 3 / 7 |
+| Ask first response p50 / p90 / max | 8m / 38m / 38m (n=7) |
+| Ask resolution p50 / max | 14m / 17m (n=3) |
+| Oldest open ask; oldest unanswered | 7.0d; 6.8d |
+| Objections raised / resolved / open / overridden | 8 / 8 / 0 / 0 |
+| Objection resolution p50 / max | 12m / 17m (n=8) |
+| Reassignments (possible misroutes) | 4, on 4 cards |
+| Publish to first shown, p50 / p90 / max | 16s / 2m / 31m (n=30, retained batches only) |
+| Unacked attention now | 17 items: codex-attention-0923 11, storymodel-wake-gap 6 (oldest 6.9d) |
+| Lanes taken / live | 0 / 0 |
+| Friction notes | 0 |
+
+`fray friction` lists two asks (#19 and #21) addressed to
+`codex-attention-0923`, unanswered for 6.8 days, and reports that nothing can
+reach that agent (five open requests). The most visible weakness is stale
+obligations to absent agents, not slow answers between agents who are present.
+
+The store does not measure, and the command says so: host wake and model
+response latency (epic child 3), acknowledgment latency over time, truncation
+refetches, reviews per landing (child 1) and lane handovers.
+
+Checks at this change: formatting, strict Clippy, all Rust tests (10 new in
+`tests/stats.rs`), locked build, `integration.py`, `attention_integration.py`,
+`reliability_integration.py` and `check_sql.py` (22 checks) pass.
+
 ## Phase 1 client and attention candidate (2026-09-23)
 
 At source manifest

@@ -328,6 +328,21 @@ enum Cmd {
         fence: i64,
     },
     Agents,
+    /// Collaboration metrics from the store: response and resolution times,
+    /// objections, possible misroutes, exposure, unacked attention, lanes.
+    Stats {
+        /// Only work started within this window, e.g. 90m, 24h, 7d (default: all history).
+        #[arg(long)]
+        since: Option<Window>,
+    },
+    /// With text, record friction in Fray as a note tagged `friction`.
+    /// Without, list the worst current offenders.
+    Friction {
+        #[arg(conflicts_with = "body_file")]
+        text: Option<String>,
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
     /// Silence this exact card without acknowledging its unread receipts.
     Mute {
         id: i64,
@@ -597,6 +612,26 @@ impl std::str::FromStr for WaitTimeout {
             .filter(|s| *s <= 86400)
             .map(|s| Self(Some(s)))
             .ok_or_else(|| "timeout must be none or 0..86400 seconds".into())
+    }
+}
+/// A look-back window for `stats --since`: a positive count of m, h or d.
+#[derive(Clone)]
+struct Window(i64);
+impl std::str::FromStr for Window {
+    type Err = String;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (count, unit) = [('m', 60_000), ('h', 3_600_000), ('d', 86_400_000)]
+            .into_iter()
+            .find_map(|(suffix, unit)| value.strip_suffix(suffix).map(|n| (n, unit)))
+            .unwrap_or(("", 0));
+        count
+            .parse::<i64>()
+            .ok()
+            .filter(|n| unit > 0 && (1..=36_500 * 1440).contains(n))
+            .map(|n| Self(n * unit))
+            .ok_or_else(|| {
+                "window must be a positive count of m, h or d (e.g. 90m, 24h, 7d)".into()
+            })
     }
 }
 fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
@@ -1374,6 +1409,26 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Renew { id, fence, ttl } => ("renew", json!({"id":id,"fence":fence,"ttl":ttl})),
         Cmd::Release { id, fence } => ("release", json!({"id":id,"fence":fence})),
         Cmd::Agents => ("agents", json!({})),
+        Cmd::Stats { since } => ("stats", json!({"window_ms":since.map(|w| w.0)})),
+        Cmd::Friction { text, body_file } => {
+            if text.is_none() && body_file.is_none() {
+                ("friction", json!({}))
+            } else {
+                let body = message_body(text, body_file)?;
+                let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                let mut title = String::from("friction: ");
+                for c in first.trim().chars() {
+                    if title.len() + c.len_utf8() > 160 {
+                        break;
+                    }
+                    title.push(c);
+                }
+                (
+                    "post",
+                    json!({"title":title,"summary":body,"kind":"note","topic":"friction","priority":3,"tags":["friction"]}),
+                )
+            }
+        }
         Cmd::Mute { id } => ("mute", json!({"id":id})),
         Cmd::Unmute { id } => ("unmute", json!({"id":id})),
         Cmd::Doctor => return Ok(Some(fray::diagnostics::inspect(&home, &actor)?)),
@@ -1739,7 +1794,11 @@ fn card_text(c: &Value) -> String {
     )
 }
 fn human(v: &Value, out: &mut String) {
-    if v.get("attention").is_some() {
+    if v.get("stats").is_some() {
+        out.push_str(&fray::stats::stats_text(v, clean));
+    } else if v.get("friction").is_some() {
+        out.push_str(&fray::stats::friction_text(v, clean));
+    } else if v.get("attention").is_some() {
         out.push_str(&format!(
             "FRAY  agent={}  cursor={}  current state\n",
             v["agent"], v["cursor"]
