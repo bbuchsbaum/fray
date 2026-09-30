@@ -1,5 +1,144 @@
 # Validation
 
+## Finite waits without the hang-up floor (2026-09-30)
+
+A finite wait now replies as soon as it has a result, instead of first joining
+its hang-up observer, which can sit in a 100 ms bounded read. One atomic claim
+settles what happens to input:
+
+- Input that the observer claims before the waiter commits its reply is
+  refused as pipelining (a protocol error).
+- Input after the reply is committed begins the client's next request. It is
+  handed back to the connection loop and served.
+
+A client that follows the protocol, sending the next request only after
+reading the reply, is never refused. The change is `wait_cancellable` in
+`src/server.rs`, with regression tests in `tests/wait_latency.rs`.
+
+The first version of this change (`0dcd56c`) lost a byte when input raced the
+wait's wake-up. Independent review reproduced it in 51 to 75 of 300 to 400
+stress iterations. The single-claim state fixes it: 0 bad on the reviewer's
+seeds 1, 4 and 5. The regression test
+`input_racing_the_wait_reply_is_refused_or_served_never_corrupted` repeats
+the race 200 times, and it fails on `0dcd56c`.
+
+Same machine and harness as the baseline below: release build of
+`claude/epic-wave1`, 30 declared trials per row.
+
+| Path | Priority | Before p50 / p95 ms | After p50 / p95 ms | Delivered after |
+|---|---|---|---|---|
+| wait (finite timeout) | p2 | 91.6 / 110.0 | 3.2 / 12.1 | 30/30, 0 duplicates |
+| wait (finite timeout) | p1 | 98.4 / 110.9 | 2.9 / 13.1 | 30/30, 0 duplicates |
+| watch --attention | p1 | 1.7 / 6.9 | 2.5 / 22.2 | 30/30, 0 duplicates |
+| watch --attention | p2 | 104.2 / 107.3 | 107.5 / 121.0 | 30/30 (settle window, unchanged by design) |
+| hook PostToolUse | p1 | 18.3 / 43.4 | 15.7 / 22.4 | 30/30 |
+
+## Wake-path latency baseline (2026-09-30)
+
+`scripts/bench_wake.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX, step 0) publishes
+one question per trial through the real CLI, at a declared priority. It then times arrival at a
+stand-in host on each delivery path, from the publisher's `send` returning to
+the host-visible event, on one monotonic clock:
+
+- **wait:** `fray wait --new` returns.
+- **watch:** `fray watch --attention --notification` prints a notice. This is
+  what the Claude Monitor plugin runs.
+- **drive:** `fray drive` starts a stub child with the packet. The stub is
+  Python and makes no model call.
+- **hook:** `fray hook` PostToolUse returns context naming the item, assuming a
+  tool boundary right after publication.
+
+Model response and the host's scheduling of an idle session are not included;
+they need real hosts, which the charter reserves for the owner. Failed or
+timed-out trials count against a path. None occurred.
+
+Release build `e8e6c93` (main `0ce4333` plus `fray stats`), macOS 14.3 arm64,
+30 declared trials per path and priority:
+
+| Path | Priority | Delivered | Duplicates | p50 ms | p95 ms | max ms |
+|---|---|---|---|---|---|---|
+| wait (finite timeout) | p2 | 30/30 | 0 | 91.6 | 110.0 | 121.9 |
+| wait (finite timeout) | p1 | 30/30 | 0 | 98.4 | 110.9 | 122.9 |
+| watch --attention | p2 | 30/30 | 0 | 104.2 | 107.3 | 108.5 |
+| watch --attention | p1 | 30/30 | 0 | 1.7 | 6.9 | 22.0 |
+| drive (stub child start) | p2 | 30/30 | 0 | 88.5 | 214.7 | 389.8 |
+| drive (stub child start) | p1 | 30/30 | 0 | 72.8 | 171.2 | 292.5 |
+| hook PostToolUse | p1 | 30/30 | 0 | 18.3 | 43.4 | 79.7 |
+
+All 210 trials delivered. Duplicates can only occur on the watch path, which
+emits a stream; there were none. A wait returns once, and each drive or hook
+trial is a single invocation. Two floors appear, and they have different
+causes:
+
+- **watch at p2: deliberate.** The attention stream holds non-urgent items for
+  a fixed 100 ms settle window (`settle_ms`, `src/server.rs` `watch_attention`)
+  so that a burst arrives as one packet. p0–p1 items bypass the window and
+  arrive in about 2 ms.
+- **Finite waits: an artifact, independent of priority.** A finite wait's
+  hang-up observer (`wait_cancellable`, `src/server.rs`) reads the client
+  socket with a 100 ms timeout, and the reply waits for that thread to notice
+  completion. `wait --timeout none` has no such observer timeout and gives
+  p50 2.4 ms, p95 13.5 ms (20 trials). This is the first improvement target.
+
+The drive column is dominated by process spawn. The stub records its time only
+after the Python interpreter has started, so every drive sample includes
+interpreter start-up, not just the tail.
+
+Reproduce: `cargo build --release && python3 scripts/bench_wake.py
+target/release/fray --n 30 --home-parent /tmp`.
+
+## Collaboration stats baseline (2026-09-30)
+
+`fray stats` and `fray friction` (Mote bd-01M3RZ9C6948DBVW30C1610F6W) replay the
+event log read-only. This is the "before" measurement that the roadmap requires
+ahead of the phases it judges. The baseline was taken from a read-only
+`.backup` copy of the shared board at event 185 (2026-09-30), served by a
+branch-built binary under a temporary home. The live board was not touched.
+
+These figures replace a first draft taken at event 169. Independent review of
+`c7ff681` objected to four metric definitions, all reproduced and now fixed:
+
+- **O1.** Requests to the owner were reported as unreachable.
+- **O2.** A bystander's note counted as the answer.
+- **O3.** Unacked age ran from a card's newest event, not from the oldest
+  unacknowledged one.
+- **O4.** A re-showing could stand in for a pruned first showing.
+
+The live board is at schema version 3, written by the installed binary built
+from the unmerged `codex/pairing-friction` branch (d3b1480). A `main` binary
+refuses to open it (`schema_version`). Version 3 only adds tables
+(`peer_generations`, `peer_seen`, `review_subjects`, `review_verdicts`), so the
+private copy was relabelled version 2 for this read-only measurement.
+
+| Metric (all history, 185 events) | Value |
+|---|---|
+| Asks created / responded / resolved / open | 10 / 7 / 3 / 7 |
+| Ask first response p50 / p90 / max | 8m / 38m / 38m (n=7) |
+| Ask resolution p50 / max | 14m / 17m (n=3) |
+| Oldest open ask; oldest unanswered | 7.0d; 6.9d |
+| Objections raised / resolved / open / overridden | 12 / 8 / 4 / 0 |
+| Objection resolution p50 / max | 12m / 17m (n=8) |
+| Reassignments (possible misroutes) | 4, on 4 cards |
+| Publish to first shown, p50 / p90 / max | 13s / 2m / 31m (n=28, certain first showings only) |
+| Unacked attention now | 46 items across 4 agents; 3 absent agents hold 39, the oldest 7.0d |
+| Lanes taken / live | 0 / 0 |
+| Friction notes | 0 |
+
+The four open objections are the review of this very change. `fray friction`
+also lists two asks (#19 and #21) to `codex-attention-0923` that have been
+unanswered for 6.9 days, and reports that nothing can reach that agent (five
+open requests). The most visible weakness is stale obligations to absent agents,
+not slow answers between agents who are present.
+
+The store does not measure, and the command says so: host wake and model
+response latency (epic child 3), acknowledgment latency over time, truncation
+refetches, reviews per landing (child 1) and lane handovers.
+
+Checks at this change: formatting, strict Clippy, 227 Rust tests (17 in
+`tests/stats.rs`, 3 in `tests/wait_latency.rs`), locked build,
+`integration.py`, `attention_integration.py`, `reliability_integration.py` and
+`check_sql.py` pass.
+
 ## Phase 1 client and attention candidate (2026-09-23)
 
 At source manifest

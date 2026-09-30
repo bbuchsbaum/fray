@@ -13,4 +13,5 @@ pub mod server;
 pub mod session;
 pub mod skill;
 pub mod snapshot;
+pub mod stats;
 pub mod store;

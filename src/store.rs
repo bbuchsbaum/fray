@@ -2014,7 +2014,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2280,6 +2280,18 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 bounded(a, "limit", 100, 1, 100)?,
                 boolean(a, "all", false)?,
             )
+        }
+        "stats" => {
+            check_fields(a, &["window_ms"])?;
+            let window = match a.get("window_ms") {
+                None | Some(Value::Null) => None,
+                Some(_) => Some(bounded(a, "window_ms", 0, 1, i64::MAX / 2)?),
+            };
+            crate::stats::stats(conn, window, now)
+        }
+        "friction" => {
+            check_fields(a, &[])?;
+            crate::stats::friction(conn, now)
         }
         _ => Err(Error::invalid(format!("unknown operation: {}", req.op))),
     }
@@ -2626,7 +2638,7 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 /// will hear a lane notice, or a recent presentation of receipts (inbox, wait,
 /// thread or hook). Polling an empty inbox is not recorded; arm a wait or set
 /// a status instead.
-fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+pub(crate) fn agent_live(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
     let last = last_active(conn, agent)?;
     let active = last.is_some_and(|t| now - t < IDENTITY_TTL_MS);
     Ok(
@@ -2647,7 +2659,7 @@ fn last_active(conn: &Connection, agent: &str) -> Result<Option<i64>> {
 
 /// Whether something is armed to hear the agent's mail right now: a connected
 /// listener or a wait in progress.
-fn agent_waiting(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+pub(crate) fn agent_waiting(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM listeners WHERE agent=?1 AND connected=1) OR EXISTS(SELECT 1 FROM agent_waits WHERE agent=?1 AND refreshed_ms>?2)",
         params![agent, now - WAIT_FRESH_MS],
@@ -2710,7 +2722,7 @@ fn absence_notice(conn: &Connection, who: &str, actor: &str, now: i64) -> Result
 }
 
 /// Live (unreleased) lanes, with a stale flag for holders no longer present.
-fn live_lanes(conn: &Connection, now: i64) -> Result<Vec<Value>> {
+pub(crate) fn live_lanes(conn: &Connection, now: i64) -> Result<Vec<Value>> {
     let mut s = conn.prepare(
         "SELECT id,agent,paths,purpose,card_id,state,created_ms FROM lanes WHERE released_ms IS NULL ORDER BY id",
     )?;
