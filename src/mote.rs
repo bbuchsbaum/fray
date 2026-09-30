@@ -139,8 +139,10 @@ pub fn locate(board: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     let submodule = common.as_deref().is_some_and(|dir| {
         let parts: Vec<_> = Path::new(dir).components().collect();
         parts
-            .windows(2)
-            .any(|w| w[0].as_os_str() == ".git" && w[1].as_os_str() == "modules")
+            .iter()
+            .position(|c| c.as_os_str() == ".git")
+            // Also under a linked worktree: .git/worktrees/<wt>/modules/<sub>.
+            .is_some_and(|git| parts[git..].iter().any(|c| c.as_os_str() == "modules"))
     });
     if main.contains(&"bare") || submodule {
         return Err(Error::new(
@@ -229,6 +231,7 @@ fn run_raw(
     }
     cmd.args(args)
         .env_remove("MOTE_ACTOR")
+        .env_remove("MOTE_STORE")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

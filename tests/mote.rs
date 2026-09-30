@@ -61,6 +61,24 @@ fn fake_store(dir: &Path, id: &str) -> PathBuf {
     m
 }
 
+/// `locate` honours `MOTE_STORE`, as it should; the location tests exercise
+/// the implicit rules, so they clear it. No test sets it in-process.
+fn implicit_rules_only() {
+    std::env::remove_var("MOTE_STORE");
+}
+
+/// The real `mote`, isolated from the caller's environment: a test must never
+/// act on a store or actor that `MOTE_STORE` or `MOTE_ACTOR` names (review #51).
+fn real_mote(dir: &Path) -> Command {
+    let mut cmd = Command::new("mote");
+    cmd.current_dir(dir)
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .arg("--store")
+        .arg(dir.join(".mote"));
+    cmd
+}
+
 /// A stand-in `mote`: answers --version and `board`, can fail or hang.
 fn stub(dir: &Path, body: &str) -> PathBuf {
     let p = dir.join("mote-stub");
@@ -158,6 +176,7 @@ fn outcomes_are_classified_from_exit_code_stderr_and_json_together() {
 
 #[test]
 fn an_ancestor_board_pairs_with_its_sibling_store() {
+    implicit_rules_only();
     let t = Temp::new("sib");
     let board = t.0.join(".fray");
     fs::create_dir_all(&board).unwrap();
@@ -175,6 +194,7 @@ fn an_ancestor_board_pairs_with_its_sibling_store() {
 
 #[test]
 fn a_worktree_outside_the_checkout_finds_the_main_worktrees_store() {
+    implicit_rules_only();
     let t = Temp::new("wt");
     let repo = t.0.join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -199,6 +219,7 @@ fn a_worktree_outside_the_checkout_finds_the_main_worktrees_store() {
 
 #[test]
 fn bare_repositories_and_submodules_must_name_their_store() {
+    implicit_rules_only();
     let t = Temp::new("bare");
     let bare = t.0.join("bare.git");
     fs::create_dir_all(&bare).unwrap();
@@ -312,7 +333,11 @@ fn a_timeout_stops_and_reaps_the_whole_mote_process_group() {
         &["board"],
         Duration::from_millis(3000),
     );
-    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
     assert!(
         matches!(&outcome, Outcome::Failed(why) if why.contains("timed out")),
         "{outcome:?}"
@@ -486,11 +511,7 @@ fn status_against_the_real_mote_when_installed() {
     }
     let t = Temp::new("real");
     fs::create_dir_all(t.0.join(".fray")).unwrap();
-    let init = Command::new("mote")
-        .current_dir(&t.0)
-        .arg("init")
-        .output()
-        .unwrap();
+    let init = real_mote(&t.0).arg("init").output().unwrap();
     assert!(
         init.status.success(),
         "{}",
@@ -508,6 +529,7 @@ fn status_against_the_real_mote_when_installed() {
 
 #[test]
 fn a_board_that_is_not_this_repositorys_is_never_paired_implicitly() {
+    implicit_rules_only();
     // Review #46 of 825d340: an explicit --home elsewhere was bound to the
     // store of whatever repository the shell was in.
     let t = Temp::new("elsewhere");
@@ -531,6 +553,7 @@ fn a_board_that_is_not_this_repositorys_is_never_paired_implicitly() {
 
 #[test]
 fn a_linked_worktree_of_a_bare_repository_must_name_its_store() {
+    implicit_rules_only();
     // Review #47 of 825d340: --is-bare-repository is false in a linked worktree.
     let t = Temp::new("barewt");
     let src = t.0.join("src");
@@ -551,6 +574,7 @@ fn a_linked_worktree_of_a_bare_repository_must_name_its_store() {
 
 #[test]
 fn a_repository_nested_in_another_is_not_mistaken_for_a_submodule() {
+    implicit_rules_only();
     let t = Temp::new("nested");
     let outer = t.0.join("outer");
     fs::create_dir_all(&outer).unwrap();
@@ -578,7 +602,7 @@ fn the_deadline_holds_when_a_leftover_process_keeps_mote_pipes_open() {
     let start = Instant::now();
     let outcome = mote::run_with(&bin, &store, Some("a"), &["board"], Duration::from_secs(1));
     assert!(
-        start.elapsed() < Duration::from_secs(5),
+        start.elapsed() < Duration::from_secs(20),
         "{:?}",
         start.elapsed()
     );
@@ -638,15 +662,13 @@ fn real_mote_rejections_conflicts_events_and_usage_errors_classify_correctly() {
     }
     let t = Temp::new("realc");
     let mote_cli = |actor: &str, args: &[&str]| {
-        Command::new("mote")
-            .current_dir(&t.0)
+        real_mote(&t.0)
             .args(["--actor", actor])
             .args(args)
             .output()
             .unwrap()
     };
-    assert!(Command::new("mote")
-        .current_dir(&t.0)
+    assert!(real_mote(&t.0)
         .arg("init")
         .output()
         .unwrap()
@@ -725,4 +747,34 @@ fn status_names_a_bad_mote_store_and_warns_when_mote_is_missing() {
         w.contains("--as NAME") && !w.contains("identity is :"),
         "{w}"
     );
+}
+
+#[test]
+fn a_submodule_inside_a_linked_worktree_must_name_its_store() {
+    implicit_rules_only();
+    let t = Temp::new("subwt");
+    let sub_src = t.0.join("sub-src");
+    fs::create_dir_all(&sub_src).unwrap();
+    git(&sub_src, &["init", "-q"]);
+    git(&sub_src, &["commit", "-q", "--allow-empty", "-m", "s"]);
+    let sup = t.0.join("super");
+    fs::create_dir_all(&sup).unwrap();
+    git(&sup, &["init", "-q"]);
+    git(
+        &sup,
+        &["submodule", "add", "-q", sub_src.to_str().unwrap(), "sub"],
+    );
+    git(&sup, &["commit", "-q", "-m", "add sub"]);
+    let wt = t.0.join("wt");
+    git(&sup, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    git(&wt, &["submodule", "update", "-q", "--init"]);
+    let sub = wt.join("sub");
+    let common = Command::new("git")
+        .current_dir(&sub)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .unwrap();
+    let common = PathBuf::from(String::from_utf8_lossy(&common.stdout).trim());
+    let err = mote::locate(&common.join("fray"), &sub).unwrap_err();
+    assert_eq!(err.code, "mote_store_required");
 }

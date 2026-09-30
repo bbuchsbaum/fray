@@ -5,7 +5,7 @@
 `src/mote.rs` and `fray mote status` implement sections 1 to 4 of
 `docs/design/mote-adapter.md`, approved at `b8c9677`.
 
-`tests/mote.rs` has 19 tests, run with stub `mote` binaries and against the
+`tests/mote.rs` has 20 tests, run with stub `mote` binaries and against the
 real `mote 0.1.0` in scratch stores. They cover:
 
 - classification from exit code, stderr and JSON together. The transport
@@ -32,7 +32,7 @@ Independent review of the first version (`825d340`) raised five blocking
 objections (fray #46–#50), each reproduced, and all are fixed here. 12
 concurrent runs of the suite pass with no leaked processes.
 
-Checks at this change: strict Clippy, 277 Rust tests, a locked build,
+Checks at this change: strict Clippy, 278 Rust tests, a locked build,
 `integration.py`, `attention_integration.py`, `reliability_integration.py`
 and `check_sql.py` all pass. `cargo fmt --check` reports only
 `src/driver.rs`, which was inherited from `main` (fray #33).
