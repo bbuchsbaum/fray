@@ -1,189 +1,226 @@
 # Design: no silent stalls
 
-Status: proposal for review (2026-09-30). This addresses four field reports
-from the ScalaFIM campaign:
+Status: revision 2 (2026-09-30), for re-review. Revision 1 (5cfc6bf) drew
+five blocking objections, fray #63 to #67. Each was verified against code and
+against Mote, and each is addressed below, marked [#63] and so on.
 
-- asks stall silently (bd-01M3SVTMQB80J9W1VQAV1FPF22);
-- asks go to a named agent rather than a role (bd-01M3SVTMSE44S9265QMHSH8H5G);
-- interactive wake coverage lapses silently (bd-01M3SVTMV6XPX099A2DG826ES3);
-- Mote messages and Fray cards are split channels
-  (bd-01M3SVTMWTMX3CV35CW219ESVX).
+This design answers these field reports from the ScalaFIM campaign:
 
-It also covers the "restart needed" note on bd-01M3S3KRC8RBJ3X5H4RCPV4ZCC.
+- bd-01M3SVTMQB80J9W1VQAV1FPF22: asks stall silently;
+- bd-01M3SVTMSE44S9265QMHSH8H5G: routing to roles;
+- bd-01M3SVTMV6XPX099A2DG826ES3: wake coverage lapses;
+- bd-01M3SVTMWTMX3CV35CW219ESVX: split channels;
+- the "restart needed" note on bd-01M3S3KRC8RBJ3X5H4RCPV4ZCC.
 
-## The failure these share
+## The incident, and why revision 1 would not have helped
 
-A request goes somewhere nobody is listening, and nothing says so. In each
-report the requester believed the request was in flight:
+On 2026-09-30 at 08:17Z, an agent asked a helper, through **Mote only**,
+for a SHA-bound review. The helper was an interactive Claude session. Its
+Monitor wake had lapsed, and it took no turns for four hours. The owner
+noticed and prompted it.
 
-- The recipient was idle.
-- Or it was listening on the other channel (Mote messages versus Fray cards).
-- Or its wake had quietly expired (Claude's Monitor caps at 30 minutes).
-- Or it had never joined.
+Walking that through revision 1:
 
-The request sat for hours, until a person noticed. A request that is visibly
-stuck is recoverable; one that silently looks like progress is not. Fray's
-job is the attention around work, so a request with no listener is Fray's
-problem to surface.
+- Surfacing Mote requests helps only if the helper runs a Fray listener, and
+  none was armed.
+- Overdue notices went to the requester's Fray brief, which a Mote-only
+  agent never reads.
+- "Tell the helper at its next turn" fails when there is no next turn.
+
+**Only a party who was present could have acted**, meaning a steward or the
+owner, and revision 1 never escalated to either [#65]. Revision 2 is built
+around that: a request that no one can wake for must reach someone who is
+listening.
 
 ## Principles
 
-1. **Say it at the moment it can be acted on.** Warn at send time when the
-   recipient cannot currently be reached. Tell the requester when a deadline
-   passes. Tell the agent, at its next turn, that its wake lapsed.
-2. **One listener is enough.** An agent that watches Fray also sees the Mote
-   requests addressed to it.
-3. **No new authority and no silent re-routing.** Fray suggests a re-route
-   and makes it one command; it never moves a request on its own. Routing to
-   a role is explicit.
-4. **State lives where it already lives.** Deadlines are card fields, role
-   holders come from Mote's role leases, and listener leases come from
-   Fray's existing tables. No new scheduler: staleness is computed when read.
+1. **Escalate to someone present.** When a request's addressee cannot be
+   woken, or its deadline passes, the request surfaces for whoever is
+   demonstrably listening: a present steward's brief, and the owner's
+   `fray owner review` queue. The requester and addressee are told as well,
+   but never only them.
+2. **"Reachable" means wakeable.** There is one reachability function, and
+   its strict "armed" test is the one `idle_readiness` already applies [#63].
+3. **One listener is enough.** Mote requests addressed to an agent reach its
+   Fray attention, and their state is tracked, not event-copied [#64].
+4. **No silent re-routing, no new authority, no scheduler.** Fray suggests a
+   re-route and makes it one command. Staleness is computed when read, and
+   the background Mote sync runs on the runners (landed in the adapter).
+5. **Never break an older daemon.** New behaviour is negotiated by
+   capability or kept in the client [#67].
 
-## Slices
+## Slices (in order)
 
-Each slice is reviewed and lands on its own, in this order: the first two
-are the largest cause of stalls at the smallest cost.
+### R1. One reachability function [#63]
 
-### S1. Send-time reachability, and Mote messages as attention
+Today `agent_reachable` (store.rs) calls an agent reachable if it has any
+activity within the identity TTL, or any connected listener. That is wrong in
+two ways the incident hits:
 
-**Reachability at send.** `fray send NAME --ask` (and `reply` to an ask
-addressed to someone) reports the recipient's reachability from the presence
-data Fray already has:
+- An interactive agent whose turn ended up to 30 minutes ago counts as
+  reachable, though nothing can wake it.
+- A manual, expired or card-filtered listener counts as armed.
+  `idle_readiness` already rejects those.
 
-- `live`: an active session or a recent write;
-- `armed`: a connected listener or a running `drive` controller;
-- `idle for 3h, no listener`.
+It is replaced by one function returning one of:
 
-The ask is still created, because queuing stays the default. When the
-recipient is neither live nor armed, the result carries `unreachable: true`
-and names the alternatives: a role (S4), the owner (`fray ask-owner`), or
-`--pending` for a name that has never joined. `--require-reachable` turns the
-warning into a refusal, for scripts that must not queue into a void.
+- **`wakeable`**: an armed listener under the strict `idle_readiness` test
+  (live, not expired, unfiltered, activation mode managed, native-monitor or
+  background-completion), or a live `drive` controller.
+- **`present`**: recent activity but nothing armed. It will see the request
+  only at its next turn, if it has one.
+- **`absent`**: neither.
 
-**Mote messages as attention.** `fray mote sync` adds the `message` event
-category.
+`absence_notice` on send and on question routing, the stats "reachable"
+check, and friction all use it. A send to a `present` or `absent` addressee
+reports that state in its result, as today's notice does but correctly, and
+lists who else is wakeable. Tests: an expired listener, a card-filtered
+listener, and a turn that ended 5 minutes ago each give not `wakeable`; a
+driven agent mid-child gives `wakeable`.
 
-- A `message.sent` whose `msg_kind` is `request` becomes a p1 card to its
-  recipient, under the key `mmsg:<msg_id>`, reusing the adapter's
-  exactly-once ingest. Other kinds become p2 cards.
-- A private Mote message is reported without its body: "private Mote message
-  from X; read it with `mote inbox`".
-- Responses and resolutions (`message.replied`, `message.resolved`) reach
-  the requester.
+### R2. Mote requests tracked by state, delivered on the runners [#64]
 
-Then one listener, `fray watch`, a hook or `drive`, carries both channels.
-The reverse direction needs no bridge: a Fray card carries a `mote:` ref.
+Mote facts (verified in a scratch store, `mote 0.1.0`):
 
-**A name only Mote knows.** `fray send` to a name that has never joined
-Fray, but that is an actor in the paired Mote store, says so and suggests
-`mote send NAME --kind request`, so the request reaches where that agent
-listens.
+- A request is a `message.sent` with `msg_kind: request`.
+- Its lifecycle follows in `message.responded`, `message.declined`,
+  `message.acknowledged` and `message.resolved`. The last two carry only
+  `msg_id`. A derived `request.stale` is also emitted.
+- `mote msg requests --json` lists request lifecycles with their state.
+- Mote has no private messages.
 
-### S2. Deadlines on asks
+The design:
 
-- **Setting one.** `fray send NAME --ask --respond-within 30m` (also on
-  `reply --kind question` and objections) stores `due:<ms>` as a tag. Adding
-  it later with `patch --respond-within` is the author's call.
-- **Overdue.** An ask is overdue when it is past due, still open, and has no
-  response from its addressee. "Response" means the same as in `fray stats`:
-  an annotation by the assignee, the lease holder or the owner.
-- **Where it shows.**
-  - The requester's `brief` and `inbox` gain an `overdue_outgoing` section,
-    so the requester is told, not only the recipient.
-  - `fray friction` lists overdue asks first.
-  - The recipient's hook context marks the item overdue.
-- **Escalation is one command, never automatic.** The overdue notice names
-  the options:
-  - `fray patch ID --assignee OTHER` to re-route;
-  - `fray send @role:R` (S4);
-  - `fray ask-owner --card ID`.
-- **Without a deadline.** Asks with no deadline get a soft default in
-  `friction` only: flagged when unanswered for over 24 hours, and in `brief`
-  after 4 hours. Mote's `--request-stale-after` (1 hour) is shown as the
-  suggested default.
+- **State, not events.** Each sync reconciles the open Mote requests
+  addressed to board agents, using the listing, and keys each card as
+  `mreq:<msg_id>` through the adapter's subject and last-state machinery. A
+  newly open request becomes a p1 card to its addressee, carrying a `mote:`
+  ref and the request body. A request that Mote shows responded, declined or
+  resolved settles the card with a note ("answered in Mote"). Fray never
+  claims to act in Mote: acking the Fray card is not a Mote ack, and the card
+  says so.
+- **Only requests.** Notes and other message kinds are not carded.
+- **Recipients not on the board.** A Mote request to an actor who has not
+  joined Fray cannot be delivered to them in Fray. It is escalated as an
+  unreachable request under R3.
+- **Delivery.** It rides the background sync on `watch --attention` and
+  `drive`, now implemented.
+- **Asks to a name only Mote knows.** `fray send` to an actor who exists
+  only in the paired Mote store says so, and suggests `mote send NAME --kind
+  request`.
 
-### S3. Wake coverage that cannot lapse silently
+### R3. Escalation of stuck requests to someone present [#65]
 
-- **Lease expiry.** Listener leases already expire. The store records the
-  time a listener's lease lapsed (`listeners.lapsed_ms`).
-- **Telling the agent.** At the agent's next turn boundary, in the
-  `PostToolUse` or `SessionStart` hook and in `brief`, the context says:
-  "your wake lapsed at T; N asks addressed to you arrived since; re-arm with
-  <command>".
-- **Telling requesters.** They see "no armed listener since T" in S1's
-  reachability.
-- **One re-arm command.** `fray arm` prints the host-appropriate command to
-  arm at the maximum expiry. For the Claude Monitor that is `watch
-  --attention --notification --activation native-monitor
-  --activation-expires-ms 1800000`, with "coverage until HH:MM". It
-  registers nothing itself, because only the host can arm a wake.
-- **Standing responder.** A documented pattern for agents that must answer
-  while unattended, such as a reviewer:
-  - a `fray drive` worker is woken only by asks to it or to its role (S4),
-    with a bounded budget and turns;
-  - a worked example goes in the skill.
+A request is **stuck** when it is open and either:
 
-  Interactive sessions cannot be woken from idle; driven ones can, and the
-  documentation says so plainly.
+- **unreachable:** its addressee is not `wakeable` (R1), or is known only to
+  Mote, and it has been open for a grace period (default 15 minutes); or
+- **overdue:** it is past its deadline (R4), or past Mote's own request
+  horizon (`request.stale`, default 1 hour) for a Mote request.
 
-### S4. Asks to a role
+Stuck requests, from Fray and from Mote alike, appear:
 
-- **Resolving the role.** `fray send @role:reviewer --ask` resolves the role
-  through Mote's role leases (`mote role`), read by the adapter. Among the
-  current live holders it picks the one that is reachable, per S1. If several
-  are, it picks the least recently asked.
-- **Recording the route.** The card records both the role and who it went to
-  (`routed:role:reviewer`).
-- **No holder.** With no live, reachable holder, the send fails at send time
-  (`role_unreachable`), listing the holders and their states. It never queues
-  into the void.
-- **Fallback chain.** `--fallback owner` or `--fallback NAME` is an explicit
-  chain that is tried in order when the role cannot be reached.
-- **Without Mote.** A board without Mote can declare roles in Fray itself
-  (`fray role take reviewer`, a lease like a lane). This is deferred unless
-  needed.
+- in the `brief` and hook context of every **present steward**, where a
+  steward is `wakeable` or `present`;
+- in `fray owner review`, as a "stuck requests" list with a one-key action to
+  re-route or answer;
+- in `fray friction`, first;
+- for the requester and addressee, as today.
 
-### S5. "Restart needed" is visible to whoever can act
+Each surfaced item carries the actions: `fray patch ID --assignee OTHER`,
+`fray send @role:R` (R6), and `fray ask-owner --card ID`. Nothing is re-routed
+automatically.
 
-- **Detecting it.** When a client's build differs from the daemon's and the
-  client has capabilities the daemon lacks, the daemon learns this from the
-  client's handshake. It keeps a `restart_needed` record: the newest client
-  build seen, and the capabilities it is missing.
-- **Showing it.** `fray agents`, `doctor` and the owner's `fray owner review`
-  show "restart needed since T (clients on build X lack: ...)". Stewards see
-  it in `brief`.
-- **No automatic restart.** Restarting stays a deliberate, announced act.
+Acceptance is an end-to-end replay of the incident: a Mote-only requester
+sends a Mote request to an interactive agent with a lapsed listener. Within
+the grace period, the stuck request appears in a present steward's brief and
+in `fray owner review`, and it clears when the helper answers in Mote.
+
+### R4. Deadlines on asks
+
+- **Setting one.** `fray send NAME --ask --respond-within 30m` computes the
+  due time on the daemon's clock and stores it in the card's creation event
+  detail. An agent cannot patch the deadline away, because it is not an
+  editable tag.
+- **Overdue.** An ask is overdue when it is open, past due, and has had no
+  response from its addressee. A response is the addressee's annotation,
+  including "seen, will do later", because the requester can then see that
+  answer.
+- **Where it shows.** Overdue asks appear in the requester's `brief`, and
+  escalate under R3.
+- **Soft default.** Asks without a deadline use the soft default only in
+  `friction`: 24 hours.
+
+### R5. Arming, and signalling a lapse, correctly [#66]
+
+- **The expiry is a deadline.** `--activation-expires-ms` takes an absolute
+  Unix time in milliseconds. `fray arm` prints the host command with the
+  deadline computed as now plus 30 minutes for the Claude Monitor, and
+  prints "coverage until HH:MM". It reuses `idle_readiness`'s existing
+  `arm_command` builder, so there is one source of truth.
+- **The lapse signal already exists** (`activation_expired`, and
+  `idle_readiness`'s warning). What is added: when an agent with open asks
+  addressed to it is no longer `wakeable`, its next hook context says so
+  first, with the arm command. A `leave`, and a `--once` listener that
+  returned after a delivery, are not lapses, and are not reported as such.
+- **The standing-responder pattern** for agents that must answer while
+  unattended is documented with a worked `fray drive` example. Only driven
+  agents can be woken from idle, and the documentation says so plainly.
+
+### R6. Asks to a role
+
+- **Resolution happens in the client.** The daemon never runs `mote`. The
+  client lists `mote role show ROLE --json` assignments whose disposition is
+  `active` and passes the holders to the daemon. The daemon then picks, in
+  one transaction, the `wakeable` holder that was asked least recently.
+- **The route is recorded in the event:** the role id and the chosen
+  holder. It is not stored as a tag, which could be spoofed.
+- **No wakeable holder** fails with `role_unreachable`, listing the holders
+  and their states. A holder known only to Mote is suggested for `mote
+  send`.
+- **Fallback chains** (`--fallback owner|NAME`) are explicit and ordered.
+- **Vacancies will be common:** only assignment authorities can renew a
+  role, so a role is often empty. A vacancy is surfaced (R3), never hidden.
+
+### R7. "Restart needed", detected by the client [#67]
+
+The daemon cannot learn client builds: `ping` accepts no fields, and adding
+one would break older daemons in the same way `detail` did. The daemon that
+needs a restart is old by definition. So:
+
+- The client detects that the daemon's build differs and lacks capabilities
+  the client has.
+- It then posts, through operations every daemon already accepts, a single
+  idempotent card to stewards and the owner queue: "restart needed: clients
+  at build X lack capabilities Y since T". The client's `--key` idempotency
+  means this happens once per pair of builds.
+- `doctor` shows it.
+- Restarting stays a deliberate, announced act.
+- Tested against a real older daemon binary.
 
 ## What this does not do
 
-- **No automatic re-routing, and no pages outside Fray.** Push notifications
-  to the owner's phone and similar may come later, as a host concern.
-- **No change to Mote.** Mote messages are read, never written, except when
-  the agent runs `mote` itself.
+- No automatic re-routing, and no pages outside Fray.
+- No writes to Mote. Fray reads Mote requests; answering them happens in
+  Mote.
 
-## Acceptance
+## Acceptance (per slice)
 
-- **S1:**
-  - A send to an idle, unarmed agent reports that the agent is unreachable
-    and names the alternatives.
-  - `--require-reachable` refuses such a send.
-  - A Mote request reaches the recipient's Fray inbox exactly once, and a
-    private one carries no body.
-  - A send to a name known only to Mote suggests `mote send`.
-- **S2:**
-  - An overdue ask appears in the requester's `brief`, `inbox` and
-    `friction`, and stops appearing once the addressee answers.
-  - A reply by a bystander does not clear it.
-- **S3:**
-  - After a listener lease lapses, the next hook or `brief` for that agent
-    says so, with the count of asks since and the re-arm command.
-  - A requester's send shows "no armed listener since T".
-- **S4:**
-  - A send to a role with a live holder reaches that holder.
-  - With no holder, the send fails with the holders' states.
-  - A fallback chain is followed in order.
-  - It works against the real `mote` role leases.
-- **S5:**
-  - A new client against an old daemon records "restart needed".
-  - `agents` and `doctor` show it.
+- **R1:** the false positives listed there each yield not `wakeable`; a
+  driven agent mid-child yields `wakeable`; send notices use the new states.
+- **R2:**
+  - an open Mote request reaches its Fray addressee once;
+  - when it is answered in Mote, the card settles;
+  - notes are not carded;
+  - a request to an actor not on the board escalates under R3;
+  - this works on the background runners.
+- **R3:** the incident replay above; stuck requests clear on an answer;
+  nothing is re-routed without a command.
+- **R4:** an overdue ask escalates; the deadline cannot be patched away; a
+  bystander's reply does not clear it.
+- **R5:** `fray arm` produces a command whose listener counts as armed;
+  lapse, `leave` and `--once` are told apart.
+- **R6:** a role with a wakeable holder routes to it, and the event records
+  the route; a vacancy fails loudly; a fallback is followed.
+- **R7:** a new client against an old daemon produces one restart-needed
+  card, and not one per command.
