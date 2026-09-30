@@ -225,6 +225,7 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             }
             "mute" | "unmute" => Some(("mute", "thread muting")),
             "stats" | "friction" => Some(("stats", "fray stats and friction")),
+            "mote_bind" | "mote_binding" => Some(("mote_adapter", "the Mote adapter")),
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
             "ack" if req.args.get("last").is_some() => Some(("ack_last", "ack --last")),
             "owner_decide" | "owner_answer" => Some(("owner_channel", "fray owner")),

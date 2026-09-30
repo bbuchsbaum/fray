@@ -1,5 +1,31 @@
 # Validation
 
+## Mote adapter slice 5a: transport, binding, classification (2026-09-30)
+
+`src/mote.rs` and `fray mote status` implement sections 1 to 4 of
+`docs/design/mote-adapter.md`, approved at `b8c9677`.
+
+`tests/mote.rs` has 12 tests, run with stub `mote` binaries and against the
+real `mote 0.1.0` in a scratch store. They cover:
+
+- classification of exit code, stderr and JSON together: exit 2 as rejection
+  versus usage error, `preflight`'s exit 2 as a result, and JSON lines and
+  version text;
+- store location for an ancestor `.fray`, for a worktree outside the checkout,
+  and refusal for a bare repository or a submodule;
+- refusal of a changed store id, both when binding and on every call;
+- an explicit `--store`, `--json` and `--actor` on every call, with no
+  `--actor` for `events` and an inherited `MOTE_ACTOR` removed;
+- a timeout that kills and reaps Mote's whole process group, grandchild
+  included;
+- version refusal, a warning when `MOTE_ACTOR` names a second actor, and reads
+  that degrade when Mote is unreachable.
+
+Checks at this change: strict Clippy, 270 Rust tests, a locked build,
+`integration.py`, `attention_integration.py`, `reliability_integration.py`
+and `check_sql.py` all pass. `cargo fmt --check` reports only
+`src/driver.rs`, which was inherited from `main` (fray #33).
+
 ## Finite waits without the hang-up floor (2026-09-30)
 
 A finite wait now replies as soon as it has a result, instead of first joining

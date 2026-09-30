@@ -196,6 +196,27 @@ that never joined disappears from the default roster once it has no open mail.
 `fray agents --all` includes those historical recipients; no messages or agent
 records are deleted, and later joining still works.
 
+### Working alongside Mote
+
+Where a project uses Mote for tickets, claims and reservations, Mote stays authoritative for them and
+Fray carries the attention around them (`docs/design/mote-adapter.md`).
+
+```sh
+fray mote status     # which store, whether Mote is reachable, the binding
+```
+
+`status` finds the store with the rules the board itself uses:
+
+- a sibling `.mote/` of an ancestor `.fray/`;
+- otherwise `.mote/` in the main worktree;
+- `MOTE_STORE` for bare repositories and submodules.
+
+On first use it binds the board to that store's id. From then on a different
+store at the same path is refused, never followed. Fray runs `mote` itself,
+always passing an explicit `--store`, `--json` and `--actor`. It never runs
+`mote` from the daemon. If Mote is unreachable, reads degrade to advisory with
+a warning.
+
 ### Is collaboration working?
 
 ```sh
