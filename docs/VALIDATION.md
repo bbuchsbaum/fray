@@ -3,12 +3,24 @@
 ## Finite waits without the hang-up floor (2026-09-30)
 
 A finite wait now replies as soon as it has a result, instead of first joining
-its hang-up observer, which can sit in a 100 ms bounded read. If the observer
-reads a byte after the reply, that byte begins the client's next request. It is
-handed back to the connection loop, not treated as pipelining. Input sent while
-the wait is in progress is still refused as a protocol error. The change is
-`wait_cancellable` in `src/server.rs`, with regression tests in
-`tests/wait_latency.rs`.
+its hang-up observer, which can sit in a 100 ms bounded read. One atomic claim
+settles what happens to input:
+
+- Input that the observer claims before the waiter commits its reply is
+  refused as pipelining (a protocol error).
+- Input after the reply is committed begins the client's next request. It is
+  handed back to the connection loop and served.
+
+A client that follows the protocol, sending the next request only after
+reading the reply, is never refused. The change is `wait_cancellable` in
+`src/server.rs`, with regression tests in `tests/wait_latency.rs`.
+
+The first version of this change (`0dcd56c`) lost a byte when input raced the
+wait's wake-up. Independent review reproduced it in 51 to 75 of 300 to 400
+stress iterations. The single-claim state fixes it: 0 bad on the reviewer's
+seeds 1, 4 and 5. The regression test
+`input_racing_the_wait_reply_is_refused_or_served_never_corrupted` repeats
+the race 200 times, and it fails on `0dcd56c`.
 
 Same machine and harness as the baseline below: release build of
 `claude/epic-wave1`, 30 declared trials per row.
@@ -53,8 +65,10 @@ Release build `e8e6c93` (main `0ce4333` plus `fray stats`), macOS 14.3 arm64,
 | drive (stub child start) | p1 | 30/30 | 0 | 72.8 | 171.2 | 292.5 |
 | hook PostToolUse | p1 | 30/30 | 0 | 18.3 | 43.4 | 79.7 |
 
-All 210 trials delivered, with no duplicates. Two floors appear, and they have
-different causes:
+All 210 trials delivered. Duplicates can only occur on the watch path, which
+emits a stream; there were none. A wait returns once, and each drive or hook
+trial is a single invocation. Two floors appear, and they have different
+causes:
 
 - **watch at p2: deliberate.** The attention stream holds non-urgent items for
   a fixed 100 ms settle window (`settle_ms`, `src/server.rs` `watch_attention`)
@@ -66,8 +80,9 @@ different causes:
   completion. `wait --timeout none` has no such observer timeout and gives
   p50 2.4 ms, p95 13.5 ms (20 trials). This is the first improvement target.
 
-The drive column is dominated by process spawn, and its tail includes the
-stub's Python start-up.
+The drive column is dominated by process spawn. The stub records its time only
+after the Python interpreter has started, so every drive sample includes
+interpreter start-up, not just the tail.
 
 Reproduce: `cargo build --release && python3 scripts/bench_wake.py
 target/release/fray --n 30 --home-parent /tmp`.

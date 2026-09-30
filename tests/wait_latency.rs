@@ -164,3 +164,43 @@ fn input_during_a_wait_is_still_refused() {
     assert_eq!(reply["ok"], false, "{reply}");
     assert_eq!(reply["error"]["code"], "protocol", "{reply}");
 }
+
+#[test]
+fn input_racing_the_wait_reply_is_refused_or_served_never_corrupted() {
+    // Review of 0dcd56c: a byte read between the wait's input check and its
+    // reply was neither refused nor carried, so the next frame lost its `{`.
+    let (d, mut publisher) = board();
+    let (mut served, mut refused) = (0, 0);
+    let mut waiter = d.connect();
+    for n in 0..200 {
+        let cursor = publisher.call("ping", "pub", json!({}))["cursor"].clone();
+        waiter.send(
+            "wait",
+            "sub",
+            json!({"after": cursor, "timeout": 10, "selection": "all"}),
+        );
+        publisher.call(
+            "send",
+            "pub",
+            json!({"to": "sub", "body": format!("race {n}"), "ask": true}),
+        );
+        // Pipelined without reading the wait's reply: it races that reply.
+        waiter.send("ping", "sub", json!({}));
+        let reply = waiter.get();
+        if reply["ok"] == true {
+            let pong = waiter.get();
+            assert_eq!(
+                pong["ok"], true,
+                "iteration {n}: next frame corrupted: {pong}"
+            );
+            served += 1;
+        } else {
+            assert_eq!(reply["error"]["code"], "protocol", "iteration {n}: {reply}");
+            refused += 1;
+            // A refused wait ends its connection.
+            waiter = d.connect();
+        }
+        waiter.call("inbox", "sub", json!({"selection": "all"}));
+    }
+    assert_eq!(served + refused, 200);
+}

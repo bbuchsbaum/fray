@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
     },
     thread,
@@ -422,7 +422,14 @@ fn wait_cancellable(
     indefinite: bool,
     carry: &mut Vec<u8>,
 ) -> Result<bool> {
-    let mut hangup = clone_for_client(stream)?;
+    let mut hangup = match clone_for_client(stream) {
+        Ok(hangup) => hangup,
+        // Descriptor pressure is a retryable `busy` reply, not a dropped connection.
+        Err(error) => {
+            write_frame(stream, &failure(error))?;
+            return Ok(false);
+        }
+    };
     // Finite waits preserve sequential requests on the same connection. A bounded
     // socket read lets this EOF observer stop without shutting down that socket.
     // The store wakes on commits and cancellation, and once a minute to
@@ -432,44 +439,55 @@ fn wait_cancellable(
     } else {
         Some(Duration::from_millis(100))
     })?;
+    // One claim decides whether input arrived during the wait (refused as
+    // pipelining) or after its reply was committed (the next request): the
+    // waiter moves RUNNING to DONE, or the observer moves RUNNING to INPUT or
+    // HANGUP, never both.
+    const RUNNING: u8 = 0;
+    const DONE: u8 = 1;
+    const INPUT: u8 = 2;
+    const HANGUP: u8 = 3;
+    let state = AtomicU8::new(RUNNING);
     let cancelled = AtomicBool::new(false);
     let unexpected_input = AtomicBool::new(false);
-    let finished = AtomicBool::new(false);
     let carried = Mutex::new(None);
     let written = thread::scope(|scope| {
         scope.spawn(|| {
             let mut byte = [0u8; 1];
-            while !finished.load(Ordering::SeqCst) {
+            while state.load(Ordering::SeqCst) == RUNNING {
                 let input = hangup.read(&mut byte);
                 if matches!(&input, Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted))
                 {
                     continue;
                 }
-                // `finished` is set before the reply is written, and a client
-                // sends its next request only after reading the reply. Input
-                // seen once finished is therefore that next request.
-                if finished.load(Ordering::SeqCst) {
-                    if matches!(input, Ok(1)) {
+                let data = matches!(input, Ok(n) if n > 0);
+                let claim = if data { INPUT } else { HANGUP };
+                if state
+                    .compare_exchange(RUNNING, claim, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    // The reply was already committed: this byte begins the
+                    // client's next request.
+                    if data {
                         *carried.lock().unwrap_or_else(|e| e.into_inner()) = Some(byte[0]);
                     }
                     return;
                 }
                 let _guard = shared.store.lock();
-                unexpected_input.store(matches!(input, Ok(n) if n > 0), Ordering::SeqCst);
+                unexpected_input.store(data, Ordering::SeqCst);
                 cancelled.store(true, Ordering::SeqCst);
                 shared.changed.notify_all();
                 return;
             }
         });
         let mut result = wait(shared, req, Some(&cancelled), Some(&unexpected_input));
-        if unexpected_input.load(Ordering::SeqCst) {
+        if state.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst) == Err(INPUT) {
             result = Err(Error::new(
                 "protocol",
                 "wait is receive-only until its response; use a separate connection for other requests",
             ));
         }
         let terminal = wait_terminal(indefinite, &result);
-        finished.store(true, Ordering::SeqCst);
         let written = write_frame(stream, &wait_reply(result));
         if terminal {
             // Nothing more is read on this connection; release the observer now.
