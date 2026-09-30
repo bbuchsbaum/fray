@@ -265,7 +265,7 @@ impl Run<'_> {
             {
                 self.detail_ok.set(false);
                 eprintln!(
-                    "fray drive: this daemon predates controller detail, so a crashed run's owned process group is not recorded and the orphan check before a restart cannot see it. Restart the daemon on this build to restore that check; the run continues without it."
+                    "fray drive: this daemon predates controller detail, so a crashed run's owned process group is not recorded: the orphan check before a restart cannot see it, and `fray agents` shows no child for this run. Each turn's child is still printed on stderr. Restart the daemon on this build to restore both; the run continues without them."
                 );
                 if let Some(args) = args.as_object_mut() {
                     args.remove("detail");
@@ -571,7 +571,7 @@ impl Run<'_> {
         if !verified {
             return Err(Error::new(
                 "descendants_alive",
-                "the owned child process group could not be verified empty after TERM and KILL; inspect it before restarting (see controller detail)",
+                "the owned child process group could not be verified empty after TERM and KILL; inspect it before restarting (its pgid is in this run's stderr and, on current daemons, in fray agents)",
             ));
         }
         result
