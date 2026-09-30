@@ -189,41 +189,147 @@ fn consecutive_timeouts_are_counted_and_reset_by_a_successful_sync() {
 }
 
 #[test]
-fn events_map_to_attention_for_the_right_agent() {
+fn reservation_events_map_to_their_holder_under_state_keys() {
+    let long: Vec<String> = (0..25)
+        .map(|i| format!("src/a_rather_long_module_name_{i}/"))
+        .collect();
     let events = vec![
-        json!({"event_id":"e1","type":"reservation.expired","actor":"alice",
-            "data":{"holder":"alice","entity":"bd-1","paths":["src/"],"reservation_id":"rv-1","deadline":"D"}}),
-        json!({"event_id":"e2","type":"reservation.expiring","actor":"alice",
-            "data":{"holder":"alice","entity":"bd-1","paths":["src/","docs/"],"reservation_id":"rv-1"}}),
-        // A handoff: bob gives the claim to carol.
+        json!({"event_id":"20260930T130000.000000Z-d-reservation-expired-rv-1","type":"reservation.expired","actor":"alice",
+            "data":{"holder":"alice","entity":"bd-1","paths":["src/"],"reservation_id":"rv-1","deadline":"D1"}}),
+        json!({"event_id":"20260930T125000.000000Z-d-reservation-expiring-rv-2","type":"reservation.expiring","actor":"alice",
+            "data":{"holder":"alice","entity":"bd-1","paths":long,"reservation_id":"rv-2","deadline":"D2"}}),
         json!({"event_id":"e3","type":"claim.acquired","actor":"bob","data":{"entity":"bd-2","to":"carol"}}),
-        // Claiming for oneself is not news.
-        json!({"event_id":"e4","type":"claim.acquired","actor":"bob","data":{"entity":"bd-3","to":"bob"}}),
-        json!({"event_id":"e5","type":"reservation.opened","actor":"bob","data":{}}),
     ];
     let items = mote::attention_items(&events);
-    let got: Vec<(String, String)> = items
-        .iter()
-        .map(|i| {
-            (
-                i["key"].as_str().unwrap().to_owned(),
-                i["recipient"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
+    let keys: Vec<&str> = items.iter().map(|i| i["key"].as_str().unwrap()).collect();
     assert_eq!(
-        got,
-        vec![
-            ("e1".into(), "alice".into()),
-            ("e2".into(), "alice".into()),
-            ("e3".into(), "carol".into())
-        ]
+        keys,
+        vec!["rv:rv-1:alice:D1:expired", "rv:rv-2:alice:D2:expiring"]
     );
-    assert!(items[1]["title"].as_str().unwrap().contains("src/, docs/"));
-    assert!(items[2]["title"]
-        .as_str()
+    // A wide reservation still gives a short title (review of ea93b08).
+    let title = items[1]["title"].as_str().unwrap();
+    assert!(
+        title.len() <= 160 && title.ends_with("and 24 more"),
+        "{title}"
+    );
+}
+
+#[test]
+fn claim_events_become_transitions_in_order() {
+    let events = vec![
+        json!({"op_id":"o1","event_id":"o1","type":"claim.acquired","actor":"alice","data":{"entity":"bd-1","to":"alice"}}),
+        json!({"op_id":"o2","event_id":"o2","type":"claim.acquired","actor":"alice","data":{"entity":"bd-1","to":"bob"}}),
+        json!({"op_id":"o3","event_id":"o3","type":"claim.released","actor":"bob","data":{"entity":"bd-1"}}),
+        json!({"op_id":"o4","event_id":"o4","type":"reservation.opened","actor":"bob","data":{"entity":"bd-1"}}),
+    ];
+    let t = mote::claim_transitions(&events);
+    assert_eq!(t.len(), 3);
+    assert_eq!(
+        t[1],
+        json!({"entity":"bd-1","to":"bob","by":"alice","op_id":"o2"})
+    );
+    assert_eq!(t[2]["released"], true);
+}
+
+fn claim(entity: &str, to: &str, by: &str, op: &str) -> Value {
+    json!({"entity":entity,"to":to,"by":by,"op_id":op})
+}
+
+fn ingest_claims(b: &mut Board, after: Value, cursor: &str, claims: Vec<Value>) -> Value {
+    at(
+        b,
+        "alice",
+        "mote_ingest",
+        json!({"store_id":"st-A","after":after,"cursor":cursor,"items":[],"claims":claims}),
+    )
+    .unwrap()
+}
+
+fn mote_titles(b: &mut Board, who: &str) -> Vec<String> {
+    at(b, who, "inbox", json!({"selection":"all"})).unwrap()["items"]
+        .as_array()
         .unwrap()
-        .contains("bob handed you bd-2"));
+        .iter()
+        .filter(|i| i["card"]["author"] == "mote")
+        .map(|i| i["card"]["title"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_claim_changing_hands_reaches_the_new_and_the_displaced_holder() {
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    // Seeded holders produce no cards.
+    ingest_claims(
+        &mut b,
+        Value::Null,
+        "c0",
+        vec![json!({"entity":"bd-1","to":"alice","by":"alice","op_id":"seed","seed":true})],
+    );
+    assert!(mote_titles(&mut b, "alice").is_empty());
+    // alice hands bd-1 to bob herself: bob hears, alice is not told what she did.
+    ingest_claims(
+        &mut b,
+        json!("c0"),
+        "c1",
+        vec![claim("bd-1", "bob", "alice", "o1")],
+    );
+    assert_eq!(
+        mote_titles(&mut b, "bob"),
+        vec!["Mote: alice handed you bd-1"]
+    );
+    assert!(mote_titles(&mut b, "alice").is_empty());
+    // carol moves bob's claim to herself (Mote has no holder check): bob hears.
+    ingest_claims(
+        &mut b,
+        json!("c1"),
+        "c2",
+        vec![claim("bd-1", "carol", "carol", "o2")],
+    );
+    assert!(
+        mote_titles(&mut b, "bob").contains(&"Mote: your claim on bd-1 is now carol's".to_owned())
+    );
+    // A third party hands it on: the new holder and the displaced one both hear.
+    ingest_claims(
+        &mut b,
+        json!("c2"),
+        "c3",
+        vec![claim("bd-1", "alice", "bob", "o3")],
+    );
+    assert!(mote_titles(&mut b, "alice").contains(&"Mote: bob handed you bd-1".to_owned()));
+    assert!(mote_titles(&mut b, "carol")
+        .contains(&"Mote: your claim on bd-1 is now alice's".to_owned()));
+    // Replaying the same transitions changes nothing.
+    let before = mote_titles(&mut b, "carol").len();
+    ingest_claims(
+        &mut b,
+        json!("c3"),
+        "c3",
+        vec![claim("bd-1", "alice", "bob", "o3")],
+    );
+    assert_eq!(mote_titles(&mut b, "carol").len(), before);
+}
+
+#[test]
+fn an_oversized_or_invalid_item_is_skipped_and_reported_not_fatal() {
+    let mut b = board();
+    let huge = json!({"key":"k1","recipient":"bob","title":"t".repeat(500),"summary":"s".repeat(5000),"priority":1,"refs":["bd-1"]});
+    let bad =
+        json!({"key":"k2","recipient":"bob","title":"ok","summary":"s","priority":9,"refs":[]});
+    let fine = item("k3", "bob");
+    let r = ingest(&mut b, Value::Null, "c", vec![huge, bad, fine]).unwrap();
+    // The long one is clipped and delivered; the invalid one is reported;
+    // the rest, and the cursor, go through.
+    assert_eq!(r["created"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(r["invalid"][0]["key"], "k2");
+    let titles = mote_titles(&mut b, "bob");
+    assert!(
+        titles.iter().any(|t| t.len() <= 160 && t.ends_with('…')),
+        "{titles:?}"
+    );
+    // The skipped item did not leave a dedupe row: a corrected retry lands.
+    let r = ingest(&mut b, json!("c"), "c", vec![item("k2", "bob")]).unwrap();
+    assert_eq!(r["created"].as_array().unwrap().len(), 1, "{r}");
 }
 
 #[test]
@@ -468,4 +574,74 @@ fn brief_warns_when_mote_actor_names_someone_else() {
     assert!(out.contains("MOTE_ACTOR is mallory"), "{out}");
     let (_, out) = p.fray(&[("MOTE_ACTOR", "alice")], "alice", &["brief"]);
     assert!(!out.contains("MOTE_ACTOR is"), "{out}");
+}
+
+#[test]
+fn review_reproducers_against_the_real_mote() {
+    // Review of ea93b08: a wide reservation stalled every later sync, and a
+    // displaced holder was never told.
+    let Some(p) = Project::new("repro") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    // A reservation over many long paths expires, next to a handoff.
+    let wide = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &wide]).status.success());
+    let paths: Vec<String> = (0..12)
+        .map(|i| format!("src/module_theta_number_{i}/"))
+        .collect();
+    let mut args = vec!["reserve", "--issue", wide.as_str(), "--ttl", "1"];
+    args.extend(paths.iter().map(String::as_str));
+    assert!(p.mote("alice", &args).status.success());
+    let handed = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &handed]).status.success());
+    assert!(p
+        .mote("alice", &["handoff", &handed, "--to", "bob"])
+        .status
+        .success());
+    // bob moves alice's other claim to himself: Mote has no holder check.
+    let taken = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &taken]).status.success());
+    assert!(p
+        .mote("bob", &["handoff", &taken, "--to", "bob"])
+        .status
+        .success());
+    // alice's short claim expires and bob claims it.
+    let lapsed = p.bead("alice");
+    assert!(p
+        .mote("alice", &["claim", &lapsed, "--ttl", "1"])
+        .status
+        .success());
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(p.mote("bob", &["claim", &lapsed]).status.success());
+
+    let s = p.sync(&[], "bob").unwrap();
+    assert!(s["invalid"].as_array().unwrap().is_empty(), "{s}");
+    let bob = p.titles("bob");
+    assert!(
+        bob.iter()
+            .any(|t| t.contains(&format!("alice handed you {handed}"))),
+        "{bob:?}"
+    );
+    let alice = p.titles("alice");
+    assert!(
+        alice
+            .iter()
+            .any(|t| t
+                .starts_with("Mote reservation expired on src/module_theta_number_0/ and 11 more")),
+        "{alice:?}"
+    );
+    assert!(
+        alice
+            .iter()
+            .any(|t| t.contains(&format!("your claim on {taken} is now bob's"))),
+        "{alice:?}"
+    );
+    assert!(
+        alice
+            .iter()
+            .any(|t| t.contains(&format!("your claim on {lapsed} is now bob's"))),
+        "{alice:?}"
+    );
+    assert!(alice.iter().all(|t| t.len() <= 160));
 }

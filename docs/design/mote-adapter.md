@@ -246,8 +246,25 @@ Candidate reviews follow the rule in 7.3.
   | Entity | State key | Source |
   |---|---|---|
   | Claim | `claim:<issue>:<op_id>` | last accepted `kind=claim` entry of `mote history --json`, or the `claim.acquired` event's `op_id` |
-  | Reservation | `rv:<rv>:<actor>:<lease_until_ts>` | `who-has --json`; from an event, `event.actor` and `event.ts + data.ttl_s`. Each adopt resets the lease. |
+  | Reservation | `rv:<rv>:<actor>:<lease_until_ts>:<phase>`, where phase is `expiring` or `expired` | `who-has --json`; from an event, `event.actor` and `event.ts + data.ttl_s`. Each adopt resets the lease. |
   | Candidate | `cand:<id>:<phase.op_id>:<latest op>:<landability hash>` | `candidate show --json`. `latest op` is the greatest op id across `policy.op_id`, `reviews.<name>.op_id`, `authorization.op_id` and `evidence[].op_id`. `landability hash` is a short hash of `landability.landable` plus the sorted `reason_codes`, so that any change in landability produces a new key, whatever op caused it. |
+- **Who hears that a claim changed hands** (implemented in slice 5b). The
+  board keeps the last holder it has seen for each entity (`mote_claims`). It
+  is seeded from `board --json` on the first sync, and every claim event then
+  updates it in the same transaction as the cursor.
+  - The new holder hears of a handoff: `claim.acquired` where `to` is not
+    the actor.
+  - The previous holder hears when someone else moved their claim: a
+    third-party handoff, or taking over a claim that had expired. They do
+    not hear when they handed it off themselves.
+  - Both cards share the key `claim:<entity>:<op_id>`, one per recipient.
+- **Bounded cards.** Titles and summaries are clipped to the card limits. An
+  item that is still invalid is skipped and reported, never allowed to stall
+  the cursor for every later event.
+- **Trust.** Cards from Mote are authored by the reserved identity `mote`.
+  Names that fold to it (such as `Mote`) cannot join. Any joined agent can
+  call `mote_ingest`: like the rest of Fray, this guards against collision,
+  not against a hostile process running as the same OS user.
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries

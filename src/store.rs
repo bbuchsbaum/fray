@@ -354,7 +354,15 @@ impl Store {
         // operations only as the owner. Collision prevention against accidents
         // and injected text, not authentication (docs/design/owner-authority.md).
         let owner_op = req.op.starts_with("owner_");
-        if req.op == "join" && req.actor == MOTE {
+        if req.op == "join"
+            && req
+                .actor
+                .to_lowercase()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                == MOTE
+        {
             return Err(Error::new(
                 "reserved_mote",
                 "`mote` is reserved for attention derived from Mote; choose another name",
@@ -1919,7 +1927,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // Mote events become attention exactly once per recipient, and the
             // cursor moves only forward, in the same transaction
             // (docs/design/mote-adapter.md section 6).
-            check_fields(a, &["store_id", "after", "cursor", "items"])?;
+            check_fields(a, &["store_id", "after", "cursor", "items", "claims"])?;
             let store_id = string(a, "store_id")?;
             let bound = mote_binding(conn)?;
             if bound.is_null() || bound["store_id"] != store_id {
@@ -1955,8 +1963,60 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
                 params![MOTE, now],
             )?;
-            let (mut created, mut duplicate, mut unknown) = (Vec::new(), 0, Vec::new());
-            for item in items {
+            let claims = match a.get("claims") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(v) => v
+                    .as_array()
+                    .filter(|c| c.len() <= 100)
+                    .ok_or_else(|| Error::invalid("claims must be an array of at most 100"))?
+                    .clone(),
+            };
+            // Claim transitions, in event order, become cards here, where the
+            // previous holder is known consistently with the cursor.
+            let mut items: Vec<Value> = items.clone();
+            for c in &claims {
+                check_fields(c, &["entity", "to", "by", "op_id", "released", "seed"])?;
+                let entity = string(c, "entity")?;
+                let op_id = string(c, "op_id")?;
+                text(entity, "entity", 200, false)?;
+                let to = c["to"].as_str();
+                let by = c["by"].as_str().unwrap_or("");
+                let previous: Option<Option<String>> = conn
+                    .query_row(
+                        "SELECT holder FROM mote_claims WHERE store_id=? AND entity=?",
+                        params![store_id, entity],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let holder = if c["released"] == true { None } else { to };
+                conn.execute(
+                    "INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",
+                    params![store_id, entity, holder, op_id],
+                )?;
+                if c["seed"] == true || c["released"] == true {
+                    continue;
+                }
+                let Some(to) = to else { continue };
+                let key = format!("claim:{entity}:{op_id}");
+                if by != to {
+                    items.push(json!({"key":key,"recipient":to,
+                        "title":format!("Mote: {by} handed you {entity}"),
+                        "summary":format!("{by} transferred the Mote claim on {entity} to you. Mote owns the claim: `mote show {entity}` for the work, and look for a Fray handoff packet from {by}."),
+                        "priority":1,"refs":[entity]}));
+                }
+                // The previous holder hears when someone else moved their claim (a
+                // third-party handoff, or taking over one that expired), not when
+                // they handed it off themselves.
+                if let Some(prev) = previous.flatten().filter(|p| p != to && p != by) {
+                    items.push(json!({"key":key,"recipient":prev,
+                        "title":format!("Mote: your claim on {entity} is now {to}'s"),
+                        "summary":format!("The Mote claim on {entity} you held (possibly expired) now belongs to {to}, by {by}. If that was not agreed, raise it with {by}; Mote does not check who hands a claim off."),
+                        "priority":1,"refs":[entity]}));
+                }
+            }
+            let (mut created, mut duplicate, mut unknown, mut invalid) =
+                (Vec::new(), 0, Vec::new(), Vec::new());
+            for item in &items {
                 check_fields(
                     item,
                     &["key", "recipient", "title", "summary", "priority", "refs"],
@@ -1989,15 +2049,30 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         tags.push(format!("mote:{r}"));
                     }
                 }
-                let card = create_card(
+                let title = clip(item["title"].as_str().unwrap_or(""), 160);
+                let summary = clip(item["summary"].as_str().unwrap_or(""), 2000);
+                // One malformed item must never stop every later event: it is
+                // skipped and reported, and its dedupe row is undone.
+                let card = match create_card(
                     conn,
                     MOTE,
-                    &json!({"kind":"note","topic":format!("@{recipient}"),"title":item["title"],
-                        "summary":item["summary"],"priority":item.get("priority").cloned().unwrap_or(json!(1)),
+                    &json!({"kind":"note","topic":format!("@{recipient}"),"title":title,
+                        "summary":summary,"priority":item.get("priority").cloned().unwrap_or(json!(1)),
                         "tags":tags,"assignee":recipient}),
                     json!({"mote_key":key}),
                     now,
-                )?;
+                ) {
+                    Ok(card) => card,
+                    Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
+                        conn.execute(
+                            "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
+                            params![store_id, key, recipient],
+                        )?;
+                        invalid.push(json!({"key":key,"recipient":recipient,"error":e.message}));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 let id = card["card"]["id"].as_i64().unwrap_or(0);
                 conn.execute(
                     "UPDATE mote_events SET card_id=? WHERE store_id=? AND key=? AND recipient=?",
@@ -2013,7 +2088,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             unknown.sort();
             unknown.dedup();
             Ok(
-                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"cursor":cursor,"synced_by":actor}),
+                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"cursor":cursor,"synced_by":actor}),
             )
         }
         "mote_sync_failed" => {
@@ -2794,6 +2869,18 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
         || a == b
         || b.starts_with(&format!("{a}/"))
         || a.starts_with(&format!("{b}/"))
+}
+
+/// At most `max` bytes, cut on a character boundary, marked when cut.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max.saturating_sub('…'.len_utf8());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// The Mote store this board is bound to, or null.

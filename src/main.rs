@@ -988,12 +988,12 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         path,
         store_id: store_id.clone(),
     };
-    let ingest = |after: Option<&str>, cursor: &str, items: Vec<Value>| {
+    let ingest = |after: Option<&str>, cursor: &str, items: Vec<Value>, claims: Vec<Value>| {
         send(
             home,
             actor,
             "mote_ingest",
-            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":items}),
+            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":items,"claims":claims}),
             None,
             10,
         )
@@ -1007,17 +1007,54 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             _ => now,
         }
     };
-    let Some(cursor) = binding["cursor"].as_str().map(str::to_owned) else {
-        // First sync: start at the tail, never replay history.
-        let seed = tail(None);
-        return match ingest(None, &seed, vec![]) {
-            Ok(_) => Ok(json!({"mote_sync":{"seeded":seed,"created":0}})),
-            Err(e) if moved(&e) => {
-                Ok(json!({"mote_sync":{"note":"another sync seeded the cursor first","created":0}}))
-            }
-            Err(e) => Err(e),
-        };
+    let failed = |what: &str, outcome: mote::Outcome| match outcome {
+        mote::Outcome::Invalid(why) => Error::new(
+            "mote_invalid",
+            format!("mote {what} refused the call ({why}); nothing was written"),
+        ),
+        other => Error::new(
+            "mote_unavailable",
+            format!("mote {what} failed ({other:?}); nothing was written"),
+        ),
     };
+
+    let Some(cursor) = binding["cursor"].as_str().map(str::to_owned) else {
+        // First sync: start at the tail and never replay history, but record
+        // who holds what now, so a later change of hands reaches the holder.
+        let board = match mote::run(&store, Some(actor), &["board"], mote::read_timeout()) {
+            mote::Outcome::Ok(board) => board,
+            other => return Err(failed("board", other)),
+        };
+        let seed = tail(None);
+        let holders: Vec<Value> = board["active_claims"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let holder = c["claimed_by"].as_str()?;
+                Some(json!({"entity":c["id"].as_str()?,"to":holder,"by":holder,"op_id":"seed","seed":true}))
+            })
+            .collect();
+        let chunks: Vec<Vec<Value>> = if holders.is_empty() {
+            vec![vec![]]
+        } else {
+            holders.chunks(100).map(<[Value]>::to_vec).collect()
+        };
+        let mut after: Option<String> = None;
+        for chunk in chunks {
+            match ingest(after.as_deref(), &seed, vec![], chunk) {
+                Ok(_) => after = Some(seed.clone()),
+                Err(e) if moved(&e) && after.is_none() => {
+                    return Ok(
+                        json!({"mote_sync":{"note":"another sync seeded the cursor first","created":[]}}),
+                    )
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        return Ok(json!({"mote_sync":{"seeded":seed,"holders":holders.len(),"created":[]}}));
+    };
+
     let events = match mote::run(
         &store,
         None,
@@ -1037,23 +1074,18 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                 ));
             }
             let seed = tail(Some(&cursor));
-            return match ingest(Some(&cursor), &seed, vec![]) {
+            return match ingest(Some(&cursor), &seed, vec![], vec![]) {
                 Ok(_) => Ok(
-                    json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":0,
-                    "note":"Three syncs in a row timed out; the cursor moved to the tail. Reconciliation covers the skipped events."}}),
+                    json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":[],
+                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Events in between are not delivered until reconciliation (a later slice) is in place."}}),
                 ),
                 Err(e) if moved(&e) => Ok(
-                    json!({"mote_sync":{"note":"another sync advanced the cursor first","created":0}}),
+                    json!({"mote_sync":{"note":"another sync advanced the cursor first","created":[]}}),
                 ),
                 Err(e) => Err(e),
             };
         }
-        other => {
-            return Err(Error::new(
-                "mote_unavailable",
-                format!("mote events failed ({other:?}); nothing was written"),
-            ))
-        }
+        other => return Err(failed("events", other)),
     };
     let newest = events
         .iter()
@@ -1062,24 +1094,29 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         .filter(|id| *id > cursor.as_str())
         .unwrap_or(&cursor)
         .to_owned();
-    let items = mote::attention_items(&events);
-    let (mut created, mut duplicate, mut unknown) = (Vec::new(), 0, Vec::new());
-    let chunks: Vec<Vec<Value>> = if items.is_empty() {
-        vec![vec![]]
+    let (mut created, mut duplicate, mut unknown, mut invalid) =
+        (Vec::new(), 0, Vec::new(), Vec::new());
+    let chunks: Vec<&[Value]> = if events.is_empty() {
+        vec![&[]]
     } else {
-        items.chunks(100).map(<[Value]>::to_vec).collect()
+        events.chunks(100).collect()
     };
     let last = chunks.len() - 1;
     let mut after = cursor.clone();
     for (i, chunk) in chunks.into_iter().enumerate() {
         // Only the final chunk advances the cursor; an interrupted sync
-        // replays from the old cursor and its keys dedupe what already landed.
+        // replays from the old cursor, and its keys dedupe what already landed.
         let next = if i == last {
             newest.clone()
         } else {
             after.clone()
         };
-        match ingest(Some(&after), &next, chunk) {
+        match ingest(
+            Some(&after),
+            &next,
+            mote::attention_items(chunk),
+            mote::claim_transitions(chunk),
+        ) {
             Ok(r) => {
                 created.extend(r["created"].as_array().cloned().unwrap_or_default());
                 duplicate += r["duplicate"].as_i64().unwrap_or(0);
@@ -1089,21 +1126,27 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                         .cloned()
                         .unwrap_or_default(),
                 );
+                invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
                 after = next;
             }
-            Err(e) if moved(&e) => {
+            Err(e) => {
+                // Cards from earlier chunks are delivered; report them either way.
+                let note = if moved(&e) {
+                    "another sync advanced the cursor; stopped without duplicating".to_owned()
+                } else {
+                    format!("stopped: {}: {}", e.code, e.message)
+                };
                 return Ok(
-                    json!({"mote_sync":{"note":"another sync advanced the cursor; stopped without duplicating","created":created}}),
-                )
+                    json!({"mote_sync":{"note":note,"created":created,"duplicate":duplicate}}),
+                );
             }
-            Err(e) => return Err(e),
         }
     }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
-        "unknown_recipients":unknown,"cursor":after}}),
+        "unknown_recipients":unknown,"invalid":invalid,"cursor":after}}),
     )
 }
 
@@ -2416,6 +2459,12 @@ fn human(v: &Value, out: &mut String) {
                 m["created"].as_array().map_or(0, Vec::len),
                 m["duplicate"]
             ));
+            if let Some(bad) = m["invalid"].as_array().filter(|u| !u.is_empty()) {
+                out.push_str(&format!(
+                    "  Skipped as invalid (reported, not retried): {}\n",
+                    clean(&serde_json::to_string(bad).unwrap_or_default())
+                ));
+            }
             if let Some(u) = m["unknown_recipients"].as_array().filter(|u| !u.is_empty()) {
                 out.push_str(&format!(
                     "  Not on this board, so not notified: {}\n",

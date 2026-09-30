@@ -7,30 +7,39 @@ section 6 of `docs/design/mote-adapter.md`, for claims and reservations.
 Candidates, and the reconciliation that covers skipped events, come in
 slice 5c.
 
-`tests/mote_sync.rs` has 10 tests:
+`tests/mote_sync.rs` has 14 tests:
 
-- **Exactly once.** Each (store, event, recipient) produces one card; a
+- **Exactly once.** Each (store, state key, recipient) produces one card; a
   replayed event produces none; the syncing agent receives its own cards.
 - **Cursor.** It moves only under compare-and-set and never backwards; a
   stale sync writes nothing.
 - **Store and recipients.** Ingest is refused from an unbound or different
-  store. A Mote actor that is not on the board is reported, not notified. The
-  `mote` identity is reserved.
-- **Timeouts.** They are counted, and the counter resets on success. Three in
-  a row move the cursor to the latest event, through the CLI, with a stub
-  whose `events` never finishes.
-- **Mapping.** Expiry goes to the holder, a handoff to the new holder, and a
-  claim for oneself is not reported. The cursor has op-id form, including
-  across a leap day.
-- **Real `mote 0.1.0`.** Tested end to end: a handoff reaches bob, an expired
-  reservation reaches alice even when bob runs the sync, a stranger is
-  reported, and a second sync delivers nothing twice.
+  store. A Mote actor that is not on the board is reported, not notified.
+  Names that fold to `mote` cannot join.
+- **Claims.**
+  - The holders seeded on the first sync produce no cards.
+  - A handoff reaches the new holder.
+  - A displaced holder hears of a third-party handoff or a takeover after
+    expiry, but not of their own handoff.
+- **Bounded cards.** An oversized item is clipped and delivered; an invalid
+  one is skipped, reported and retryable, and never stalls the cursor.
+- **Timeouts.** Three in a row move the cursor to the latest event, through
+  the CLI.
+- **State keys and titles.** Reservation keys follow the contract
+  (`rv:<rv>:<holder>:<deadline>:<phase>`), and a 25-path reservation still
+  gets a short title.
+- **Real `mote 0.1.0`.** Tested end to end, plus the review reproducers: a
+  12-path reservation with long names expiring next to a handoff, a
+  third-party handoff, and a takeover after expiry.
 - **Warnings.** `brief` and `join` warn when `MOTE_ACTOR` names another actor.
 
-With `MOTE_STORE` pointing at a scratch store, the adapter suites pass and
-that store's op count stays at 0. Eight concurrent runs pass.
+Independent review of `ea93b08` raised three blocking objections, each
+reproduced, and all are fixed here: one wide reservation stalled every later
+sync, the displaced holder was not told, and the dedupe keys were event ids
+rather than contract state keys. The review verified exactly-once delivery
+under 6 concurrent syncs and 160 handoffs.
 
-Checks at this change: strict Clippy, 288 Rust tests, a locked build, the
+Checks at this change: strict Clippy, 292 Rust tests, a locked build, the
 three IPC scripts and `check_sql.py` all pass. `cargo fmt --check` reports only
 `src/driver.rs`, which was inherited from `main` (fray #33).
 

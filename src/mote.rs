@@ -445,71 +445,80 @@ pub fn tail_cursor(now: std::time::SystemTime) -> String {
     )
 }
 
+/// "src/ and 3 more": short enough for a title whatever was reserved.
 fn paths(data: &Value) -> String {
-    data["paths"]
+    let all: Vec<&str> = data["paths"]
         .as_array()
-        .map(|p| {
-            p.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
+        .map(|p| p.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    match all.as_slice() {
+        [] => "its paths".to_owned(),
+        [one] => (*one).to_owned(),
+        [first, rest @ ..] => format!("{first} and {} more", rest.len()),
+    }
 }
 
-/// Which Mote events become attention, for whom (section 6). Each item is
-/// keyed by the event id, so replaying an event yields no second card.
+/// Reservation events that become attention for their holder (section 6),
+/// keyed by the contract's state key plus the phase, so an expiring and an
+/// expired card are distinct and reconciliation can reproduce both keys.
 pub fn attention_items(events: &[Value]) -> Vec<Value> {
     let mut items = Vec::new();
     for e in events {
-        let (Some(kind), Some(key)) = (e["type"].as_str(), e["event_id"].as_str()) else {
+        let Some(kind) = e["type"].as_str() else {
             continue;
         };
         let data = &e["data"];
+        let (phase, verb) = match kind {
+            "reservation.expiring" => ("expiring", "expires"),
+            "reservation.expired" => ("expired", "expired"),
+            _ => continue,
+        };
+        let (Some(holder), Some(rv)) = (
+            data["holder"].as_str().or(e["actor"].as_str()),
+            data["reservation_id"].as_str(),
+        ) else {
+            continue;
+        };
         let entity = data["entity"].as_str().unwrap_or("");
-        match kind {
-            "reservation.expiring" | "reservation.expired" => {
-                let Some(holder) = data["holder"].as_str().or(e["actor"].as_str()) else {
-                    continue;
-                };
-                let expired = kind == "reservation.expired";
-                items.push(serde_json::json!({
-                    "key": key,
-                    "recipient": holder,
-                    "title": format!("Mote reservation {} on {}", if expired { "expired" } else { "expiring" }, paths(data)),
-                    "summary": format!(
-                        "Your Mote reservation {} for {entity} on {} {} at {}. Mote owns it: check with `mote who-has PATH`; renew or re-reserve through Mote if you still need the paths.",
-                        data["reservation_id"].as_str().unwrap_or(""),
-                        paths(data),
-                        if expired { "expired" } else { "expires" },
-                        data["deadline"].as_str().unwrap_or("its deadline")
-                    ),
-                    "priority": 1,
-                    "refs": [entity],
-                }));
-            }
-            "claim.acquired" => {
-                let (Some(actor), Some(to)) = (e["actor"].as_str(), data["to"].as_str()) else {
-                    continue;
-                };
-                // Claiming for oneself is not news; a claim given to someone
-                // else is a handoff they need to hear about.
-                if actor == to {
-                    continue;
-                }
-                items.push(serde_json::json!({
-                    "key": key,
-                    "recipient": to,
-                    "title": format!("Mote: {actor} handed you {entity}"),
-                    "summary": format!(
-                        "{actor} transferred the Mote claim on {entity} to you. Mote owns the claim: `mote show {entity}` for the work, and look for a Fray handoff packet from {actor}."
-                    ),
-                    "priority": 1,
-                    "refs": [entity],
-                }));
-            }
-            _ => {}
-        }
+        let deadline = data["deadline"].as_str().unwrap_or("");
+        let listed: Vec<&str> = data["paths"]
+            .as_array()
+            .map(|p| p.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        items.push(serde_json::json!({
+            "key": format!("rv:{rv}:{holder}:{deadline}:{phase}"),
+            "recipient": holder,
+            "title": format!("Mote reservation {phase} on {}", paths(data)),
+            "summary": format!(
+                "Your Mote reservation {rv} for {entity} {verb} at {deadline}. Paths: {}. Mote owns it: check with `mote who-has PATH`; renew or re-reserve through Mote if you still need them.",
+                listed.join(", ")
+            ),
+            "priority": 1,
+            "refs": [entity],
+        }));
     }
     items
+}
+
+/// Claim changes, in event order, for the store to turn into attention: the
+/// new holder hears of a handoff, the previous holder of any change
+/// (section 6). The store keeps who held what.
+pub fn claim_transitions(events: &[Value]) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|e| {
+            let data = &e["data"];
+            let entity = data["entity"].as_str()?;
+            let op_id = e["op_id"].as_str()?;
+            match e["type"].as_str()? {
+                "claim.acquired" => Some(serde_json::json!({
+                    "entity": entity, "to": data["to"].as_str()?, "by": e["actor"], "op_id": op_id,
+                })),
+                "claim.released" => Some(serde_json::json!({
+                    "entity": entity, "to": null, "by": e["actor"], "op_id": op_id, "released": true,
+                })),
+                _ => None,
+            }
+        })
+        .collect()
 }

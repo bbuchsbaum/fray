@@ -224,7 +224,9 @@ is reported and reads degrade to advisory.
 posts attention to the agent they concern:
 
 - a reservation expiring or expired, to its holder;
-- a claim handed to someone, to the new holder.
+- a claim handed to someone, to the new holder;
+- a claim someone else moved away from you, whether by a third-party
+  handoff or by taking over after it expired, to you.
 
 Each such event reaches each recipient exactly once, even across interrupted
 or concurrent syncs, because the cursor only moves forward, under
