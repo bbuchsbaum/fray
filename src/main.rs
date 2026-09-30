@@ -8,6 +8,7 @@ use std::{
     process::Command as Process,
 };
 mod driver;
+mod guard;
 
 #[derive(Parser)]
 #[command(
@@ -414,6 +415,12 @@ enum Cmd {
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
     },
+    /// Commit and push hooks that warn when you touch another agent's lane or
+    /// Mote reservation. Advisory unless FRAY_GUARD=block.
+    Guard {
+        #[command(subcommand)]
+        action: GuardCmd,
+    },
     /// Read-only listening diagnosis: daemon capabilities, listener state and
     /// pending attention. Never acknowledges or records a presentation.
     Doctor,
@@ -565,6 +572,21 @@ enum LaneCmd {
     },
     /// List live lanes (stale ones are marked).
     List,
+}
+
+#[derive(Subcommand)]
+enum GuardCmd {
+    /// Install pre-commit and pre-push hooks for this repository (all its
+    /// worktrees), keeping and chaining any existing hooks.
+    Install,
+    /// Run by the pre-commit hook: checks the staged paths.
+    PreCommit,
+    /// Run by the pre-push hook: checks the paths in the pushed commits
+    /// (ref-update lines on stdin, as git gives them).
+    PrePush {
+        remote: Option<String>,
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2284,6 +2306,22 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             LaneCmd::List => ("lanes", json!({})),
         },
         Cmd::Status { text } => ("set_status", json!({"text":text})),
+        Cmd::Guard { action } => {
+            let (v, refuse) = match action {
+                GuardCmd::Install => (guard::install()?, false),
+                GuardCmd::PreCommit => guard::check(&home, &actor, "pre-commit", None)?,
+                GuardCmd::PrePush { remote, .. } => {
+                    guard::check(&home, &actor, "pre-push", remote.as_deref())?
+                }
+            };
+            if refuse {
+                return Err(Error::new(
+                    "guard_blocked",
+                    "paths held by others (FRAY_GUARD=block); see above",
+                ));
+            }
+            return Ok(Some(v));
+        }
         Cmd::Mote { action } => match action {
             MoteCmd::Status => return Ok(Some(mote_status(&home, &actor)?)),
             MoteCmd::Sync => return Ok(Some(mote_sync(&home, &actor)?)),
