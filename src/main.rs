@@ -1248,12 +1248,71 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             ))
         }
     }
+    // Candidates (section 6): cards come from each candidate's current
+    // state, so one listing both reports and reconciles; the state keys
+    // dedupe what earlier syncs already delivered.
+    let mut candidate_note = Value::Null;
+    let mut cand_items = Vec::new();
+    match mote::run(
+        &store,
+        Some(actor),
+        &["candidate", "list", "--phase", "pending"],
+        mote::read_timeout(),
+    ) {
+        mote::Outcome::Ok(Value::Array(list)) => {
+            if list.len() > 200 {
+                candidate_note =
+                    json!("more than 200 pending candidates; only the first 200 were read");
+            }
+            for c in list.iter().take(200) {
+                cand_items.extend(mote::candidate_items(c));
+            }
+        }
+        other => {
+            candidate_note = json!(format!("candidates skipped: mote candidate list {other:?}"))
+        }
+    }
+    // Candidates that left the pending list during these events.
+    for id in mote::terminal_candidates(&events).iter().take(20) {
+        if let mote::Outcome::Ok(c) = mote::run(
+            &store,
+            Some(actor),
+            &["candidate", "show", id],
+            mote::read_timeout(),
+        ) {
+            cand_items.extend(mote::candidate_items(&c));
+        }
+    }
+    for chunk in cand_items.chunks(100) {
+        match ingest(Some(&after), &after, chunk.to_vec(), vec![]) {
+            Ok(r) => {
+                created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                duplicate += r["duplicate"].as_i64().unwrap_or(0);
+                unknown.extend(
+                    r["unknown_recipients"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
+            }
+            Err(e) if moved(&e) => {
+                candidate_note =
+                    json!("another sync advanced the cursor; candidates deferred to it");
+                break;
+            }
+            Err(e) => {
+                candidate_note = json!(format!("candidates failed: {}: {}", e.code, e.message));
+                break;
+            }
+        }
+    }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
-        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note}}),
+        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,"candidate_note":candidate_note}}),
     )
 }
 
@@ -2579,6 +2638,9 @@ fn human(v: &Value, out: &mut String) {
                 ));
             }
             if let Some(n) = m["reconcile_note"].as_str() {
+                out.push_str(&format!("  {}\n", clean(n)));
+            }
+            if let Some(n) = m["candidate_note"].as_str() {
                 out.push_str(&format!("  {}\n", clean(n)));
             }
             if let Some(u) = m["unknown_recipients"].as_array().filter(|u| !u.is_empty()) {

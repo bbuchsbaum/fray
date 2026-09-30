@@ -1,5 +1,32 @@
 # Validation
 
+## Mote adapter slice 5c-b: candidates (2026-09-30)
+
+`fray mote sync` reads the pending candidates once per sync (`mote
+candidate list --phase pending`). Their cards come from current state, so
+the listing both reports and reconciles.
+
+- Named reviewers who have not reviewed are asked.
+- The proposer and the authorizer hear when landability or its blocking
+  reasons change. They do not hear about evidence that changes nothing.
+- Everyone involved hears once when a candidate lands, is superseded or is
+  abandoned.
+
+The design doc records one deviation from the approved key: status keys omit
+the latest op, which would otherwise have produced a card on every evidence
+op.
+
+Tests (`tests/mote_sync.rs`, 23 in all):
+
+- The unit tests cover:
+  - review requests and re-asking after a policy amendment;
+  - a new status key when landability changes within one phase;
+  - the same key when nothing changed;
+  - a terminal phase telling everyone involved once.
+- Against the real `mote 0.1.0`, in a git repository: a proposed candidate
+  asks carol for review and tells bob that it is blocked, and a second sync
+  delivers nothing twice.
+
 ## Mote adapter slice 5c-a: claim reconciliation (2026-09-30)
 
 Section 6 reconciliation, for claims, as state comparison. After ingesting

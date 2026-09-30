@@ -414,9 +414,10 @@ pub fn parse_lines(stdout: &str) -> std::result::Result<Value, String> {
         .map(Value::Array)
 }
 
-/// The event categories a sync reads (section 6). Candidates join in the
-/// reconciliation slice, where their landability is re-read.
-pub const SYNC_KINDS: &str = "claim,reservation";
+/// The event categories a sync reads (section 6). Candidate events only mark
+/// candidates that left the pending list; their cards come from the
+/// candidate's current state.
+pub const SYNC_KINDS: &str = "claim,reservation,candidate";
 
 /// An op-id-shaped cursor for this instant. `events --after` compares ids as
 /// strings, so seeding here skips history (section 6: start at the tail).
@@ -521,4 +522,157 @@ pub fn claim_transitions(events: &[Value]) -> Vec<Value> {
             }
         })
         .collect()
+}
+
+/// Candidate events after which the candidate leaves the pending list.
+pub fn terminal_candidates(events: &[Value]) -> Vec<String> {
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e["type"].as_str(),
+                Some(
+                    "candidate.landed"
+                        | "candidate.landed_out_of_band"
+                        | "candidate.superseded"
+                        | "candidate.abandoned"
+                )
+            )
+        })
+        .filter_map(|e| e["data"]["candidate_id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// A short stable hash (FNV-1a, 32 bits) for state keys.
+fn short_hash(text: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in text.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08x}")
+}
+
+/// Attention for one candidate, from its current state as `candidate show`
+/// or `candidate list` reports it (section 6).
+///
+/// - Each named reviewer who has not reviewed a pending candidate is asked,
+///   once per policy version.
+/// - The proposer and authorizer hear when landability or its blocking
+///   reasons change: the key covers the phase and a hash of landability, not
+///   every op, so evidence that changes nothing sends nothing.
+/// - Everyone involved hears when the candidate lands or is superseded or
+///   abandoned.
+pub fn candidate_items(c: &Value) -> Vec<Value> {
+    let Some(id) = c["candidate_id"].as_str() else {
+        return Vec::new();
+    };
+    let entity = c["entity"].as_str().unwrap_or("");
+    let proposer = c["proposer"].as_str();
+    let authorizer = c["policy"]["authorizer"].as_str();
+    let reviewers: Vec<&str> = c["policy"]["reviewers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let phase = c["phase"]["value"].as_str().unwrap_or("unknown");
+    let phase_op = c["phase"]["op_id"].as_str().unwrap_or("");
+    let policy_op = c["policy"]["op_id"].as_str().unwrap_or("");
+    let landable = c["landability"]["landable"] == true;
+    let mut codes: Vec<&str> = c["landability"]["reason_codes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    codes.sort_unstable();
+    let reasons: Vec<String> = c["landability"]["reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["blocking"] == true)
+        .take(5)
+        .map(|r| {
+            format!(
+                "{}: {}",
+                r["code"].as_str().unwrap_or("?"),
+                r["detail"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    let reviews: Vec<String> = c["reviews"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(who, r)| format!("{who}: {}", r["verdict"].as_str().unwrap_or("?")))
+        .collect();
+    let commit = c["identity"]["commit_oid"].as_str().unwrap_or("");
+    let short = &commit[..commit.len().min(12)];
+    let context = format!(
+        "Candidate {id} for {entity} (commit {short}, proposed by {}). Reviews: {}. Mote owns landing: `mote candidate show {id}`.",
+        proposer.unwrap_or("?"),
+        if reviews.is_empty() { "none yet".to_owned() } else { reviews.join(", ") }
+    );
+    let mut items = Vec::new();
+    let mut push = |key: String, to: &str, title: String, summary: String| {
+        items.push(
+            serde_json::json!({"key": key, "recipient": to, "title": title,
+            "summary": summary, "priority": 1, "refs": [id, entity]}),
+        );
+    };
+    if phase == "pending" {
+        for reviewer in &reviewers {
+            if c["reviews"].get(*reviewer).is_none() {
+                push(
+                    format!("cand-review:{id}:{reviewer}:{policy_op}"),
+                    reviewer,
+                    format!("Mote: review requested on {id} ({entity})"),
+                    format!("You are a named reviewer. {context} Review with `mote candidate review {id}`."),
+                );
+            }
+        }
+        let state = format!("{landable}:{}", codes.join(","));
+        let key = format!("cand:{id}:{phase_op}:{}", short_hash(&state));
+        let (title, summary) = if landable {
+            (
+                format!("Mote: {id} is landable"),
+                format!("{context} Nothing blocks landing."),
+            )
+        } else {
+            (
+                format!("Mote: {id} is blocked ({})", codes.join(", ")),
+                format!("{context} Blocking: {}.", reasons.join("; ")),
+            )
+        };
+        let mut told = Vec::new();
+        for to in [proposer, authorizer].into_iter().flatten() {
+            if !told.contains(&to) {
+                told.push(to);
+                push(key.clone(), to, title.clone(), summary.clone());
+            }
+        }
+    } else {
+        let key = format!("cand:{id}:{phase_op}:{phase}");
+        let mut told = Vec::new();
+        for to in [proposer, authorizer]
+            .into_iter()
+            .flatten()
+            .chain(reviewers.iter().copied())
+        {
+            if !told.contains(&to) {
+                told.push(to);
+                push(
+                    key.clone(),
+                    to,
+                    format!("Mote: {id} is {phase}"),
+                    context.clone(),
+                );
+            }
+        }
+    }
+    items
 }

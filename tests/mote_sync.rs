@@ -853,3 +853,170 @@ fn reconciliation_applies_only_if_fray_still_records_what_the_reader_saw() {
     let all = at(&mut b, "bob", "mote_claims", json!({"store_id":"st-A"})).unwrap();
     assert_eq!(all["holders"]["bd-1"], "bob");
 }
+
+fn candidate(
+    landable: bool,
+    codes: &[&str],
+    reviews: Value,
+    phase: &str,
+    policy_op: &str,
+) -> Value {
+    json!({"candidate_id":"cand-1","entity":"bd-9","proposer":"bob",
+        "policy":{"authorizer":"alice","reviewers":["carol"],"op_id":policy_op},
+        "phase":{"value":phase,"op_id":"P1"},
+        "reviews":reviews,
+        "identity":{"commit_oid":"0123456789abcdef"},
+        "landability":{"landable":landable,"reason_codes":codes,
+            "reasons":codes.iter().map(|c| json!({"blocking":true,"code":c,"detail":"d"})).collect::<Vec<_>>()}})
+}
+
+fn to_and_keys(items: &[Value]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .map(|i| {
+            (
+                i["recipient"].as_str().unwrap().to_owned(),
+                i["key"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_pending_candidate_asks_unreviewed_reviewers_and_reports_landability() {
+    let c = candidate(false, &["review_missing"], json!({}), "pending", "POL1");
+    let items = mote::candidate_items(&c);
+    let got = to_and_keys(&items);
+    assert_eq!(
+        got[0],
+        ("carol".into(), "cand-review:cand-1:carol:POL1".into())
+    );
+    assert_eq!(got[1].0, "bob");
+    assert_eq!(got[2].0, "alice");
+    assert_eq!(got[1].1, got[2].1, "one status key for everyone told");
+    assert!(items[1]["title"]
+        .as_str()
+        .unwrap()
+        .contains("blocked (review_missing)"));
+    // Once carol reviews, she is not asked again; landability changing
+    // (without a new phase op) gives a new status key.
+    let reviewed = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve","op_id":"R1"}}),
+        "pending",
+        "POL1",
+    );
+    let after = mote::candidate_items(&reviewed);
+    assert!(after.iter().all(|i| i["recipient"] != "carol"));
+    assert_ne!(after[0]["key"], items[1]["key"]);
+    assert!(after[0]["title"].as_str().unwrap().ends_with("is landable"));
+    // Evidence that changes nothing keeps the same status key: no new card.
+    let same = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve","op_id":"R1"}}),
+        "pending",
+        "POL1",
+    );
+    assert_eq!(mote::candidate_items(&same)[0]["key"], after[0]["key"]);
+    // An amended policy asks again.
+    let amended = candidate(false, &["review_missing"], json!({}), "pending", "POL2");
+    assert_eq!(
+        mote::candidate_items(&amended)[0]["key"],
+        "cand-review:cand-1:carol:POL2"
+    );
+}
+
+#[test]
+fn a_candidate_leaving_pending_tells_everyone_involved_once() {
+    let landed = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve","op_id":"R1"}}),
+        "landed",
+        "POL1",
+    );
+    let got = to_and_keys(&mote::candidate_items(&landed));
+    let who: Vec<&str> = got.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(who, vec!["bob", "alice", "carol"]);
+    assert!(got.iter().all(|(_, k)| k == "cand:cand-1:P1:landed"));
+    let events = vec![
+        json!({"type":"candidate.landed","data":{"candidate_id":"cand-1"}}),
+        json!({"type":"candidate.reviewed","data":{"candidate_id":"cand-2"}}),
+        json!({"type":"candidate.landed","data":{"candidate_id":"cand-1"}}),
+    ];
+    assert_eq!(mote::terminal_candidates(&events), vec!["cand-1"]);
+}
+
+#[test]
+fn candidates_reach_their_reviewer_and_proposer_through_the_real_mote() {
+    let Some(p) = Project::new("cand") else {
+        return;
+    };
+    p.fray(&[], "carol", &["join"]);
+    // A candidate needs a commit in the repository that backs the store.
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&p.t.0)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "work"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    let work = p.bead("bob");
+    assert!(p.mote("bob", &["claim", &work]).status.success());
+    p.sync(&[], "alice").unwrap();
+    let out = p.mote(
+        "bob",
+        &[
+            "candidate",
+            "propose",
+            "--issue",
+            &work,
+            "--commit",
+            &head,
+            "--base",
+            &base,
+            "--reviewer",
+            "carol",
+            "--authorizer",
+            "alice",
+            "--idempotency-key",
+            "k1",
+            "--path",
+            "src/",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = p.sync(&[], "alice").unwrap();
+    assert!(s["candidate_note"].is_null(), "{s}");
+    let carol = p.titles("carol");
+    assert!(
+        carol
+            .iter()
+            .any(|t| t.starts_with("Mote: review requested on cand-")),
+        "{carol:?}"
+    );
+    let bob = p.titles("bob");
+    assert!(bob.iter().any(|t| t.contains("is blocked")), "{bob:?}");
+    // A second sync delivers nothing twice.
+    let before = (p.titles("carol").len(), p.titles("bob").len());
+    p.sync(&[], "bob").unwrap();
+    assert_eq!((p.titles("carol").len(), p.titles("bob").len()), before);
+}

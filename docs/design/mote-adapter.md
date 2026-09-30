@@ -281,6 +281,24 @@ Candidate reviews follow the rule in 7.3.
   - A release or expiry is recorded without cards.
   - `mote history` is not used. It cannot tell a handoff from a renewal, and
     a late op can overturn the op order it implies (review of 637458b).
+- **Candidates** (implemented in slice 5c-b). Each sync runs one `candidate
+  list --phase pending`, and cards come from each candidate's current state,
+  so that listing both reports and reconciles.
+  - Each named reviewer who has not reviewed is asked, under
+    `cand-review:<id>:<reviewer>:<policy.op_id>`. An amended policy asks
+    again.
+  - The proposer and the authorizer hear when landability or its blocking
+    reasons change.
+  - When a candidate lands, is superseded or is abandoned (found through that
+    sync's `candidate.*` events and one `candidate show` each), everyone
+    involved hears once.
+  - Deviation from the key table above: status cards use
+    `cand:<id>:<phase.op_id>:<hash(landable, reason codes)>`, without the
+    latest op. The latest op would send every participant a card on every
+    evidence op, even when nothing changed for them. The #44 case (landable
+    within one phase, including by `amend-reviewers`) still yields a new key,
+    because the hash changes. Role-based review requirements are not routed
+    to people yet.
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries
