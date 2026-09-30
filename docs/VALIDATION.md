@@ -22,18 +22,33 @@ workspace-write sandbox).
 | Claude Code | 5/5 | 0.04 s / 0.05 s | 4.98 s / 6.33 s / 6.33 s |
 | Codex | 5/5 | 0.04 s / 0.05 s | 25.6 s / 34.7 s / 34.7 s |
 
-Fray's share of end-to-end response is about 40 ms, from publication to the
-host process starting. The rest is the model turn: process start-up, reading
-the packet, deciding, and running `fray reply`. So for a managed (`drive`)
-agent, making Fray itself faster cannot matter much. What matters is waking
-the agent at all. Idle interactive sessions, which only hooks and monitors
-reach, remain unmeasured here.
+Correction, from the review of `b7b4c89`: the "host started" column was
+timed by a Python wrapper that stamped the time only after its own start-up,
+about 30 ms of the 40 ms shown. The harness now reads the spawn time from
+`fray drive`'s own run record, at millisecond resolution. With a stand-in
+host that replies at once (`FRAY_BENCH_HOSTS_JSON`, 10 trials), Fray's part
+measures:
+
+- **publish to host spawned:** 2 ms (p50) and 3 ms (p95);
+- **publish to reply:** 46 ms (p50) and 55 ms (p95), including the stand-in
+  running `fray reply`.
+
+So the model turn is effectively the entire end-to-end time. For an agent
+that `drive` manages, a faster Fray cannot matter much; what matters is
+waking the agent at all. Idle interactive sessions, which only hooks and
+monitors reach, remain unmeasured here.
+
+A reply counts when any annotation by the addressed agent lands on the card.
+This measures latency, not whether the model obeyed the `pong` instruction.
+Claude Code ran with `Bash(fray:*)` pre-approved; read-only tools such as
+Read and Grep stay available. Codex ran in a workspace-write sandbox rooted
+at the trial directory.
 
 Pilot runs before the declared ones exposed a harness bug, now fixed: the
 publisher waited with `--addressed-to-me`, which by design selects only
 items assigned to you. A reply to your own question is assigned to the other
-agent, so the filter hid it. Total model turns spent: 16 (6 pilot, 10
-declared).
+agent, so the filter hid it. The session log counts 16 model turns in total,
+6 of them pilots; the artifact records only the 10 declared ones.
 
 ## Mote adapter slice 5b: Mote events into attention (2026-09-30)
 
