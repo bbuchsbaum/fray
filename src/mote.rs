@@ -719,6 +719,10 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
                 );
             }
         }
+        // Final: a slower sync can never replace it with an older state.
+        for item in &mut items {
+            item["final"] = serde_json::json!(true);
+        }
     }
     items
 }

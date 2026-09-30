@@ -1103,10 +1103,29 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     // superseded, abandoned) are reported now, before the cursor moves past
     // their events: if this ingest loses the race, the sync that won saw the
     // same events and reports them itself.
-    let mut candidate_note = Value::Null;
-    let terminal = mote::terminal_candidates(&events);
+    let mut candidate_notes: Vec<String> = Vec::new();
+    // Candidate reporting needs a daemon that keeps per-recipient state; an
+    // older one (not yet restarted) must never stop claim and reservation sync.
+    let subjects_ok = send(home, actor, "ping", json!({}), None, 10)
+        .map(|p| {
+            p["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|x| x == "mote_subjects"))
+        })
+        .unwrap_or(false);
+    if !subjects_ok {
+        candidate_notes.push(
+            "candidate reporting skipped: the daemon predates it; restart it on this build"
+                .to_owned(),
+        );
+    }
+    let terminal = if subjects_ok {
+        mote::terminal_candidates(&events)
+    } else {
+        Vec::new()
+    };
     if terminal.len() > 20 {
-        candidate_note = json!(format!(
+        candidate_notes.push(format!(
             "{} candidates left the pending list; only 20 were reported",
             terminal.len()
         ));
@@ -1125,7 +1144,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         }
     }
     if !unread.is_empty() {
-        candidate_note = json!(format!(
+        candidate_notes.push(format!(
             "could not read {} to report how they ended",
             unread.join(", ")
         ));
@@ -1139,7 +1158,13 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                     json!({"mote_sync":{"note":"another sync advanced the cursor; it reports these events","created":early_created}}),
                 )
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                candidate_notes.push(format!(
+                    "ended candidates not reported: {}: {}",
+                    e.code, e.message
+                ));
+                break;
+            }
         }
     }
     let newest = events
@@ -1300,23 +1325,29 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     // state, so one listing both reports and reconciles; the state keys
     // dedupe what earlier syncs already delivered.
     let mut cand_items = Vec::new();
-    match mote::run(
-        &store,
-        Some(actor),
-        &["candidate", "list", "--phase", "pending"],
-        mote::read_timeout(),
-    ) {
+    let pending = if subjects_ok {
+        mote::run(
+            &store,
+            Some(actor),
+            &["candidate", "list", "--phase", "pending"],
+            mote::read_timeout(),
+        )
+    } else {
+        mote::Outcome::Ok(Value::Array(Vec::new()))
+    };
+    match pending {
         mote::Outcome::Ok(Value::Array(list)) => {
             if list.len() > 200 {
-                candidate_note =
-                    json!("more than 200 pending candidates; only the first 200 were read");
+                candidate_notes.push(
+                    "more than 200 pending candidates; only the first 200 were read".to_owned(),
+                );
             }
             for c in list.iter().take(200) {
                 cand_items.extend(mote::candidate_items(c));
             }
         }
         other => {
-            candidate_note = json!(format!("candidates skipped: mote candidate list {other:?}"))
+            candidate_notes.push(format!("candidates skipped: mote candidate list {other:?}"));
         }
     }
     for chunk in cand_items.chunks(100) {
@@ -1333,12 +1364,12 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                 invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
             }
             Err(e) if moved(&e) => {
-                candidate_note =
-                    json!("another sync advanced the cursor; candidates deferred to it");
+                candidate_notes
+                    .push("another sync advanced the cursor; candidates deferred to it".to_owned());
                 break;
             }
             Err(e) => {
-                candidate_note = json!(format!("candidates failed: {}: {}", e.code, e.message));
+                candidate_notes.push(format!("candidates failed: {}: {}", e.code, e.message));
                 break;
             }
         }
@@ -1348,7 +1379,8 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
-        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,"candidate_note":candidate_note}}),
+        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,
+        "candidate_note":if candidate_notes.is_empty() { Value::Null } else { json!(candidate_notes.join("; ")) }}}),
     )
 }
 

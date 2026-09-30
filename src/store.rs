@@ -2105,6 +2105,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         "priority",
                         "refs",
                         "subject",
+                        "final",
                     ],
                 )?;
                 let key = string(item, "key")?;
@@ -2126,14 +2127,18 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 // items are new when their key has never been delivered.
                 let subject = item["subject"].as_str();
                 if let Some(subject) = subject {
-                    let last: Option<String> = conn
+                    let last: Option<(String, bool)> = conn
                         .query_row(
-                            "SELECT state FROM mote_subjects WHERE store_id=? AND subject=? AND recipient=?",
+                            "SELECT state,final FROM mote_subjects WHERE store_id=? AND subject=? AND recipient=?",
                             params![store_id, subject, recipient],
-                            |r| r.get(0),
+                            |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .optional()?;
-                    if last.as_deref() == Some(key) {
+                    // Unchanged, or anything after a final state: nothing to say.
+                    if last
+                        .as_ref()
+                        .is_some_and(|(state, fin)| state == key || *fin)
+                    {
                         duplicate += 1;
                         continue;
                     }
@@ -2180,8 +2185,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 let id = card["card"]["id"].as_i64().unwrap_or(0);
                 if let Some(subject) = subject {
                     conn.execute(
-                        "INSERT INTO mote_subjects(store_id,subject,recipient,state) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,subject,recipient) DO UPDATE SET state=excluded.state",
-                        params![store_id, subject, recipient, key],
+                        "INSERT INTO mote_subjects(store_id,subject,recipient,state,final) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(store_id,subject,recipient) DO UPDATE SET state=excluded.state,final=excluded.final",
+                        params![store_id, subject, recipient, key, item["final"] == true],
                     )?;
                 }
                 conn.execute(
@@ -2358,7 +2363,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {

@@ -1283,3 +1283,22 @@ fn a_candidate_that_is_revoked_and_reauthorized_through_the_real_mote_is_reporte
         p.titles("bob")
     );
 }
+
+#[test]
+fn a_final_candidate_state_is_never_replaced_by_an_older_one() {
+    // Review of 12cedd8: a slower sync that listed the candidate as pending
+    // could deliver that state after another delivered "landed".
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    ingest(&mut b, Value::Null, "c0", vec![]).unwrap();
+    let reviewed = json!({"carol":{"verdict":"approve","op_id":"R1"}});
+    let landed = candidate(true, &[], reviewed.clone(), "landed", "POL1");
+    ingest(&mut b, json!("c0"), "c0", mote::candidate_items(&landed)).unwrap();
+    let stale = candidate(true, &[], reviewed, "pending", "POL1");
+    let r = ingest(&mut b, json!("c0"), "c0", mote::candidate_items(&stale)).unwrap();
+    assert!(
+        r["created"].as_array().unwrap().is_empty(),
+        "nothing after a final state: {r}"
+    );
+    assert_eq!(mote_titles(&mut b, "bob"), vec!["Mote: cand-1 is landed"]);
+}

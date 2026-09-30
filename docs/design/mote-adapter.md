@@ -307,8 +307,14 @@ Candidate reviews follow the rule in 7.3.
     the cursor moves past that event. A sync that loses the cursor race
     leaves the report to the sync that won.
   - A terminal transition the feed never saw is not recovered, because the
-    candidate is no longer pending. The same is true after a reseed, and
-    beyond 20 per sync, which is noted.
+    candidate is no longer pending. The same is true after a reseed, beyond
+    20 per sync, and when `candidate show` fails for it; the last two are
+    noted.
+  - A final state (landed, superseded or abandoned) is sticky per recipient:
+    a slower sync that listed the candidate as pending can never replace it.
+  - Candidate reporting needs a daemon with the `mote_subjects` capability.
+    Against an older daemon, not yet restarted, it is skipped with a note, and
+    claim and reservation sync continue.
   - Role-based review requirements are not routed to people yet.
   - Review-request cards stay open after the candidate ends.
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.

@@ -218,6 +218,9 @@ CREATE TABLE IF NOT EXISTS mote_subjects(
     subject TEXT NOT NULL,
     recipient TEXT NOT NULL,
     state TEXT NOT NULL,
+    -- A final state (a candidate landed, superseded or abandoned) is sticky:
+    -- a slower sync can never replace it with an older pending state.
+    final INTEGER NOT NULL DEFAULT 0 CHECK(final IN (0,1)),
     PRIMARY KEY(store_id, subject, recipient)
 );
 PRAGMA user_version = 3;

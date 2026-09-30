@@ -24,7 +24,15 @@ fixed by the last-state rule. The review also led to:
 - terminal reports made safe against losing the cursor race;
 - the notes.
 
-`tests/mote_sync.rs` has 27 tests:
+Re-review of `12cedd8` verified that fix under about 400 concurrent syncs,
+with no card that disagreed with the live state. It found that a client
+talking to a daemon not yet restarted stopped all sync once a candidate
+ended. Candidate reporting is now gated on the daemon's `mote_subjects`
+capability, and when it is missing it is skipped with a note, while claims and
+reservations continue. Final states are also sticky per recipient, and notes
+accumulate instead of overwriting one another.
+
+`tests/mote_sync.rs` has 28 tests:
 
 - The unit tests cover:
   - review requests and re-asking after a policy amendment;
