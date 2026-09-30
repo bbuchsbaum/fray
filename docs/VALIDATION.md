@@ -83,8 +83,9 @@ bounded run. Each trial works like this:
 2. A peer sends it a p1 question asking for the reply `pong`.
 3. The peer's own `fray wait --card ID` returns when the reply lands.
 
-Times are measured on one monotonic clock from the moment the publisher's
-`send` returned. There were 5 declared trials per host, failures counted.
+The reply time is measured on one monotonic clock from the moment the
+publisher's `send` returned. There were 5 declared trials per host, failures
+counted.
 
 Setup: release build `9a39118`, macOS 14.3 arm64, Claude Code 2.1.285
 (`claude -p`, with `Bash(fray:*)` pre-approved), Codex CLI 0.159.1 (`codex exec`,

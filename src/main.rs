@@ -1162,8 +1162,13 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     let mut reconciled = 0;
     let mut raced = 0;
     let mut reconcile_note = Value::Null;
-    let marker = tail(Some(&after));
     let board = mote::run(&store, Some(actor), &["board"], mote::read_timeout());
+    // Taken after the board read, which closes most of the window in which
+    // one change could be reported twice. An op landing between the read and
+    // this marker sorts below it but is not on the board; the feed then drops
+    // it and the next reconciliation reports the new state (self-healing, as
+    // for a slow clock).
+    let marker = tail(Some(&after));
     let known = send(
         home,
         actor,

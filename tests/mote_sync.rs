@@ -1020,3 +1020,22 @@ fn candidates_reach_their_reviewer_and_proposer_through_the_real_mote() {
     p.sync(&[], "bob").unwrap();
     assert_eq!((p.titles("carol").len(), p.titles("bob").len()), before);
 }
+
+#[test]
+fn released_claims_are_not_listed_for_reconciliation() {
+    // Review of 1f57c49: released rows counted toward the listing limit and
+    // could push live claims past it.
+    let mut b = board();
+    ingest_claims(
+        &mut b,
+        Value::Null,
+        "c0",
+        vec![
+            claim("bd-1", "alice", "alice", "20260930T010000.000000Z-a"),
+            claim("bd-2", "bob", "bob", "20260930T010000.000000Z-b"),
+            json!({"entity":"bd-2","to":null,"by":"bob","op_id":"20260930T020000.000000Z-c","released":true}),
+        ],
+    );
+    let r = at(&mut b, "bob", "mote_claims", json!({"store_id":"st-A"})).unwrap();
+    assert_eq!(r["holders"], json!({"bd-1":"alice"}));
+}
