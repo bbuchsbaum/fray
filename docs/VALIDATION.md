@@ -7,7 +7,7 @@ section 6 of `docs/design/mote-adapter.md`, for claims and reservations.
 Candidates, and the reconciliation that covers skipped events, come in
 slice 5c.
 
-`tests/mote_sync.rs` has 14 tests:
+`tests/mote_sync.rs` has 15 tests:
 
 - **Exactly once.** Each (store, state key, recipient) produces one card; a
   replayed event produces none; the syncing agent receives its own cards.
@@ -37,9 +37,12 @@ Independent review of `ea93b08` raised three blocking objections, each
 reproduced, and all are fixed here: one wide reservation stalled every later
 sync, the displaced holder was not told, and the dedupe keys were event ids
 rather than contract state keys. The review verified exactly-once delivery
-under 6 concurrent syncs and 160 handoffs.
+under 6 concurrent syncs and 160 handoffs. Re-review then found that
+replaying a chunk (an interrupted or concurrent sync) could send a false
+"your claim is now …" card. Claim transitions now apply once, in op order,
+and a replay test covers it.
 
-Checks at this change: strict Clippy, 292 Rust tests, a locked build, the
+Checks at this change: strict Clippy, 293 Rust tests, a locked build, the
 three IPC scripts and `check_sql.py` all pass. `cargo fmt --check` reports only
 `src/driver.rs`, which was inherited from `main` (fray #33).
 

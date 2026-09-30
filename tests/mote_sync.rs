@@ -264,7 +264,9 @@ fn a_claim_changing_hands_reaches_the_new_and_the_displaced_holder() {
         &mut b,
         Value::Null,
         "c0",
-        vec![json!({"entity":"bd-1","to":"alice","by":"alice","op_id":"seed","seed":true})],
+        vec![
+            json!({"entity":"bd-1","to":"alice","by":"alice","op_id":"20260930T000000.000000Z","seed":true}),
+        ],
     );
     assert!(mote_titles(&mut b, "alice").is_empty());
     // alice hands bd-1 to bob herself: bob hears, alice is not told what she did.
@@ -272,7 +274,7 @@ fn a_claim_changing_hands_reaches_the_new_and_the_displaced_holder() {
         &mut b,
         json!("c0"),
         "c1",
-        vec![claim("bd-1", "bob", "alice", "o1")],
+        vec![claim("bd-1", "bob", "alice", "20260930T010000.000000Z-o1")],
     );
     assert_eq!(
         mote_titles(&mut b, "bob"),
@@ -284,7 +286,12 @@ fn a_claim_changing_hands_reaches_the_new_and_the_displaced_holder() {
         &mut b,
         json!("c1"),
         "c2",
-        vec![claim("bd-1", "carol", "carol", "o2")],
+        vec![claim(
+            "bd-1",
+            "carol",
+            "carol",
+            "20260930T020000.000000Z-o2",
+        )],
     );
     assert!(
         mote_titles(&mut b, "bob").contains(&"Mote: your claim on bd-1 is now carol's".to_owned())
@@ -294,7 +301,7 @@ fn a_claim_changing_hands_reaches_the_new_and_the_displaced_holder() {
         &mut b,
         json!("c2"),
         "c3",
-        vec![claim("bd-1", "alice", "bob", "o3")],
+        vec![claim("bd-1", "alice", "bob", "20260930T030000.000000Z-o3")],
     );
     assert!(mote_titles(&mut b, "alice").contains(&"Mote: bob handed you bd-1".to_owned()));
     assert!(mote_titles(&mut b, "carol")
@@ -305,7 +312,7 @@ fn a_claim_changing_hands_reaches_the_new_and_the_displaced_holder() {
         &mut b,
         json!("c3"),
         "c3",
-        vec![claim("bd-1", "alice", "bob", "o3")],
+        vec![claim("bd-1", "alice", "bob", "20260930T030000.000000Z-o3")],
     );
     assert_eq!(mote_titles(&mut b, "carol").len(), before);
 }
@@ -644,4 +651,25 @@ fn review_reproducers_against_the_real_mote() {
         "{alice:?}"
     );
     assert!(alice.iter().all(|t| t.len() <= 160));
+}
+
+#[test]
+fn replaying_a_chunk_never_invents_a_change_of_hands() {
+    // Review of f5e49fa: the same non-final chunk applied twice (an
+    // interrupted or concurrent sync) sent bob "your claim is now alice's".
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    let chunk = vec![
+        claim("bd-X", "alice", "alice", "20260930T010000.000000Z-a"),
+        claim("bd-X", "bob", "carol", "20260930T020000.000000Z-b"),
+    ];
+    ingest_claims(&mut b, Value::Null, "c0", chunk.clone());
+    let cards = |b: &mut Board| ["alice", "bob", "carol"].map(|w| mote_titles(b, w));
+    let first = cards(&mut b);
+    assert_eq!(first[1], vec!["Mote: carol handed you bd-X"]);
+    assert_eq!(first[0], vec!["Mote: your claim on bd-X is now bob's"]);
+    // Replayed, as a sync that did not advance the cursor would.
+    let r = ingest_claims(&mut b, json!("c0"), "c0", chunk);
+    assert!(r["created"].as_array().unwrap().is_empty(), "{r}");
+    assert_eq!(cards(&mut b), first);
 }

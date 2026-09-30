@@ -258,6 +258,11 @@ Candidate reviews follow the rule in 7.3.
     third-party handoff, or taking over a claim that had expired. They do
     not hear when they handed it off themselves.
   - Both cards share the key `claim:<entity>:<op_id>`, one per recipient.
+  - Transitions apply once, in op order: one whose op is not newer than the
+    op stored for that entity is skipped. So a replayed chunk (from an
+    interrupted or concurrent sync) cannot compare an old transition with a
+    newer holder. Seeded holders record the seed cursor, which sorts below
+    every later op.
 - **Bounded cards.** Titles and summaries are clipped to the card limits. An
   item that is still invalid is skipped and reported, never allowed to stall
   the cursor for every later event.

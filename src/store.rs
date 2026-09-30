@@ -1981,13 +1981,25 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 text(entity, "entity", 200, false)?;
                 let to = c["to"].as_str();
                 let by = c["by"].as_str().unwrap_or("");
-                let previous: Option<Option<String>> = conn
+                let stored: Option<(Option<String>, String)> = conn
                     .query_row(
-                        "SELECT holder FROM mote_claims WHERE store_id=? AND entity=?",
+                        "SELECT holder,op_id FROM mote_claims WHERE store_id=? AND entity=?",
                         params![store_id, entity],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?;
+                // Transitions apply in op order, once. A chunk that did not
+                // advance the cursor is replayed (an interrupted or concurrent
+                // sync); its older transitions must not be compared against a
+                // holder that newer ones already set, or they would invent a
+                // change of hands.
+                if stored
+                    .as_ref()
+                    .is_some_and(|(_, seen)| op_id <= seen.as_str())
+                {
+                    continue;
+                }
+                let previous = stored.map(|(holder, _)| holder);
                 let holder = if c["released"] == true { None } else { to };
                 conn.execute(
                     "INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",

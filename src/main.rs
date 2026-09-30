@@ -1032,7 +1032,9 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             .flatten()
             .filter_map(|c| {
                 let holder = c["claimed_by"].as_str()?;
-                Some(json!({"entity":c["id"].as_str()?,"to":holder,"by":holder,"op_id":"seed","seed":true}))
+                // The seed cursor as op id: below every later op, so any
+                // real transition after seeding is newer.
+                Some(json!({"entity":c["id"].as_str()?,"to":holder,"by":holder,"op_id":seed,"seed":true}))
             })
             .collect();
         let chunks: Vec<Vec<Value>> = if holders.is_empty() {
