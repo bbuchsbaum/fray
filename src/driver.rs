@@ -238,19 +238,44 @@ struct Run<'a> {
     id: String,
     options: &'a Options,
     detail: RefCell<Value>,
+    /// Whether the daemon accepts controller detail. A daemon built before it
+    /// rejects the field; the run then continues without it (see `state`).
+    detail_ok: std::cell::Cell<bool>,
 }
 impl Run<'_> {
     fn call(&self, op: &str, args: Value, timeout: u64) -> Result<Value> {
         send(self.home, self.actor, op, args, None, timeout)
     }
     fn state(&self, state: &str, begin: bool, reason: Option<&str>) -> Result<()> {
-        let mut args =
-            json!({"run_id":self.id,"state":state,"begin":begin,"detail":*self.detail.borrow()});
+        let mut args = json!({"run_id":self.id,"state":state,"begin":begin});
+        if self.detail_ok.get() {
+            args["detail"] = self.detail.borrow().clone();
+        }
         if let Some(reason) = reason {
             args["reason"] = json!(reason);
         }
-        self.call("controller", args, 10)?;
-        Ok(())
+        match self.call("controller", args.clone(), 10) {
+            // A daemon built before controller detail rejects the field while
+            // validating, before it changes anything. Continue without it, and
+            // say exactly which guarantee that loses.
+            Err(e)
+                if self.detail_ok.get()
+                    && e.code == "invalid"
+                    && e.message.contains("unknown field: detail") =>
+            {
+                self.detail_ok.set(false);
+                eprintln!(
+                    "fray drive: this daemon predates controller detail, so a crashed run's owned process group is not recorded and the orphan check before a restart cannot see it. Restart the daemon on this build to restore that check; the run continues without it."
+                );
+                if let Some(args) = args.as_object_mut() {
+                    args.remove("detail");
+                }
+                self.call("controller", args, 10)?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }
     }
     fn inbox(&self) -> Result<Value> {
         self.call(
@@ -630,6 +655,7 @@ pub fn run(home: &Path, actor: &str, options: &Options) -> Result<()> {
         detail: RefCell::new(
             json!({"on_urgent":options.on_urgent,"turn":0,"child":null,"presented":[],"queued_urgent":[]}),
         ),
+        detail_ok: std::cell::Cell::new(true),
     };
     runner.check_orphans()?;
     runner.state("waiting", true, None)?;
