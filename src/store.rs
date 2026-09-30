@@ -2200,6 +2200,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 [cursor],
             )?;
             conn.execute("DELETE FROM meta WHERE key='mote_sync_timeouts'", [])?;
+            // When any agent last synced: background runners pace themselves
+            // on this, so a board syncs about once per interval, not once per
+            // runner.
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('mote_last_sync_ms',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [now.to_string()],
+            )?;
             unknown.sort();
             unknown.dedup();
             Ok(
@@ -3031,7 +3038,8 @@ fn mote_binding(conn: &Connection) -> Result<Value> {
     Ok(match (get("mote_store")?, get("mote_store_id")?) {
         (Some(store), Some(store_id)) => json!({"store":store,"store_id":store_id,
             "cursor":get("mote_cursor")?,
-            "consecutive_timeouts":get("mote_sync_timeouts")?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0)}),
+            "consecutive_timeouts":get("mote_sync_timeouts")?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0),
+            "last_sync_ms":get("mote_last_sync_ms")?.and_then(|n| n.parse::<i64>().ok())}),
         _ => Value::Null,
     })
 }

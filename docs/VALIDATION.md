@@ -11,16 +11,22 @@ The hooks check staged paths, and for a push, every path touched by each
 pushed range:
 
 - deletions are skipped;
-- a new branch covers only the commits no remote-tracking ref has.
+- a new branch covers only the commits no remote ref has;
+- an update covers the pushed commits, a merge's own changes, and whatever
+  the push overwrites (so the paths of commits a force push drops); a remote
+  tip this clone lacks is reported as unchecked.
+
+Names are read NUL-separated, so non-ASCII and odd names match exactly.
 
 Where Mote is adopted, another actor's Mote reservations decide; that takes
 one `board --json` read per hook run. Otherwise Fray lanes decide.
 
-The guard warns by default and blocks with `FRAY_GUARD=block`. It never blocks
-because a service is down. Prior hooks are chained, keeping their exit status
-and stdin.
+The guard warns by default and blocks with `FRAY_GUARD=block` (exit status
+10). It never blocks because a service is down or the check itself failed,
+and a stale lane is reported but never refuses. Prior hooks are chained,
+keeping their exit status and stdin.
 
-`tests/guard.rs` has 6 tests, run in real git repositories:
+`tests/guard.rs` has 10 tests, run in real git repositories:
 
 - a foreign lane warns; blocking refuses; one's own lane is quiet;
 - a failing prior hook stops the commit, and reinstalling does not wrap it
@@ -30,7 +36,36 @@ and stdin.
 - a linked worktree shares the guard and the board;
 - a stopped daemon produces "could not check" without blocking;
 - against the real `mote 0.1.0`, another actor's reservation warns, and
-  blocks on request.
+  blocks on request, while one's own (named by `MOTE_ACTOR`) is quiet;
+- a non-ASCII pushed name matches, and a force push over unfetched commits
+  is checked;
+- a failing check warns and only a refusal blocks; a clean commit is quiet;
+- a stale lane reports without blocking;
+- a merge's own edit, and a force push that drops another's commit, are
+  refused under blocking.
+
+Two independent reviews (fray #26 @377, @397) drove four fixes, #69, #70,
+#75 and #76; approved at 92a723f (@407).
+
+## Mote adapter: background sync (2026-09-30)
+
+`fray watch --attention` and `fray drive` now sync Mote in the background,
+paced for the whole board on the last sync any agent ran. Each runner starts
+at a random point in the interval and sleeps 0.75 to 1.25 of it, so runners
+started together do not stay in step (4 runners at 1 s for 10 s: 30 syncs
+before, 10 after). `drive` starts the sync only after joining, and `watch
+--once` never syncs.
+
+The test `a_watching_agent_hears_mote_changes_without_anyone_running_sync`
+runs against the real `mote 0.1.0`. Bob runs `watch --attention` with a 300 ms
+interval, and alice hands him a claim; his watch prints the handoff notice
+with no manual sync, in about 2 s. It waits for the first background sync
+rather than sleeping, and accepts either delivery path (the handoff event, or
+reconciliation when one sync straddles the handoff): 36 of 36 under 12-way
+concurrency. Approved at bb2ddd7 (fray #26 @410).
+
+The same test, run with `FRAY_MOTE_SYNC=off`, fails after its 20 s wait. So
+the test does exercise the background path.
 
 ## Mote adapter slice 5c-b: candidates (2026-09-30)
 

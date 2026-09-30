@@ -6,6 +6,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command as Process,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 mod driver;
 mod guard;
@@ -968,6 +969,72 @@ fn mote_status(home: &Path, actor: &str) -> Result<Value> {
         "version":version,"actor":actor,"binding":binding,"reads":reads,"warnings":warnings}}),
     )
 }
+/// Background Mote sync for long-running runners (`watch --attention`,
+/// `drive`), per docs/design/mote-adapter.md section 6: about once per
+/// interval for the whole board, paced on the last sync any agent ran, so
+/// several runners do not multiply the load. Only when a Mote store is paired
+/// and the runner has an identity. Quiet on success; a failure is reported at
+/// most once an hour, on stderr, never into the attention stream.
+/// `FRAY_MOTE_SYNC=off` disables it; `FRAY_MOTE_SYNC_INTERVAL_MS` sets the
+/// interval (default 60 s).
+fn background_mote_sync(home: &Path, actor: &str) {
+    if actor.is_empty()
+        || actor == fray::store::OWNER
+        || std::env::var("FRAY_MOTE_SYNC").as_deref() == Ok("off")
+    {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    if !matches!(fray::mote::locate(home, &cwd), Ok(Some(_))) {
+        return;
+    }
+    let interval = std::env::var("FRAY_MOTE_SYNC_INTERVAL_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .filter(|ms| (100..=3_600_000).contains(ms))
+        .map_or(Duration::from_secs(60), Duration::from_millis);
+    let (home, actor) = (home.to_path_buf(), actor.to_owned());
+    // Runners started together must not stay in step: each starts at a
+    // random point in the interval and sleeps a jittered interval (0.75 to
+    // 1.25 of it), so one usually syncs and stamps before the others look.
+    let jitter = |span: Duration| -> Duration {
+        let r = fray::model::random_key()
+            .ok()
+            .and_then(|k| u64::from_str_radix(&k[..12], 16).ok())
+            .unwrap_or(0);
+        span.mul_f64((r % 1_000_000) as f64 / 1_000_000.0)
+    };
+    std::thread::spawn(move || {
+        let mut last_error: Option<std::time::Instant> = None;
+        std::thread::sleep(jitter(interval));
+        loop {
+            let recent = send(&home, &actor, "mote_binding", json!({}), None, 10)
+                .ok()
+                .and_then(|b| b["binding"]["last_sync_ms"].as_i64())
+                .is_some_and(|t| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis() as i64);
+                    now - t < interval.as_millis() as i64
+                });
+            if !recent {
+                if let Err(e) = mote_sync(&home, &actor) {
+                    if last_error.is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) {
+                        eprintln!(
+                            "fray: background Mote sync failed ({}: {}); it keeps retrying. Run `fray mote sync` to see details.",
+                            e.code, e.message
+                        );
+                        last_error = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            std::thread::sleep(interval.mul_f64(0.75) + jitter(interval / 2));
+        }
+    });
+}
+
 /// Section 3: a MOTE_ACTOR that differs from the Fray identity makes manual
 /// `mote` commands act as a second actor. Only the environment is checked,
 /// so this costs nothing on every brief.
@@ -2374,6 +2441,11 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             wake,
         } => {
             if attention {
+                // Not for a one-shot packet (e.g. the rewake hook): its stderr
+                // may reach a model, and it exits before a sync would matter.
+                if !wake.once {
+                    background_mote_sync(&home, &actor);
+                }
                 client::watch_attention(&home, &actor, wake.value(), reconnect)?;
             } else {
                 if !wake.filters.is_empty() {
@@ -2427,7 +2499,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Cmd::Drive { options } => {
-            driver::run(&home, &actor, &options)?;
+            driver::run(&home, &actor, &options, || {
+                background_mote_sync(&home, &actor)
+            })?;
             return Ok(None);
         }
         Cmd::Rpc { request } => {

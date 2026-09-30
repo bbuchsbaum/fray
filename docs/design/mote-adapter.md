@@ -317,6 +317,14 @@ Candidate reviews follow the rule in 7.3.
     claim and reservation sync continue.
   - Role-based review requirements are not routed to people yet.
   - Review-request cards stay open after the candidate ends.
+- **Background sync** (implemented). `fray watch --attention` and `fray
+  drive` run `fray mote sync` on a background thread:
+  - about once per interval, 60 s by default (`FRAY_MOTE_SYNC_INTERVAL_MS`);
+  - paced on the board's `mote_last_sync_ms`, so the board syncs about once
+    per interval however many runners there are;
+  - never on the `brief` or hook path;
+  - quiet on success, reporting failures on stderr at most once an hour;
+  - disabled with `FRAY_MOTE_SYNC=off`.
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries
