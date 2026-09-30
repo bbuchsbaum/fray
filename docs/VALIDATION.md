@@ -1,5 +1,42 @@
 # Validation
 
+## Mote adapter slice 5a: transport, binding, classification (2026-09-30)
+
+`src/mote.rs` and `fray mote status` implement sections 1 to 4 of
+`docs/design/mote-adapter.md`, approved at `b8c9677`.
+
+`tests/mote.rs` has 20 tests, run with stub `mote` binaries and against the
+real `mote 0.1.0` in scratch stores. They cover:
+
+- classification from exit code, stderr and JSON together. The transport
+  classifies real Mote rejections, `preflight` conflicts (exit 2 is a
+  result), `events` (always an array) and clap usage errors (reported by
+  their `error:` line).
+- store location:
+  - a board pairs implicitly only through an ancestor `.fray` or through the
+    board the working directory's own repository selects;
+  - a worktree outside the checkout still finds the main worktree's store;
+  - bare repositories, including their linked worktrees, and submodules must
+    name their store;
+  - a repository nested in another is not taken for a submodule;
+  - a bad `MOTE_STORE` names the variable and the path.
+- refusal of a changed store id, both when binding and on every call;
+- explicit `--store`, `--json` and `--actor` on every call, with no `--actor`
+  for `events`;
+- a timeout that kills and reaps Mote's whole process group, including when a
+  leftover process keeps Mote's pipes open after Mote exits;
+- `fray mote status`: a missing or unsupported Mote degrades to warnings, and
+  without an identity nothing is written or read.
+
+Independent review of the first version (`825d340`) raised five blocking
+objections (fray #46–#50), each reproduced, and all are fixed here. 12
+concurrent runs of the suite pass with no leaked processes.
+
+Checks at this change: strict Clippy, 278 Rust tests, a locked build,
+`integration.py`, `attention_integration.py`, `reliability_integration.py`
+and `check_sql.py` all pass. `cargo fmt --check` reports only
+`src/driver.rs`, which was inherited from `main` (fray #33).
+
 ## Finite waits without the hang-up floor (2026-09-30)
 
 A finite wait now replies as soon as it has a result, instead of first joining

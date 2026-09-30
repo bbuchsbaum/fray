@@ -5,6 +5,7 @@ pub mod attention;
 pub mod client;
 pub mod diagnostics;
 pub mod model;
+pub mod mote;
 pub mod notification;
 pub mod owner;
 pub mod presence;

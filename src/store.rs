@@ -330,6 +330,7 @@ impl Store {
                 | "lane_take"
                 | "lane_release"
                 | "set_status"
+                | "mote_bind"
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
@@ -1872,6 +1873,37 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             Ok(json!({"released":id,"reason":reason,"handed_to_lane":handed,"promoted":promoted}))
         }
+        "mote_bind" => {
+            // Binds this board to one Mote store, once (docs/design/mote-adapter.md
+            // section 2). A later bind to a different store is refused, never
+            // silently followed.
+            check_fields(a, &["store", "store_id"])?;
+            let store = string(a, "store")?;
+            let store_id = string(a, "store_id")?;
+            text(store, "store", 4096, false)?;
+            if !store_id.starts_with("st-") || store_id.len() > 64 {
+                return Err(Error::invalid("store_id must be a Mote store id (st-...)"));
+            }
+            let bound = mote_binding(conn)?;
+            if !bound.is_null() {
+                if bound["store_id"] != store_id {
+                    return Err(Error::new(
+                        "mote_store_mismatch",
+                        format!(
+                            "this board is bound to Mote store {} at {}; {store} is {store_id}. Set MOTE_STORE to the bound store. There is no rebind; a different store needs a different board",
+                            bound["store_id"].as_str().unwrap_or(""),
+                            bound["store"].as_str().unwrap_or("")
+                        ),
+                    ));
+                }
+                return Ok(json!({"binding":bound,"new":false}));
+            }
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('mote_store',?1),('mote_store_id',?2)",
+                params![store, store_id],
+            )?;
+            Ok(json!({"binding":{"store":store,"store_id":store_id},"new":true}))
+        }
         "set_status" => {
             // One current status line per agent, updated in place; empty clears.
             check_fields(a, &["text"])?;
@@ -2014,7 +2046,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2280,6 +2312,10 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 bounded(a, "limit", 100, 1, 100)?,
                 boolean(a, "all", false)?,
             )
+        }
+        "mote_binding" => {
+            check_fields(a, &[])?;
+            Ok(json!({"binding":mote_binding(conn)?}))
         }
         "stats" => {
             check_fields(a, &["window_ms"])?;
@@ -2633,6 +2669,18 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
         || a.starts_with(&format!("{b}/"))
 }
 
+/// The Mote store this board is bound to, or null.
+fn mote_binding(conn: &Connection) -> Result<Value> {
+    let get = |key: &str| -> Result<Option<String>> {
+        Ok(conn
+            .query_row("SELECT value FROM meta WHERE key=?", [key], |r| r.get(0))
+            .optional()?)
+    };
+    Ok(match (get("mote_store")?, get("mote_store_id")?) {
+        (Some(store), Some(store_id)) => json!({"store":store,"store_id":store_id}),
+        _ => Value::Null,
+    })
+}
 /// Whether an agent is still present, meaning reachable: a live session or
 /// recent write, an armed (connected) listener or running drive loop, which
 /// will hear a lane notice, or a recent presentation of receipts (inbox, wait,
