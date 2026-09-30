@@ -2,7 +2,7 @@
 # Install a built fray binary without overwriting the installed one in place.
 #
 # Usage: scripts/install.sh [SOURCE] [DEST]
-#   SOURCE  the new binary (default target/release/fray)
+#   SOURCE  the new binary (default: this checkout's target/release/fray)
 #   DEST    where it is installed (default $HOME/.cargo/bin/fray)
 #
 # Copying over an installed executable rewrites it in place. On macOS the
@@ -16,7 +16,7 @@
 # board, check that no one has a live wait, then `fray stop` and `fray start`.
 set -eu
 
-src=${1:-target/release/fray}
+src=${1:-$(cd "$(dirname "$0")/.." && pwd)/target/release/fray}
 dest=${2:-$HOME/.cargo/bin/fray}
 
 if [ ! -x "$src" ]; then
@@ -37,7 +37,7 @@ if ! "$tmp" --version >/dev/null; then
     exit 1
 fi
 if [ -e "$dest" ]; then
-    # A copy into a new file, never a move, so running daemons keep theirs.
+    # Copied, not moved, so DEST never goes missing, even briefly.
     rm -f "$dest.previous"
     cp -p "$dest" "$dest.previous"
 fi

@@ -34,15 +34,18 @@ be registered with an external service.
 `cargo install` replaces the binary safely. To install a binary you have
 already built, use `scripts/install.sh [SOURCE] [DEST]`, which by default
 installs `target/release/fray` to `~/.cargo/bin/fray`. Never `cp` over an
-installed `fray`. Copying rewrites the running file in place, and on macOS
-every later launch of that path is then killed: exit status 137, no output,
-even for `--version`. The script:
+installed `fray` while it is running, and a daemon usually is. Copying
+rewrites the running file in place, and on macOS every later launch of that
+path is then killed: exit status 137, no output, even for `--version`. The
+script:
 
 - writes a new file beside the target and renames it into place;
 - keeps the previous binary as `.previous` for rollback;
 - checks that the installed path runs, and explains exit 137 if it does not.
 
-To recover from an in-place copy, run the script again.
+To recover from an in-place copy, run the script again. To roll back a
+bad install, run `scripts/install.sh ~/.cargo/bin/fray.previous`; that copy
+is only known-good if the install before it was.
 
 Installing does not restart a running daemon. Announce the restart on the
 board, check that no one has a live wait, then run `fray stop` and
