@@ -1089,7 +1089,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             return match ingest(Some(&cursor), &seed, vec![], vec![]) {
                 Ok(_) => Ok(
                     json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":[],
-                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Claims are reconciled against Mote's board on every sync; reservation events in between are not recovered."}}),
+                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Claims and pending candidates are reconciled against Mote on every sync; reservation expiries and candidates that ended in between are not recovered."}}),
                 ),
                 Err(e) if moved(&e) => Ok(
                     json!({"mote_sync":{"note":"another sync advanced the cursor first","created":[]}}),
@@ -1099,6 +1099,49 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         }
         other => return Err(failed("events", other)),
     };
+    // Candidates that left the pending list during these events (landed,
+    // superseded, abandoned) are reported now, before the cursor moves past
+    // their events: if this ingest loses the race, the sync that won saw the
+    // same events and reports them itself.
+    let mut candidate_note = Value::Null;
+    let terminal = mote::terminal_candidates(&events);
+    if terminal.len() > 20 {
+        candidate_note = json!(format!(
+            "{} candidates left the pending list; only 20 were reported",
+            terminal.len()
+        ));
+    }
+    let mut terminal_items = Vec::new();
+    let mut unread = Vec::new();
+    for id in terminal.iter().take(20) {
+        match mote::run(
+            &store,
+            Some(actor),
+            &["candidate", "show", id],
+            mote::read_timeout(),
+        ) {
+            mote::Outcome::Ok(c) => terminal_items.extend(mote::candidate_items(&c)),
+            _ => unread.push(id.clone()),
+        }
+    }
+    if !unread.is_empty() {
+        candidate_note = json!(format!(
+            "could not read {} to report how they ended",
+            unread.join(", ")
+        ));
+    }
+    let mut early_created = Vec::new();
+    for chunk in terminal_items.chunks(100) {
+        match ingest(Some(&cursor), &cursor, chunk.to_vec(), vec![]) {
+            Ok(r) => early_created.extend(r["created"].as_array().cloned().unwrap_or_default()),
+            Err(e) if moved(&e) => {
+                return Ok(
+                    json!({"mote_sync":{"note":"another sync advanced the cursor; it reports these events","created":early_created}}),
+                )
+            }
+            Err(e) => return Err(e),
+        }
+    }
     let newest = events
         .iter()
         .filter_map(|e| e["event_id"].as_str())
@@ -1107,7 +1150,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         .unwrap_or(&cursor)
         .to_owned();
     let (mut created, mut duplicate, mut unknown, mut invalid) =
-        (Vec::new(), 0, Vec::new(), Vec::new());
+        (early_created, 0, Vec::new(), Vec::new());
     let chunks: Vec<&[Value]> = if events.is_empty() {
         vec![&[]]
     } else {
@@ -1256,7 +1299,6 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     // Candidates (section 6): cards come from each candidate's current
     // state, so one listing both reports and reconciles; the state keys
     // dedupe what earlier syncs already delivered.
-    let mut candidate_note = Value::Null;
     let mut cand_items = Vec::new();
     match mote::run(
         &store,
@@ -1275,17 +1317,6 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         }
         other => {
             candidate_note = json!(format!("candidates skipped: mote candidate list {other:?}"))
-        }
-    }
-    // Candidates that left the pending list during these events.
-    for id in mote::terminal_candidates(&events).iter().take(20) {
-        if let mote::Outcome::Ok(c) = mote::run(
-            &store,
-            Some(actor),
-            &["candidate", "show", id],
-            mote::read_timeout(),
-        ) {
-            cand_items.extend(mote::candidate_items(&c));
         }
     }
     for chunk in cand_items.chunks(100) {

@@ -561,11 +561,13 @@ fn short_hash(text: &str) -> String {
 ///
 /// - Each named reviewer who has not reviewed a pending candidate is asked,
 ///   once per policy version.
-/// - The proposer and authorizer hear when landability or its blocking
-///   reasons change: the key covers the phase and a hash of landability, not
-///   every op, so evidence that changes nothing sends nothing.
-/// - Everyone involved hears when the candidate lands or is superseded or
-///   abandoned.
+/// - The proposer and authorizer hear the candidate's status: landability
+///   and each blocking reason with its subject. Status items carry a
+///   `subject`, and the store sends one whenever the state differs from the
+///   last delivered, so a return to an earlier state is reported too, while
+///   evidence that changes nothing sends nothing (review of 05dfbc2).
+/// - Everyone involved hears when the candidate lands or is superseded
+///   (naming the successor) or abandoned.
 pub fn candidate_items(c: &Value) -> Vec<Value> {
     let Some(id) = c["candidate_id"].as_str() else {
         return Vec::new();
@@ -583,25 +585,41 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
     let phase_op = c["phase"]["op_id"].as_str().unwrap_or("");
     let policy_op = c["policy"]["op_id"].as_str().unwrap_or("");
     let landable = c["landability"]["landable"] == true;
-    let mut codes: Vec<&str> = c["landability"]["reason_codes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect();
-    codes.sort_unstable();
-    let reasons: Vec<String> = c["landability"]["reasons"]
+    let reasons_all: Vec<&Value> = c["landability"]["reasons"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|r| r["blocking"] == true)
-        .take(5)
+        .collect();
+    let mut codes: Vec<&str> = reasons_all
+        .iter()
+        .filter_map(|r| r["code"].as_str())
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    // The reported state: landability and each blocking reason with its
+    // subject, so "which reviewer is missing" changing is a change.
+    let mut state: Vec<String> = reasons_all
+        .iter()
         .map(|r| {
             format!(
-                "{}: {}",
+                "{}@{}",
                 r["code"].as_str().unwrap_or("?"),
-                r["detail"].as_str().unwrap_or("")
+                r["subject"].as_str().unwrap_or("")
             )
+        })
+        .collect();
+    state.sort_unstable();
+    let reasons: Vec<String> = reasons_all
+        .iter()
+        .take(5)
+        .map(|r| {
+            let code = r["code"].as_str().unwrap_or("?");
+            let detail = r["detail"].as_str().unwrap_or("");
+            match r["subject"].as_str().filter(|s| !s.is_empty()) {
+                Some(subject) => format!("{code} ({subject}): {detail}"),
+                None => format!("{code}: {detail}"),
+            }
         })
         .collect();
     let reviews: Vec<String> = c["reviews"]
@@ -615,15 +633,23 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
     let context = format!(
         "Candidate {id} for {entity} (commit {short}, proposed by {}). Reviews: {}. Mote owns landing: `mote candidate show {id}`.",
         proposer.unwrap_or("?"),
-        if reviews.is_empty() { "none yet".to_owned() } else { reviews.join(", ") }
+        if reviews.is_empty() {
+            "none yet".to_owned()
+        } else {
+            reviews.join(", ")
+        }
     );
+    let status_subject = format!("cand-status:{id}");
     let mut items = Vec::new();
-    let mut push = |key: String, to: &str, title: String, summary: String| {
-        items.push(
-            serde_json::json!({"key": key, "recipient": to, "title": title,
-            "summary": summary, "priority": 1, "refs": [id, entity]}),
-        );
-    };
+    let mut push =
+        |key: String, to: &str, title: String, summary: String, subject: Option<&str>| {
+            let mut item = serde_json::json!({"key": key, "recipient": to, "title": title,
+                "summary": summary, "priority": 1, "refs": [id, entity]});
+            if let Some(subject) = subject {
+                item["subject"] = serde_json::json!(subject);
+            }
+            items.push(item);
+        };
     if phase == "pending" {
         for reviewer in &reviewers {
             if c["reviews"].get(*reviewer).is_none() {
@@ -631,12 +657,17 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
                     format!("cand-review:{id}:{reviewer}:{policy_op}"),
                     reviewer,
                     format!("Mote: review requested on {id} ({entity})"),
-                    format!("You are a named reviewer. {context} Review with `mote candidate review {id}`."),
+                    format!(
+                        "You are a named reviewer. {context} Review with `mote candidate review {id}`."
+                    ),
+                    None,
                 );
             }
         }
-        let state = format!("{landable}:{}", codes.join(","));
-        let key = format!("cand:{id}:{phase_op}:{}", short_hash(&state));
+        let key = format!(
+            "cand:{id}:{phase_op}:{}",
+            short_hash(&format!("{landable}:{}", state.join(",")))
+        );
         let (title, summary) = if landable {
             (
                 format!("Mote: {id} is landable"),
@@ -652,11 +683,25 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
         for to in [proposer, authorizer].into_iter().flatten() {
             if !told.contains(&to) {
                 told.push(to);
-                push(key.clone(), to, title.clone(), summary.clone());
+                push(
+                    key.clone(),
+                    to,
+                    title.clone(),
+                    summary.clone(),
+                    Some(&status_subject),
+                );
             }
         }
     } else {
         let key = format!("cand:{id}:{phase_op}:{phase}");
+        let successor = c["supersession"]["successor_id"].as_str();
+        let (title, summary) = match successor {
+            Some(next) => (
+                format!("Mote: {id} is {phase} by {next}"),
+                format!("{context} Superseded by {next}."),
+            ),
+            None => (format!("Mote: {id} is {phase}"), context.clone()),
+        };
         let mut told = Vec::new();
         for to in [proposer, authorizer]
             .into_iter()
@@ -668,8 +713,9 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
                 push(
                     key.clone(),
                     to,
-                    format!("Mote: {id} is {phase}"),
-                    context.clone(),
+                    title.clone(),
+                    summary.clone(),
+                    Some(&status_subject),
                 );
             }
         }

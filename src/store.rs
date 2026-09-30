@@ -2097,7 +2097,15 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             for item in &items {
                 check_fields(
                     item,
-                    &["key", "recipient", "title", "summary", "priority", "refs"],
+                    &[
+                        "key",
+                        "recipient",
+                        "title",
+                        "summary",
+                        "priority",
+                        "refs",
+                        "subject",
+                    ],
                 )?;
                 let key = string(item, "key")?;
                 let recipient = string(item, "recipient")?;
@@ -2113,7 +2121,23 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     unknown.push(recipient.to_owned());
                     continue;
                 }
-                if conn.execute(
+                // A subject item reports current state: it is new when the state
+                // differs from the last one delivered to this recipient. Other
+                // items are new when their key has never been delivered.
+                let subject = item["subject"].as_str();
+                if let Some(subject) = subject {
+                    let last: Option<String> = conn
+                        .query_row(
+                            "SELECT state FROM mote_subjects WHERE store_id=? AND subject=? AND recipient=?",
+                            params![store_id, subject, recipient],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if last.as_deref() == Some(key) {
+                        duplicate += 1;
+                        continue;
+                    }
+                } else if conn.execute(
                     "INSERT OR IGNORE INTO mote_events(store_id,key,recipient) VALUES(?,?,?)",
                     params![store_id, key, recipient],
                 )? == 0
@@ -2142,16 +2166,24 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ) {
                     Ok(card) => card,
                     Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
-                        conn.execute(
-                            "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
-                            params![store_id, key, recipient],
-                        )?;
+                        if subject.is_none() {
+                            conn.execute(
+                                "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
+                                params![store_id, key, recipient],
+                            )?;
+                        }
                         invalid.push(json!({"key":key,"recipient":recipient,"error":e.message}));
                         continue;
                     }
                     Err(e) => return Err(e),
                 };
                 let id = card["card"]["id"].as_i64().unwrap_or(0);
+                if let Some(subject) = subject {
+                    conn.execute(
+                        "INSERT INTO mote_subjects(store_id,subject,recipient,state) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,subject,recipient) DO UPDATE SET state=excluded.state",
+                        params![store_id, subject, recipient, key],
+                    )?;
+                }
                 conn.execute(
                     "UPDATE mote_events SET card_id=? WHERE store_id=? AND key=? AND recipient=?",
                     params![id, store_id, key, recipient],

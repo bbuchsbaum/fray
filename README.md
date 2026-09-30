@@ -228,8 +228,9 @@ posts attention to the agent they concern:
 - a claim someone else moved away from you, whether by a third-party
   handoff or by taking over after it expired, to you.
 - a review requested from you as a named reviewer on a pending candidate;
-- a candidate you proposed or authorize becoming landable or blocked, and
-  its landing, supersession or abandonment, to everyone involved.
+- a candidate you proposed or authorize becoming landable or blocked, or
+  its blocking reasons changing, including returning to an earlier state;
+- a candidate's landing, supersession or abandonment, to everyone involved.
 
 Each such event reaches each recipient exactly once, even across interrupted
 or concurrent syncs, because the cursor only moves forward, under

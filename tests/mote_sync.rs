@@ -1039,3 +1039,247 @@ fn released_claims_are_not_listed_for_reconciliation() {
     let r = at(&mut b, "bob", "mote_claims", json!({"store_id":"st-A"})).unwrap();
     assert_eq!(r["holders"], json!({"bd-1":"alice"}));
 }
+
+#[test]
+fn a_candidate_returning_to_an_earlier_state_is_reported_again() {
+    // Review of 05dfbc2: landable -> blocked -> landable within one phase
+    // re-used a delivered key, so bob's newest card said "blocked".
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    ingest(&mut b, Value::Null, "c0", vec![]).unwrap();
+    let reviewed = json!({"carol":{"verdict":"approve","op_id":"R1"}});
+    let states = [
+        candidate(true, &[], reviewed.clone(), "pending", "POL1"),
+        candidate(
+            false,
+            &["authorization_revoked"],
+            reviewed.clone(),
+            "pending",
+            "POL1",
+        ),
+        candidate(true, &[], reviewed.clone(), "pending", "POL1"),
+    ];
+    for c in &states {
+        ingest(&mut b, json!("c0"), "c0", mote::candidate_items(c)).unwrap();
+    }
+    let bob = mote_titles(&mut b, "bob");
+    assert_eq!(
+        bob,
+        vec![
+            "Mote: cand-1 is landable",
+            "Mote: cand-1 is blocked (authorization_revoked)",
+            "Mote: cand-1 is landable"
+        ],
+        "{bob:?}"
+    );
+    // Re-reading the same state (evidence that changes nothing) sends nothing.
+    let r = ingest(&mut b, json!("c0"), "c0", mote::candidate_items(&states[2])).unwrap();
+    assert!(r["created"].as_array().unwrap().is_empty(), "{r}");
+}
+
+#[test]
+fn blocked_reasons_name_their_subject() {
+    let mut c = candidate(false, &["review_missing"], json!({}), "pending", "POL1");
+    c["landability"]["reasons"][0]["subject"] = json!("dave");
+    let items = mote::candidate_items(&c);
+    let status = items.iter().find(|i| i["recipient"] == "bob").unwrap();
+    assert!(
+        status["summary"]
+            .as_str()
+            .unwrap()
+            .contains("review_missing (dave)"),
+        "{status}"
+    );
+    // A different missing reviewer is a different state.
+    let mut other = c.clone();
+    other["landability"]["reasons"][0]["subject"] = json!("erin");
+    let other_status = mote::candidate_items(&other)
+        .into_iter()
+        .find(|i| i["recipient"] == "bob")
+        .unwrap();
+    assert_ne!(status["key"], other_status["key"]);
+}
+
+#[test]
+fn a_candidate_that_is_revoked_and_reauthorized_through_the_real_mote_is_reported_each_time() {
+    let Some(p) = Project::new("cand-aba") else {
+        return;
+    };
+    p.fray(&[], "carol", &["join"]);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&p.t.0)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "work"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    let work = p.bead("bob");
+    assert!(p.mote("bob", &["claim", &work]).status.success());
+    p.sync(&[], "alice").unwrap();
+    let out = p.mote(
+        "bob",
+        &[
+            "--json",
+            "candidate",
+            "propose",
+            "--issue",
+            &work,
+            "--commit",
+            &head,
+            "--base",
+            &base,
+            "--reviewer",
+            "carol",
+            "--authorizer",
+            "alice",
+            "--idempotency-key",
+            "k1",
+            "--path",
+            "src/",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cand = serde_json::from_slice::<Value>(&out.stdout).unwrap()["candidate_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.sync(&[], "alice").unwrap();
+    let last = |p: &Project| p.titles("bob").last().cloned().unwrap_or_default();
+    // Each step changes the candidate's state; bob's newest card must match it.
+    let step = |p: &Project, actor: &str, args: &[&str]| {
+        let out = p.mote(actor, args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        p.sync(&[], "alice").unwrap();
+    };
+    step(
+        &p,
+        "carol",
+        &[
+            "candidate",
+            "review",
+            &cand,
+            "block",
+            "--idempotency-key",
+            "r1",
+        ],
+    );
+    assert!(
+        last(&p).contains("review_blocking"),
+        "{:?}",
+        p.titles("bob")
+    );
+    // A re-review names the reviewer's previous review (compare-and-set).
+    let shown = p.mote("carol", &["--json", "candidate", "show", &cand]);
+    let prior = serde_json::from_slice::<Value>(&shown.stdout).unwrap()["reviews"]["carol"]
+        ["op_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    step(
+        &p,
+        "carol",
+        &[
+            "candidate",
+            "review",
+            &cand,
+            "approve",
+            "--expect",
+            &prior,
+            "--idempotency-key",
+            "r2",
+        ],
+    );
+    assert!(
+        !last(&p).contains("review_blocking"),
+        "{:?}",
+        p.titles("bob")
+    );
+    let blocked_after_approve = last(&p);
+    let auth_op = |p: &Project| {
+        let shown = p.mote("alice", &["--json", "candidate", "show", &cand]);
+        serde_json::from_slice::<Value>(&shown.stdout).unwrap()["authorization"]["op_id"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    step(
+        &p,
+        "alice",
+        &[
+            "candidate",
+            "authorize",
+            &cand,
+            "--grantee",
+            "bob",
+            "--idempotency-key",
+            "a1",
+        ],
+    );
+    let after_authorize = last(&p);
+    assert_ne!(
+        after_authorize,
+        blocked_after_approve,
+        "{:?}",
+        p.titles("bob")
+    );
+    let op = auth_op(&p).expect("authorized");
+    step(
+        &p,
+        "alice",
+        &[
+            "candidate",
+            "revoke",
+            &cand,
+            "--expect",
+            &op,
+            "--idempotency-key",
+            "a2",
+        ],
+    );
+    assert!(
+        last(&p).contains("authorization_revoked"),
+        "{:?}",
+        p.titles("bob")
+    );
+    let op = auth_op(&p).expect("revocation recorded");
+    step(
+        &p,
+        "alice",
+        &[
+            "candidate",
+            "authorize",
+            &cand,
+            "--grantee",
+            "bob",
+            "--expect",
+            &op,
+            "--idempotency-key",
+            "a3",
+        ],
+    );
+    assert_eq!(
+        last(&p),
+        after_authorize,
+        "back to the earlier state is reported again: {:?}",
+        p.titles("bob")
+    );
+}
