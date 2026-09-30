@@ -55,6 +55,10 @@ parser.add_argument(
     default="/tmp",
     help="short local directory for the temporary board",
 )
+parser.add_argument(
+    "--priority", type=int, default=2, choices=range(4),
+    help="priority of published asks for wait/watch/drive (hook always p1)",
+)
 parser.add_argument("--json", action="store_true", help="print only the JSON result")
 args = parser.parse_args()
 binary = str(pathlib.Path(args.binary).resolve())
@@ -167,7 +171,7 @@ def trial_wait(b, i):
     )
     try:
         time.sleep(args.settle)
-        card, sent = b.publish("sub", f"wait trial {i}")
+        card, sent = b.publish("sub", f"wait trial {i}", priority=args.priority)
         try:
             out, _ = proc.communicate(timeout=args.timeout)
         except subprocess.TimeoutExpired:
@@ -223,7 +227,7 @@ class Watch:
     def trial(self, i):
         while not self.lines.empty():
             self.lines.get_nowait()
-        card, sent = self.b.publish("sub", f"watch trial {i}")
+        card, sent = self.b.publish("sub", f"watch trial {i}", priority=args.priority)
         deadline = time.monotonic() + args.timeout
         seen = 0
         arrived = None
@@ -295,7 +299,7 @@ def trial_drive(b, i, stub, record):
     )
     try:
         time.sleep(max(args.settle, 0.5))
-        card, sent = b.publish("sub", f"drive trial {i}")
+        card, sent = b.publish("sub", f"drive trial {i}", priority=args.priority)
         try:
             proc.wait(args.timeout + 5)
         except subprocess.TimeoutExpired:
@@ -422,6 +426,7 @@ def main():
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
         "python": platform.python_version(),
         "trials_per_path": args.n,
+        "priority": args.priority,
         "settle_s": args.settle,
         "timeout_s": args.timeout,
         "measures": "publisher send returned -> host-visible event; excludes idle host scheduling and model response",

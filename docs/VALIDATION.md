@@ -3,7 +3,7 @@
 ## Wake-path latency baseline (2026-09-30)
 
 `scripts/bench_wake.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX, step 0) publishes
-one p1 question per trial through the real CLI. It then times arrival at a
+one question per trial through the real CLI, at a declared priority. It then times arrival at a
 stand-in host on each delivery path, from the publisher's `send` returning to
 the host-visible event, on one monotonic clock:
 
@@ -20,22 +20,33 @@ they need real hosts, which the charter reserves for the owner. Failed or
 timed-out trials count against a path. None occurred.
 
 Release build `e8e6c93` (main `0ce4333` plus `fray stats`), macOS 14.3 arm64,
-30 declared trials per path:
+30 declared trials per path and priority:
 
-| Path | Delivered | Duplicates | p50 ms | p95 ms | max ms |
-|---|---|---|---|---|---|
-| wait (finite timeout) | 30/30 | 0 | 91.6 | 110.0 | 121.9 |
-| watch --attention | 30/30 | 0 | 104.2 | 107.3 | 108.5 |
-| drive (stub child start) | 30/30 | 0 | 88.5 | 214.7 | 389.8 |
-| hook PostToolUse | 30/30 | 0 | 18.3 | 43.4 | 79.7 |
+| Path | Priority | Delivered | Duplicates | p50 ms | p95 ms | max ms |
+|---|---|---|---|---|---|---|
+| wait (finite timeout) | p2 | 30/30 | 0 | 91.6 | 110.0 | 121.9 |
+| wait (finite timeout) | p1 | 30/30 | 0 | 98.4 | 110.9 | 122.9 |
+| watch --attention | p2 | 30/30 | 0 | 104.2 | 107.3 | 108.5 |
+| watch --attention | p1 | 30/30 | 0 | 1.7 | 6.9 | 22.0 |
+| drive (stub child start) | p2 | 30/30 | 0 | 88.5 | 214.7 | 389.8 |
+| drive (stub child start) | p1 | 30/30 | 0 | 72.8 | 171.2 | 292.5 |
+| hook PostToolUse | p1 | 30/30 | 0 | 18.3 | 43.4 | 79.7 |
 
-Delivery is complete and duplicate-free, but finite waits carry a fixed floor
-of about 100 ms. With `wait --timeout none` the same measurement gives p50
-2.4 ms and p95 13.5 ms (20 trials). The floor comes from `wait_cancellable`
-(`src/server.rs`): a finite wait's hang-up observer reads with a 100 ms timeout,
-and the reply waits for that thread to notice completion. The watch stream
-shows the same floor. This is the first improvement target. The drive column
-is dominated by process spawn; its tail includes the stub's Python start-up.
+All 210 trials delivered, with no duplicates. Two floors appear, and they have
+different causes:
+
+- **watch at p2: deliberate.** The attention stream holds non-urgent items for
+  a fixed 100 ms settle window (`settle_ms`, `src/server.rs` `watch_attention`)
+  so that a burst arrives as one packet. p0–p1 items bypass the window and
+  arrive in about 2 ms.
+- **Finite waits: an artifact, independent of priority.** A finite wait's
+  hang-up observer (`wait_cancellable`, `src/server.rs`) reads the client
+  socket with a 100 ms timeout, and the reply waits for that thread to notice
+  completion. `wait --timeout none` has no such observer timeout and gives
+  p50 2.4 ms, p95 13.5 ms (20 trials). This is the first improvement target.
+
+The drive column is dominated by process spawn, and its tail includes the
+stub's Python start-up.
 
 Reproduce: `cargo build --release && python3 scripts/bench_wake.py
 target/release/fray --n 30 --home-parent /tmp`.
