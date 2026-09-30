@@ -998,6 +998,16 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             10,
         )
     };
+    let ingest_reconcile = |after: Option<&str>, cursor: &str, reconcile: Vec<Value>| {
+        send(
+            home,
+            actor,
+            "mote_ingest",
+            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":[],"claims":[],"reconcile":reconcile}),
+            None,
+            10,
+        )
+    };
     let moved = |e: &Error| e.code == "mote_cursor_moved";
     // Never move the cursor backwards, even with a skewed clock.
     let tail = |current: Option<&str>| {
@@ -1079,7 +1089,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             return match ingest(Some(&cursor), &seed, vec![], vec![]) {
                 Ok(_) => Ok(
                     json!({"mote_sync":{"reseeded":seed,"skipped_from":cursor,"created":[],
-                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Events in between are not delivered until reconciliation (a later slice) is in place."}}),
+                    "note":"Three syncs in a row timed out; the cursor moved to the latest event. Claims are reconciled against Mote's board on every sync; reservation events in between are not recovered."}}),
                 ),
                 Err(e) if moved(&e) => Ok(
                     json!({"mote_sync":{"note":"another sync advanced the cursor first","created":[]}}),
@@ -1144,11 +1154,106 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
         }
     }
+    // Reconciliation for claims (section 6): the event feed can miss a
+    // change (a late op, a reseed, a release or expiry), so Mote's live
+    // board is the check. Every entity on the board or in Fray's record is
+    // compared holder by holder; a difference is sent with the holder Fray had,
+    // and the store applies it only if that is still what it records.
+    let mut reconciled = 0;
+    let mut raced = 0;
+    let mut reconcile_note = Value::Null;
+    let marker = tail(Some(&after));
+    let board = mote::run(&store, Some(actor), &["board"], mote::read_timeout());
+    let known = send(
+        home,
+        actor,
+        "mote_claims",
+        json!({"store_id":store_id}),
+        None,
+        10,
+    );
+    match (board, known) {
+        (mote::Outcome::Ok(board), Ok(known)) => {
+            let mut live: std::collections::BTreeMap<String, (String, String)> =
+                std::collections::BTreeMap::new();
+            for c in board["active_claims"].as_array().into_iter().flatten() {
+                if let (Some(id), Some(holder)) = (c["id"].as_str(), c["claimed_by"].as_str()) {
+                    let lease = c["lease_until_ts"].as_str().unwrap_or("").to_owned();
+                    live.insert(id.to_owned(), (holder.to_owned(), lease));
+                }
+            }
+            let recorded = known["holders"].as_object().cloned().unwrap_or_default();
+            if known["more"] == true {
+                reconcile_note = json!(
+                    "Fray records more than 10,000 claims; only the first 10,000 were compared"
+                );
+            }
+            let mut entities: std::collections::BTreeSet<&str> =
+                live.keys().map(String::as_str).collect();
+            entities.extend(recorded.keys().map(String::as_str));
+            let mut entries = Vec::new();
+            for entity in entities {
+                let had = recorded.get(entity).and_then(Value::as_str);
+                let (now, lease) = match live.get(entity) {
+                    Some((h, l)) => (Some(h.as_str()), l.as_str()),
+                    None => (None, ""),
+                };
+                if had != now {
+                    entries.push(json!({"entity":entity,"expect":had,"holder":now,
+                        "lease_until":lease,"marker":marker}));
+                }
+            }
+            for chunk in entries.chunks(100) {
+                match ingest_reconcile(Some(&after), &after, chunk.to_vec()) {
+                    Ok(r) => {
+                        created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                        unknown.extend(
+                            r["unknown_recipients"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
+                        invalid.extend(r["invalid"].as_array().cloned().unwrap_or_default());
+                        let lost = r["raced"].as_array().map_or(0, Vec::len);
+                        raced += lost;
+                        reconciled += chunk.len() - lost;
+                    }
+                    Err(e) if moved(&e) => {
+                        reconcile_note = json!(
+                            "another sync advanced the cursor; reconciliation deferred to it"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        reconcile_note = json!(format!(
+                            "claim reconciliation failed: {}: {}",
+                            e.code, e.message
+                        ));
+                        break;
+                    }
+                }
+            }
+            if raced > 0 && reconcile_note.is_null() {
+                reconcile_note = json!(format!(
+                    "{raced} claims changed during reconciliation; the next sync rechecks them"
+                ));
+            }
+        }
+        (mote::Outcome::Ok(_), Err(e)) => {
+            reconcile_note = json!(format!("claim reconciliation skipped: the daemon cannot list recorded claims ({}); restart it on this build", e.code));
+        }
+        (other, _) => {
+            reconcile_note = json!(format!(
+                "claim reconciliation skipped: mote board {other:?}"
+            ))
+        }
+    }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
         json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
-        "unknown_recipients":unknown,"invalid":invalid,"cursor":after}}),
+        "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
+        "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note}}),
     )
 }
 
@@ -2466,6 +2571,15 @@ fn human(v: &Value, out: &mut String) {
                     "  Skipped as invalid (reported, not retried): {}\n",
                     clean(&serde_json::to_string(bad).unwrap_or_default())
                 ));
+            }
+            if m["reconciled_claims"].as_i64().unwrap_or(0) > 0 {
+                out.push_str(&format!(
+                    "  Reconciled {} claims with Mote's board\n",
+                    m["reconciled_claims"]
+                ));
+            }
+            if let Some(n) = m["reconcile_note"].as_str() {
+                out.push_str(&format!("  {}\n", clean(n)));
             }
             if let Some(u) = m["unknown_recipients"].as_array().filter(|u| !u.is_empty()) {
                 out.push_str(&format!(

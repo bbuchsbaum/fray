@@ -683,3 +683,173 @@ fn replaying_a_chunk_never_invents_a_change_of_hands() {
     assert!(r["created"].as_array().unwrap().is_empty(), "{r}");
     assert_eq!(cards(&mut b), first);
 }
+
+impl Project {
+    /// Moves the board's cursor past everything so far without delivering it:
+    /// a stand-in for events the feed skipped (a late op, or a reseed).
+    fn skip_events(&self) {
+        let (ok, out) = self.fray(&[], "alice", &["--json", "mote", "status"]);
+        assert!(ok, "{out}");
+        let s: Value = serde_json::from_str(&out).unwrap();
+        let cursor = s["mote"]["binding"]["cursor"].as_str().unwrap().to_owned();
+        let store_id = s["mote"]["store_id"].as_str().unwrap().to_owned();
+        let far = mote::tail_cursor(std::time::SystemTime::now() + Duration::from_secs(3600));
+        let req = json!({"op":"mote_ingest","actor":"alice","args":{"store_id":store_id,
+            "after":cursor,"cursor":far,"items":[],"claims":[]}});
+        let (ok, out) = self.fray(&[], "alice", &["rpc", &req.to_string()]);
+        assert!(ok, "{out}");
+    }
+}
+
+#[test]
+fn reconciliation_delivers_claim_changes_the_event_feed_missed_once() {
+    let Some(p) = Project::new("recon") else {
+        return;
+    };
+    // alice holds `held` when the board is seeded.
+    let held = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &held]).status.success());
+    p.sync(&[], "alice").unwrap();
+    // Changes the feed will miss: a handoff to bob, then bob renewing it (a
+    // renewal looks like a handoff in Mote's history), and bob taking
+    // alice's claim.
+    let handed = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &handed]).status.success());
+    assert!(p
+        .mote("alice", &["handoff", &handed, "--to", "bob"])
+        .status
+        .success());
+    assert!(p.mote("bob", &["claim", &handed]).status.success());
+    assert!(p
+        .mote("bob", &["handoff", &held, "--to", "bob"])
+        .status
+        .success());
+    p.skip_events();
+    let s = p.sync(&[], "alice").unwrap();
+    assert_eq!(s["events"], 0, "the feed saw nothing: {s}");
+    assert_eq!(s["reconciled_claims"], 2, "{s}");
+    let bob = p.titles("bob");
+    assert!(
+        bob.contains(&format!("Mote: you now hold {handed}")),
+        "{bob:?}"
+    );
+    assert!(
+        bob.contains(&format!("Mote: you now hold {held}")),
+        "{bob:?}"
+    );
+    let alice = p.titles("alice");
+    assert!(
+        alice.contains(&format!("Mote: {held} is now held by bob")),
+        "{alice:?}"
+    );
+    // alice never held `handed` in Fray's record, so she is not told about it.
+    assert!(!alice.iter().any(|t| t.contains(&handed)), "{alice:?}");
+    // Reconciling again finds nothing to do and delivers nothing twice.
+    let s = p.sync(&[], "bob").unwrap();
+    assert_eq!(s["reconciled_claims"], 0, "{s}");
+    assert_eq!(p.titles("bob").len(), bob.len());
+    assert_eq!(p.titles("alice").len(), alice.len());
+}
+
+#[test]
+fn a_missed_release_is_recorded_quietly_and_never_causes_a_false_receipt() {
+    let Some(p) = Project::new("release") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    let w = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &w]).status.success());
+    p.sync(&[], "alice").unwrap();
+    // alice releases; the feed misses it.
+    assert!(p.mote("alice", &["release", &w]).status.success());
+    p.skip_events();
+    let s = p.sync(&[], "alice").unwrap();
+    assert_eq!(s["reconciled_claims"], 1, "{s}");
+    assert!(
+        s["created"].as_array().unwrap().is_empty(),
+        "a release is quiet: {s}"
+    );
+    // bob claims the free work, seen by the feed: alice is told nothing.
+    assert!(p.mote("bob", &["claim", &w]).status.success());
+    p.sync(&[], "bob").unwrap();
+    assert!(p.titles("alice").is_empty(), "{:?}", p.titles("alice"));
+}
+
+#[test]
+fn the_event_path_and_reconciliation_share_keys() {
+    // A change seen by the feed is not delivered again by reconciliation.
+    let Some(p) = Project::new("shared") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    let w = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &w]).status.success());
+    assert!(p
+        .mote("alice", &["handoff", &w, "--to", "bob"])
+        .status
+        .success());
+    let s = p.sync(&[], "alice").unwrap();
+    assert_eq!(s["created"].as_array().unwrap().len(), 1, "{s}");
+    assert_eq!(
+        s["reconciled_claims"], 0,
+        "the table already matches the board: {s}"
+    );
+    assert_eq!(p.titles("bob").len(), 1);
+}
+
+#[test]
+fn every_recorded_holder_is_reported_for_reconciliation() {
+    let mut b = board();
+    ingest_claims(
+        &mut b,
+        Value::Null,
+        "c0",
+        vec![
+            json!({"entity":"bd-1","to":"alice","by":"alice","op_id":"20260930T000000.000000Z","seed":true}),
+        ],
+    );
+    let r = at(&mut b, "bob", "mote_claims", json!({"store_id":"st-A"})).unwrap();
+    assert_eq!(r["holders"]["bd-1"], "alice");
+    assert_eq!(r["more"], false);
+}
+
+#[test]
+fn reconciliation_applies_only_if_fray_still_records_what_the_reader_saw() {
+    let mut b = board();
+    ingest_claims(
+        &mut b,
+        Value::Null,
+        "c0",
+        vec![claim("bd-1", "alice", "alice", "20260930T010000.000000Z-a")],
+    );
+    let rec = |expect: Value, holder: Value| {
+        json!({"store_id":"st-A","after":"c0","cursor":"c0","items":[],"claims":[],
+            "reconcile":[{"entity":"bd-1","expect":expect,"holder":holder,"lease_until":"L1","marker":"20260930T020000.000000Z"}]})
+    };
+    // A reader that saw a different holder than Fray now records loses the race.
+    let r = at(
+        &mut b,
+        "bob",
+        "mote_ingest",
+        rec(json!("carol"), json!("bob")),
+    )
+    .unwrap();
+    assert_eq!(r["raced"], json!(["bd-1"]));
+    assert!(r["created"].as_array().unwrap().is_empty());
+    // The right expectation applies, with blame-free cards to both.
+    let r = at(
+        &mut b,
+        "bob",
+        "mote_ingest",
+        rec(json!("alice"), json!("bob")),
+    )
+    .unwrap();
+    assert_eq!(r["created"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(mote_titles(&mut b, "bob"), vec!["Mote: you now hold bd-1"]);
+    assert_eq!(
+        mote_titles(&mut b, "alice"),
+        vec!["Mote: bd-1 is now held by bob"]
+    );
+    let all = at(&mut b, "bob", "mote_claims", json!({"store_id":"st-A"})).unwrap();
+    assert_eq!(all["holders"]["bd-1"], "bob");
+}

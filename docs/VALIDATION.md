@@ -1,5 +1,49 @@
 # Validation
 
+## Mote adapter slice 5c-a: claim reconciliation (2026-09-30)
+
+Section 6 reconciliation, for claims, as state comparison. After ingesting
+events, `fray mote sync` reads Mote's live board (`board --json`) and every
+holder Fray has recorded (`mote_claims`). It compares the two holder by
+holder, across every entity in either. Each difference is sent with the holder
+Fray had, and the store applies it only if that is still what it records.
+This compare-and-set means a concurrent sync is never overwritten; the next
+sync rechecks any entry that lost the race.
+
+- **Cards say what changed, not who changed it.** The new holder gets "you
+  now hold E", and the previous holder gets "E is now held by X". They share
+  the key `claimstate:E:<holder>:<lease_until>`.
+- **A release or expiry the feed missed is recorded quietly.** Nobody is told
+  anything that might be false.
+
+The first design (`637458b`) rebuilt who moved what from `mote history`.
+Independent review showed that was unsound, and all three objections were
+reproduced against the real `mote`:
+
+- A late op that Mote ordered before one Fray had already seen blocked
+  reconciliation for good, while the sync still reported it as reconciled.
+- A renewal looks like a handoff in history, so a receipt blamed the wrong
+  agent.
+- Reading the board and then history was not atomic, so a handoff in between
+  was lost.
+
+The state comparison removes all three causes: it never consults history or
+op order, and the compare-and-set covers the gap between reading and writing.
+Reconciliation also no longer makes one history call per entity. A daemon that
+lacks the new operation degrades the sync to a note instead of failing it.
+
+`tests/mote_sync.rs` has 20 tests. Against the real `mote 0.1.0`, with the
+cursor forced past the events:
+
+- a missed handoff followed by a renewal reaches the new holder, without
+  blaming anyone;
+- a missed third-party takeover reaches both agents;
+- an entity alice never held tells her nothing;
+- a missed release stays quiet and causes no false receipt later;
+- repeated syncs deliver nothing twice.
+
+Unit tests cover the compare-and-set race and the full holder listing.
+
 ## Model response through Fray, real hosts (2026-09-30)
 
 `scripts/bench_model.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX) adds the
