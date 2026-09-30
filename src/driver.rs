@@ -84,7 +84,13 @@ enum Group {
 /// keeping the crate free of unsafe code. Signal 0 only probes.
 fn signal_group(pgid: u32, signal: &str) -> Group {
     let out = Command::new("/bin/sh")
-        .args(["-c", r#"kill -s "$1" -- "-$2""#, "fray-drive", signal, &pgid.to_string()])
+        .args([
+            "-c",
+            r#"kill -s "$1" -- "-$2""#,
+            "fray-drive",
+            signal,
+            &pgid.to_string(),
+        ])
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -122,7 +128,8 @@ fn group_stopped(pgid: u32) -> bool {
     };
     String::from_utf8_lossy(&out.stdout).lines().any(|line| {
         let mut fields = line.split_whitespace();
-        fields.next() == Some(&pgid.to_string()) && fields.next().is_some_and(|s| s.starts_with('T'))
+        fields.next() == Some(&pgid.to_string())
+            && fields.next().is_some_and(|s| s.starts_with('T'))
     })
 }
 

@@ -416,7 +416,17 @@ impl Project {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let out = cmd.args(args).output().unwrap();
+        let out = cmd.args(args).output().unwrap_or_else(|e| {
+            // Rare under heavy concurrent runs (bd-01M3SANZV1KF9PGWSBDFVJV4MD):
+            // say which of the working directory and the binary was missing.
+            panic!(
+                "spawning fray {args:?} failed: {e}; cwd {} exists: {}; binary {} exists: {}",
+                self.t.0.display(),
+                self.t.0.exists(),
+                env!("CARGO_BIN_EXE_fray"),
+                std::path::Path::new(env!("CARGO_BIN_EXE_fray")).exists()
+            )
+        });
         (
             out.status.success(),
             format!(
