@@ -44,6 +44,58 @@ cursor forced past the events:
 
 Unit tests cover the compare-and-set race and the full holder listing.
 
+## Model response through Fray, real hosts (2026-09-30)
+
+`scripts/bench_model.py` (Mote bd-01M3RZ9BN4RYQRY56RFEPSTEJX) adds the
+model-response column that `bench_wake.py` leaves out. The reply time is on
+one monotonic clock; the host-start time (since the fix below) is from the
+runner's wall-clock record. The owner approved a
+bounded run. Each trial works like this:
+
+1. A `fray drive --max-turns 1` agent waits with a real host as its child.
+2. A peer sends it a p1 question asking for the reply `pong`.
+3. The peer's own `fray wait --card ID` returns when the reply lands.
+
+Times are measured on one monotonic clock from the moment the publisher's
+`send` returned. There were 5 declared trials per host, failures counted.
+
+Setup: release build `9a39118`, macOS 14.3 arm64, Claude Code 2.1.285
+(`claude -p`, with `Bash(fray:*)` pre-approved), Codex CLI 0.159.1 (`codex exec`,
+workspace-write sandbox).
+
+| Host | Answered | Publish to host started, p50 / p95 (superseded, see below) | Publish to reply, p50 / p95 / max |
+|---|---|---|---|
+| Claude Code | 5/5 | 0.04 s / 0.05 s | 4.98 s / 6.33 s / 6.33 s |
+| Codex | 5/5 | 0.04 s / 0.05 s | 25.6 s / 34.7 s / 34.7 s |
+
+Correction, from the review of `b7b4c89`: the "host started" column was
+timed by a Python wrapper that stamped the time only after its own start-up,
+about 30 ms of the 40 ms shown. The harness now reads the spawn time from
+`fray drive`'s own run record, at millisecond resolution. With a stand-in
+host that replies at once (`FRAY_BENCH_HOSTS_JSON`, 10 trials), Fray's part
+measures:
+
+- **publish to host spawned:** 2 ms (p50) and 3 ms (p95);
+- **publish to reply:** 46 ms (p50) and 55 ms (p95), including the stand-in
+  running `fray reply`.
+
+So the model turn is effectively the entire end-to-end time. For an agent
+that `drive` manages, a faster Fray cannot matter much; what matters is
+waking the agent at all. Idle interactive sessions, which only hooks and
+monitors reach, remain unmeasured here.
+
+A reply counts when any annotation by the addressed agent lands on the card.
+This measures latency, not whether the model obeyed the `pong` instruction.
+Claude Code ran with `Bash(fray:*)` pre-approved; read-only tools such as
+Read and Grep stay available. Codex ran in a workspace-write sandbox rooted
+at the trial directory.
+
+Pilot runs before the declared ones exposed a harness bug, now fixed: the
+publisher waited with `--addressed-to-me`, which by design selects only
+items assigned to you. A reply to your own question is assigned to the other
+agent, so the filter hid it. The session log counts 16 model turns in total,
+6 of them pilots; the artifact records only the 10 declared ones.
+
 ## Mote adapter slice 5b: Mote events into attention (2026-09-30)
 
 `fray mote sync` and the `mote_ingest` operation implement the event path of
