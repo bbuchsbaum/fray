@@ -1,5 +1,37 @@
 # Validation
 
+## Git guard (epic child 4, 2026-09-30)
+
+`fray guard install` adds `pre-commit` and `pre-push` hooks to the
+repository's shared hooks directory. The bead proposed `fray hook git
+--install`, but `fray hook` is the host-hook entry point, so the guard has its
+own command.
+
+The hooks check staged paths, and for a push, every path touched by each
+pushed range:
+
+- deletions are skipped;
+- a new branch covers only the commits no remote-tracking ref has.
+
+Where Mote is adopted, another actor's Mote reservations decide; that takes
+one `board --json` read per hook run. Otherwise Fray lanes decide.
+
+The guard warns by default and blocks with `FRAY_GUARD=block`. It never blocks
+because a service is down. Prior hooks are chained, keeping their exit status
+and stdin.
+
+`tests/guard.rs` has 6 tests, run in real git repositories:
+
+- a foreign lane warns; blocking refuses; one's own lane is quiet;
+- a failing prior hook stops the commit, and reinstalling does not wrap it
+  twice;
+- a push of a new branch plus an updated `main` names paths from both, the
+  prior hook receives both ref lines, and a deletion checks nothing;
+- a linked worktree shares the guard and the board;
+- a stopped daemon produces "could not check" without blocking;
+- against the real `mote 0.1.0`, another actor's reservation warns, and
+  blocks on request.
+
 ## Mote adapter slice 5c-b: candidates (2026-09-30)
 
 `fray mote sync` reads the pending candidates once per sync (`mote

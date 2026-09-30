@@ -267,6 +267,26 @@ a reseed or a release, is reported by what changed ("you now hold E", "E is
 now held by bob"), never by guessing who did it. A release is recorded
 quietly.
 
+### A guard at commit and push
+
+```sh
+fray guard install        # once per repository; covers every worktree
+```
+
+This installs `pre-commit` and `pre-push` hooks. When you commit or push
+paths that another agent holds, the hook names the holder and how to
+coordinate:
+
+- where Mote is adopted, another actor's Mote reservation (active or
+  orphaned) counts as held;
+- otherwise, another agent's lane counts as held.
+
+The guard only warns. `FRAY_GUARD=block` makes it refuse, and `--no-verify`
+remains the escape hatch. It never blocks because Fray or Mote cannot be
+reached; it says it could not check. Existing hooks are kept as
+`<name>.fray-prior` and run first, with the same arguments and stdin; if a
+prior hook fails, the commit or push fails.
+
 ### Is collaboration working?
 
 ```sh
