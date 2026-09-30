@@ -792,7 +792,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             Ok(json!({"agent":actor,"enabled":req.op!="leave"}))
         }
         "controller" => {
-            check_fields(a, &["run_id", "state", "begin", "reason"])?;
+            check_fields(a, &["run_id", "state", "begin", "reason", "detail"])?;
             let run_id = string(a, "run_id")?;
             text(run_id, "run_id", 128, false)?;
             let state = string(a, "state")?;
@@ -805,6 +805,17 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             if let Some(reason) = reason {
                 text(reason, "reason", 160, true)?;
             }
+            let detail = match a.get("detail") {
+                Some(d) if d.is_object() && serde_json::to_string(d)?.len() <= 8000 => {
+                    Some(serde_json::to_string(d)?)
+                }
+                Some(_) => {
+                    return Err(Error::invalid(
+                        "controller detail must be an object of at most 8000 bytes",
+                    ))
+                }
+                None => None,
+            };
             if boolean(a, "begin", false)? {
                 if state != "waiting" {
                     return Err(Error::invalid("controller begins waiting"));
@@ -817,6 +828,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     ));
                 }
                 conn.execute("INSERT INTO controllers(agent,run_id,state,updated_ms,reason) VALUES(?,?,?,?,NULL) ON CONFLICT(agent) DO UPDATE SET run_id=excluded.run_id,state=excluded.state,updated_ms=excluded.updated_ms,reason=NULL",params![actor,run_id,state,now])?;
+                // A new run starts with its own diagnostics, never a predecessor's.
+                conn.execute("DELETE FROM controller_details WHERE agent=?", [actor])?;
             } else {
                 let updated = conn.execute("UPDATE controllers SET state=?,updated_ms=?,reason=? WHERE agent=? AND run_id=? AND state IN ('waiting','running') AND updated_ms>?",params![state,now,reason,actor,run_id,now-120000])?;
                 if updated == 0 {
@@ -825,6 +838,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         "controller lease expired, stopped, or belongs to another run",
                     ));
                 }
+            }
+            if let Some(detail) = detail {
+                conn.execute("INSERT INTO controller_details(agent,run_id,detail) VALUES(?,?,?) ON CONFLICT(agent) DO UPDATE SET run_id=excluded.run_id,detail=excluded.detail",params![actor,run_id,detail])?;
             }
             Ok(json!({"run_id":run_id,"state":state,"updated_ms":now}))
         }
@@ -3025,11 +3041,12 @@ fn roster(conn: &Connection, now: i64, limit: i64) -> Result<Value> {
     let more = raw.len() > limit as usize;
     let mut items = Vec::new();
     for (name, role, topics, enabled, last) in raw.into_iter().take(limit as usize) {
-        let controller = conn.query_row("SELECT run_id,state,updated_ms,reason FROM controllers WHERE agent=?",[&name],|r|{
+        let controller = conn.query_row("SELECT c.run_id,c.state,c.updated_ms,c.reason,d.detail FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=?",[&name],|r|{
             let state:String=r.get(1)?;
             let updated:i64=r.get(2)?;
             let active=matches!(state.as_str(),"waiting"|"running");
-            Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?}))
+            let detail=r.get::<_,Option<String>>(4)?.and_then(|d|serde_json::from_str::<Value>(&d).ok());
+            Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?,"detail":detail}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
         items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && (now-last<120000 || agent_waiting(conn,&name,now)?),"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?}));

@@ -255,3 +255,8 @@ identity; it heartbeats while busy and idle. Explicit `leave` stops it without
 automatic rejoin. A failed, stopped or stale controller is not an available worker.
 No presented-receipt progress, child failure, or runtime/turn limits stop the
 runner. Inspect the reason instead of repeatedly relaunching the same prompt.
+Under `drive`, an item with `omitted: true` is a pointer: run its `fetch` command
+and read it before acting or acking. Anything you start in the background is
+stopped when your turn ends unless it leaves the process group; record such a job.
+To tell whether an objection reached a running drive agent, read its controller
+detail in `fray agents` (`queued_urgent`, `presented`).
