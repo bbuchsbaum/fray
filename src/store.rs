@@ -9,6 +9,9 @@ use std::{path::Path, time::Duration};
 const COLS:&str="id,rev,kind,topic,title,summary,status,priority,pinned,tags,author,assignee,lease_owner,lease_until_ms,fence,created_ms,updated_ms,last_seq";
 /// The reserved identity for the project owner (see owner-authority design).
 pub const OWNER: &str = "owner";
+/// The reserved identity that authors attention derived from Mote. It never
+/// joins or acts; it only lets a Mote event reach the agent who synced it.
+pub const MOTE: &str = "mote";
 
 /// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
 /// owner1 …): case, separators and a numeric suffix are ignored.
@@ -331,6 +334,8 @@ impl Store {
                 | "lane_release"
                 | "set_status"
                 | "mote_bind"
+                | "mote_ingest"
+                | "mote_sync_failed"
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
@@ -349,6 +354,20 @@ impl Store {
         // operations only as the owner. Collision prevention against accidents
         // and injected text, not authentication (docs/design/owner-authority.md).
         let owner_op = req.op.starts_with("owner_");
+        if req.op == "join"
+            && req
+                .actor
+                .to_lowercase()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                == MOTE
+        {
+            return Err(Error::new(
+                "reserved_mote",
+                "`mote` is reserved for attention derived from Mote; choose another name",
+            ));
+        }
         if req.actor != OWNER && req.op == "join" && owner_lookalike(&req.actor) {
             return Err(Error::new(
                 "reserved_owner",
@@ -1904,6 +1923,201 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )?;
             Ok(json!({"binding":{"store":store,"store_id":store_id},"new":true}))
         }
+        "mote_ingest" => {
+            // Mote events become attention exactly once per recipient, and the
+            // cursor moves only forward, in the same transaction
+            // (docs/design/mote-adapter.md section 6).
+            check_fields(a, &["store_id", "after", "cursor", "items", "claims"])?;
+            let store_id = string(a, "store_id")?;
+            let bound = mote_binding(conn)?;
+            if bound.is_null() || bound["store_id"] != store_id {
+                return Err(Error::new(
+                    "mote_store_mismatch",
+                    "events are from a Mote store this board is not bound to; run fray mote status",
+                ));
+            }
+            let current = bound["cursor"].as_str().map(str::to_owned);
+            let after = match a.get("after") {
+                None | Some(Value::Null) => None,
+                Some(_) => Some(string(a, "after")?.to_owned()),
+            };
+            if after != current {
+                return Err(Error::new(
+                    "mote_cursor_moved",
+                    format!(
+                        "another sync advanced the Mote cursor to {}; nothing was written",
+                        current.as_deref().unwrap_or("(unset)")
+                    ),
+                ));
+            }
+            let cursor = string(a, "cursor")?;
+            text(cursor, "cursor", 200, false)?;
+            if current.as_deref().is_some_and(|c| cursor < c) {
+                return Err(Error::invalid("the Mote cursor only moves forward"));
+            }
+            let items = a["items"]
+                .as_array()
+                .filter(|i| i.len() <= 100)
+                .ok_or_else(|| Error::invalid("items must be an array of at most 100"))?;
+            conn.execute(
+                "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
+                params![MOTE, now],
+            )?;
+            let claims = match a.get("claims") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(v) => v
+                    .as_array()
+                    .filter(|c| c.len() <= 100)
+                    .ok_or_else(|| Error::invalid("claims must be an array of at most 100"))?
+                    .clone(),
+            };
+            // Claim transitions, in event order, become cards here, where the
+            // previous holder is known consistently with the cursor.
+            let mut items: Vec<Value> = items.clone();
+            for c in &claims {
+                check_fields(c, &["entity", "to", "by", "op_id", "released", "seed"])?;
+                let entity = string(c, "entity")?;
+                let op_id = string(c, "op_id")?;
+                text(entity, "entity", 200, false)?;
+                let to = c["to"].as_str();
+                let by = c["by"].as_str().unwrap_or("");
+                let stored: Option<(Option<String>, String)> = conn
+                    .query_row(
+                        "SELECT holder,op_id FROM mote_claims WHERE store_id=? AND entity=?",
+                        params![store_id, entity],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                // Transitions apply in op order, once. A chunk that did not
+                // advance the cursor is replayed (an interrupted or concurrent
+                // sync); its older transitions must not be compared against a
+                // holder that newer ones already set, or they would invent a
+                // change of hands.
+                if stored
+                    .as_ref()
+                    .is_some_and(|(_, seen)| op_id <= seen.as_str())
+                {
+                    continue;
+                }
+                let previous = stored.map(|(holder, _)| holder);
+                let holder = if c["released"] == true { None } else { to };
+                conn.execute(
+                    "INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",
+                    params![store_id, entity, holder, op_id],
+                )?;
+                if c["seed"] == true || c["released"] == true {
+                    continue;
+                }
+                let Some(to) = to else { continue };
+                let key = format!("claim:{entity}:{op_id}");
+                if by != to {
+                    items.push(json!({"key":key,"recipient":to,
+                        "title":format!("Mote: {by} handed you {entity}"),
+                        "summary":format!("{by} transferred the Mote claim on {entity} to you. Mote owns the claim: `mote show {entity}` for the work, and look for a Fray handoff packet from {by}."),
+                        "priority":1,"refs":[entity]}));
+                }
+                // The previous holder hears when someone else moved their claim (a
+                // third-party handoff, or taking over one that expired), not when
+                // they handed it off themselves.
+                if let Some(prev) = previous.flatten().filter(|p| p != to && p != by) {
+                    items.push(json!({"key":key,"recipient":prev,
+                        "title":format!("Mote: your claim on {entity} is now {to}'s"),
+                        "summary":format!("The Mote claim on {entity} you held (possibly expired) now belongs to {to}, by {by}. If that was not agreed, raise it with {by}; Mote does not check who hands a claim off."),
+                        "priority":1,"refs":[entity]}));
+                }
+            }
+            let (mut created, mut duplicate, mut unknown, mut invalid) =
+                (Vec::new(), 0, Vec::new(), Vec::new());
+            for item in &items {
+                check_fields(
+                    item,
+                    &["key", "recipient", "title", "summary", "priority", "refs"],
+                )?;
+                let key = string(item, "key")?;
+                let recipient = string(item, "recipient")?;
+                text(key, "key", 300, false)?;
+                // A Mote actor that has never joined this board has no inbox here.
+                if recipient == MOTE
+                    || !conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
+                        [recipient],
+                        |r| r.get::<_, bool>(0),
+                    )?
+                {
+                    unknown.push(recipient.to_owned());
+                    continue;
+                }
+                if conn.execute(
+                    "INSERT OR IGNORE INTO mote_events(store_id,key,recipient) VALUES(?,?,?)",
+                    params![store_id, key, recipient],
+                )? == 0
+                {
+                    duplicate += 1;
+                    continue;
+                }
+                let mut tags = vec!["mote".to_owned()];
+                for r in item["refs"].as_array().into_iter().flatten() {
+                    if let Some(r) = r.as_str() {
+                        tags.push(format!("mote:{r}"));
+                    }
+                }
+                let title = clip(item["title"].as_str().unwrap_or(""), 160);
+                let summary = clip(item["summary"].as_str().unwrap_or(""), 2000);
+                // One malformed item must never stop every later event: it is
+                // skipped and reported, and its dedupe row is undone.
+                let card = match create_card(
+                    conn,
+                    MOTE,
+                    &json!({"kind":"note","topic":format!("@{recipient}"),"title":title,
+                        "summary":summary,"priority":item.get("priority").cloned().unwrap_or(json!(1)),
+                        "tags":tags,"assignee":recipient}),
+                    json!({"mote_key":key}),
+                    now,
+                ) {
+                    Ok(card) => card,
+                    Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
+                        conn.execute(
+                            "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
+                            params![store_id, key, recipient],
+                        )?;
+                        invalid.push(json!({"key":key,"recipient":recipient,"error":e.message}));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let id = card["card"]["id"].as_i64().unwrap_or(0);
+                conn.execute(
+                    "UPDATE mote_events SET card_id=? WHERE store_id=? AND key=? AND recipient=?",
+                    params![id, store_id, key, recipient],
+                )?;
+                created.push(id);
+            }
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('mote_cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [cursor],
+            )?;
+            conn.execute("DELETE FROM meta WHERE key='mote_sync_timeouts'", [])?;
+            unknown.sort();
+            unknown.dedup();
+            Ok(
+                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"cursor":cursor,"synced_by":actor}),
+            )
+        }
+        "mote_sync_failed" => {
+            // Consecutive timed-out syncs; the client reseeds at the tail after
+            // three, and reconciliation covers the gap.
+            check_fields(a, &[])?;
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('mote_sync_timeouts','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
+                [],
+            )?;
+            let n: i64 = conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='mote_sync_timeouts'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(json!({"consecutive_timeouts":n}))
+        }
         "set_status" => {
             // One current status line per agent, updated in place; empty clears.
             check_fields(a, &["text"])?;
@@ -2046,7 +2260,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2669,6 +2883,18 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
         || a.starts_with(&format!("{b}/"))
 }
 
+/// At most `max` bytes, cut on a character boundary, marked when cut.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max.saturating_sub('…'.len_utf8());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 /// The Mote store this board is bound to, or null.
 fn mote_binding(conn: &Connection) -> Result<Value> {
     let get = |key: &str| -> Result<Option<String>> {
@@ -2677,7 +2903,9 @@ fn mote_binding(conn: &Connection) -> Result<Value> {
             .optional()?)
     };
     Ok(match (get("mote_store")?, get("mote_store_id")?) {
-        (Some(store), Some(store_id)) => json!({"store":store,"store_id":store_id}),
+        (Some(store), Some(store_id)) => json!({"store":store,"store_id":store_id,
+            "cursor":get("mote_cursor")?,
+            "consecutive_timeouts":get("mote_sync_timeouts")?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0)}),
         _ => Value::Null,
     })
 }

@@ -189,4 +189,24 @@ CREATE TABLE IF NOT EXISTS agent_waits(
     session TEXT,
     refreshed_ms INTEGER NOT NULL
 );
+-- Mote events already turned into attention, once per recipient
+-- (docs/design/mote-adapter.md section 6). Additive: a board without Mote
+-- never writes here.
+CREATE TABLE IF NOT EXISTS mote_events(
+    store_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    card_id INTEGER REFERENCES cards(id),
+    PRIMARY KEY(store_id, key, recipient)
+);
+-- The last Mote claim holder Fray has seen per entity: seeded from Mote's
+-- board on first sync, then kept by the claim events in the same transaction
+-- as the cursor. It only decides who hears that a claim changed hands.
+CREATE TABLE IF NOT EXISTS mote_claims(
+    store_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    holder TEXT,
+    op_id TEXT NOT NULL,
+    PRIMARY KEY(store_id, entity)
+);
 PRAGMA user_version = 3;
