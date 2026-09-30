@@ -1,6 +1,6 @@
 # Design: the Mote adapter contract
 
-Status: revision 3 (2026-09-30), for re-review. Epic child 5, Mote
+Status: revision 4 (2026-09-30), for re-review. Epic child 5, Mote
 bd-01M3RZ9BW6K159Y3AAQR2NF99A. Children 1 (review and landing), 4 (git guard)
 and 6 (dispatch and handoff) depend on it.
 
@@ -85,6 +85,22 @@ scratch stores on 2026-09-30. Citations are to `/Users/bbuchsbaum/code/rust/mote
     adopt it (`reducer.rs:3640-3700`, verified with a third party). Mote's own
     skill tells agents to adopt orphans, and `mote audit` lists them.
   - Anyone can close an issue, including a carrier claimed by someone else.
+    So a deliberate actor can still close an open carrier and adopt its
+    reservation. The adapter detects this through confirmation and
+    reconciliation; it cannot prevent it.
+- **Where state lives in JSON output** (verified; fray #43).
+  - **Claims.** `show --json` and `ls --json` carry no claim. The live
+    holder is in `board --json` under `.active_claims[].claimed_by`. The op
+    that produced a claim is the last accepted `kind=claim` entry of `mote
+    history --json ID`, or the `op_id` of its `claim.acquired` event.
+  - **Reservations.** `who-has` and `board` give no clock, and a reservation
+    keeps its id across adoptions. Every adopt resets `lease_until_ts`, so
+    holder plus lease identifies a state.
+  - **Candidates.** `candidate show --json` gives `.phase.op_id`. Reviews,
+    evidence and authorization change landability without a new phase op.
+  - `who-has` replays the store on every call, so it is accurate when it
+    runs. It is not final: an op stamped earlier but published later can
+    still change the answer.
   - Paths are case-sensitive and literal, `.` is rejected, and `Src/a.rs` does
     not overlap `src/`.
 - **Handoff.**
@@ -174,8 +190,9 @@ Candidate reviews follow the rule in 7.3.
   the reservation is already present, so it is reported as present, not
   created again.
 - **claim and unreserve.** A retry is naturally safe.
-- **handoff.** Before sending, and before any retry, the adapter reads `show`
-  and proceeds only while the sender still holds the claim. If the intended
+- **handoff.** Before sending, and before any retry, the adapter reads
+  `board --json` (`.active_claims[].claimed_by` for the work issue) and
+  proceeds only while the sender still holds the claim. If the intended
   recipient already holds it, the handoff is done.
 
 ### 6. Mote to Fray attention [D1, D2, D3]
@@ -214,12 +231,16 @@ Candidate reviews follow the rule in 7.3.
   agent's claims and reservations (`mote ls`, `who-has`), and the candidates
   where the agent is proposer, named reviewer or authorizer (`candidate list`
   and `candidate show`), against the attention cards it holds. A wrong card
-  is superseded with a note. A missing one is created. Both paths key a
-  state by `state:<entity>:<op_id>`, where `op_id` is the op that produced
-  the observed state (claim or phase op, or reservation id). So a card from
-  the event feed and a card from reconciliation dedupe against each other,
-  and a state that recurs (A, then B, then A) is still reported, because its
-  op differs.
+  is superseded with a note. A missing one is created. The event path
+  and reconciliation key a state the same way, so their cards dedupe against
+  each other, and a state that recurs (A, then B, then A) is still reported,
+  because its key differs:
+
+  | Entity | State key | Source |
+  |---|---|---|
+  | Claim | `claim:<issue>:<op_id>` | last accepted `kind=claim` entry of `mote history --json`, or the `claim.acquired` event's `op_id` |
+  | Reservation | `rv:<rv>:<actor>:<lease_until_ts>` | `who-has --json` or the reservation event; each adopt resets the lease |
+  | Candidate | `cand:<id>:<phase.op_id>:<latest op>` | `candidate show --json`; `latest op` is the greatest op id across `reviews[]`, `authorization` and `evidence`, so "became landable" and "review requested" within one phase are not deduped away |
 - **Clock skew.** An op stamped in the future sorts after later-arriving ops.
   The cursor may then skip them, and reconciliation is what catches them.
 - **Mote ownership in cards.** A Fray card produced from Mote carries
@@ -363,4 +384,8 @@ stores. They cover:
 - adopt always passes `--ttl`, so the lease is not reset to the default;
 - a verdict from an unnamed reviewer, and one for a mismatched SHA: both
   recorded on the board, neither mirrored, with the reason shown;
-- a keyed review retried after a timeout, replayed byte-identically.
+- a keyed review retried after a timeout, replayed byte-identically;
+- a candidate that becomes landable within one phase (a review or evidence
+  arrives, with no phase op), reported once;
+- the handoff holder check reading `board --json`, including an unclaimed
+  work issue.
