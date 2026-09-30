@@ -265,7 +265,19 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
         }
     };
     let mut reader = BufReader::new(reader);
-    while let Some(line) = read_frame(&mut reader, REQUEST_LIMIT)? {
+    // The first byte of a request that a finite wait's hang-up observer read
+    // after the wait had replied. It begins the next frame.
+    let mut carry = Vec::new();
+    loop {
+        let frame = if carry.is_empty() {
+            read_frame(&mut reader, REQUEST_LIMIT)?
+        } else {
+            let pending = std::mem::take(&mut carry);
+            read_frame(&mut pending.as_slice().chain(&mut reader), REQUEST_LIMIT)?
+        };
+        let Some(line) = frame else {
+            break;
+        };
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
@@ -314,27 +326,21 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
             }
             "wait" => {
                 let indefinite = req.args.get("timeout") == Some(&Value::Null);
-                let result = if !reader.buffer().is_empty() {
-                    Err(Error::new(
-                        "protocol",
-                        "wait cannot be pipelined with further requests",
-                    ))
-                } else if req.args["timeout"] == 0 {
-                    wait(shared, &req, None, None)
+                let terminal = if reader.buffer().is_empty() && req.args["timeout"] != 0 {
+                    wait_cancellable(&mut stream, shared, &req, indefinite, &mut carry)?
                 } else {
-                    wait_cancellable(&stream, shared, &req, indefinite)
+                    let result = if !reader.buffer().is_empty() {
+                        Err(Error::new(
+                            "protocol",
+                            "wait cannot be pipelined with further requests",
+                        ))
+                    } else {
+                        wait(shared, &req, None, None)
+                    };
+                    let terminal = wait_terminal(indefinite, &result);
+                    write_frame(&mut stream, &wait_reply(result))?;
+                    terminal
                 };
-                let terminal = indefinite
-                    || result
-                        .as_ref()
-                        .is_err_and(|e| matches!(e.code.as_str(), "protocol" | "unavailable"));
-                write_frame(
-                    &mut stream,
-                    &match result {
-                        Ok(v) => success(v),
-                        Err(e) => failure(e),
-                    },
-                )?;
                 if terminal {
                     return Ok(());
                 }
@@ -388,12 +394,34 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
     }
     Ok(())
 }
+/// A wait error that ends the connection, and every indefinite wait.
+fn wait_terminal(indefinite: bool, result: &Result<Value>) -> bool {
+    indefinite
+        || result
+            .as_ref()
+            .is_err_and(|e| matches!(e.code.as_str(), "protocol" | "unavailable"))
+}
+fn wait_reply(result: Result<Value>) -> Value {
+    match result {
+        Ok(v) => success(v),
+        Err(e) => failure(e),
+    }
+}
+/// Runs a wait that the client's hang-up cancels, and replies. Returns whether
+/// the connection ends here.
+///
+/// The reply is written as soon as the wait returns, before the hang-up
+/// observer is joined: a finite wait's observer can be inside a bounded read,
+/// and joining it first delayed every finite wait by up to that bound. A byte
+/// the observer reads after the reply begins the client's next request, so it
+/// is handed back through `carry` rather than treated as pipelining.
 fn wait_cancellable(
-    stream: &UnixStream,
+    stream: &mut UnixStream,
     shared: &Shared,
     req: &Request,
     indefinite: bool,
-) -> Result<Value> {
+    carry: &mut Vec<u8>,
+) -> Result<bool> {
     let mut hangup = clone_for_client(stream)?;
     // Finite waits preserve sequential requests on the same connection. A bounded
     // socket read lets this EOF observer stop without shutting down that socket.
@@ -407,47 +435,55 @@ fn wait_cancellable(
     let cancelled = AtomicBool::new(false);
     let unexpected_input = AtomicBool::new(false);
     let finished = AtomicBool::new(false);
-    let result = thread::scope(|scope| {
+    let carried = Mutex::new(None);
+    let written = thread::scope(|scope| {
         scope.spawn(|| {
+            let mut byte = [0u8; 1];
             while !finished.load(Ordering::SeqCst) {
-                match hangup.read(&mut [0u8; 1]) {
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock
-                                | io::ErrorKind::TimedOut
-                                | io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        continue
-                    }
-                    input => {
-                        let _guard = shared.store.lock();
-                        unexpected_input.store(matches!(input, Ok(n) if n > 0), Ordering::SeqCst);
-                        cancelled.store(true, Ordering::SeqCst);
-                        shared.changed.notify_all();
-                        return;
-                    }
+                let input = hangup.read(&mut byte);
+                if matches!(&input, Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted))
+                {
+                    continue;
                 }
+                // `finished` is set before the reply is written, and a client
+                // sends its next request only after reading the reply. Input
+                // seen once finished is therefore that next request.
+                if finished.load(Ordering::SeqCst) {
+                    if matches!(input, Ok(1)) {
+                        *carried.lock().unwrap_or_else(|e| e.into_inner()) = Some(byte[0]);
+                    }
+                    return;
+                }
+                let _guard = shared.store.lock();
+                unexpected_input.store(matches!(input, Ok(n) if n > 0), Ordering::SeqCst);
+                cancelled.store(true, Ordering::SeqCst);
+                shared.changed.notify_all();
+                return;
             }
         });
-        let result = wait(shared, req, Some(&cancelled), Some(&unexpected_input));
+        let mut result = wait(shared, req, Some(&cancelled), Some(&unexpected_input));
+        if unexpected_input.load(Ordering::SeqCst) {
+            result = Err(Error::new(
+                "protocol",
+                "wait is receive-only until its response; use a separate connection for other requests",
+            ));
+        }
+        let terminal = wait_terminal(indefinite, &result);
         finished.store(true, Ordering::SeqCst);
-        if indefinite {
+        let written = write_frame(stream, &wait_reply(result));
+        if terminal {
+            // Nothing more is read on this connection; release the observer now.
             let _ = stream.shutdown(Shutdown::Read);
         }
-        result
+        written.map(|()| terminal)
     });
+    if let Some(byte) = carried.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        carry.push(byte);
+    }
     if !indefinite {
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     }
-    if unexpected_input.load(Ordering::SeqCst) {
-        return Err(Error::new(
-            "protocol",
-            "wait is receive-only until its response; use a separate connection for other requests",
-        ));
-    }
-    result
+    written
 }
 fn wait(
     shared: &Shared,
