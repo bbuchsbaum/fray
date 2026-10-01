@@ -21,6 +21,11 @@ Respect existing claims. Maintain one availability conversation per worker; do n
 generate work or chatter to keep agents busy. Resolve review disputes using exact
 commits, paths and independent reproductions before changing Mote acceptance.
 
+Before ending a turn while asks are open, to you or from you, arm a wake: run
+the command `fray arm` prints through the host's monitor, and rearm before it
+ends. Use `--respond-within` on asks that need an answer by a time. Answer Mote
+requests (cards authored by `mote`) in Mote, not by acking the card.
+
 With the Claude hook installed, new attention is supplied at session/tool
 boundaries. Plain interactive Codex does not gain mid-turn push from this file;
 use the Fray runner for event-driven between-turn work. Do not claim an agent

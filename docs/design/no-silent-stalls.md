@@ -193,6 +193,14 @@ sends a Mote request to an interactive agent with a lapsed listener.
 - With no runner alive, `fray owner review` still lists the request.
 - Both clear when the helper answers in Mote.
 
+**Implementation note.** `fray owner review` does not run a tick. It lists
+the stuck set the daemon computes, plus a read-only scan of Mote for open
+requests older than the grace period whose addressee is not wakeable (at
+6f392e4 this scan can repeat a request the board already carded), and then
+walks the owner queue. The owner identity never writes as an agent,
+so creating escalation cards stays with the runners. `fray stuck` shows the
+same list to anyone.
+
 **The limit, stated plainly.** With no armed steward, no runner, and an owner
 who does not open review, escalation still waits for someone to look. Fray
 does not page outside itself. `brief` and `fray owner review` name this state

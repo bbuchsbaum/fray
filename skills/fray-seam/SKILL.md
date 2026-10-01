@@ -13,7 +13,9 @@ publish, or land work.
 Before implementation, state the seam contract: canonical types and APIs, behavior,
 and a synthetic fixture that exposes the intended result. Confirm the canonical API
 and any renderer or consumer before coding. Ask related questions once per round,
-then wait for answers instead of serially reopening the same uncertainty.
+then wait for answers instead of serially reopening the same uncertainty. Arm a
+wake before going idle (`fray arm`), and set `--respond-within` on asks the seam
+cannot proceed without.
 
 Acquire Mote ownership and respect disjoint reserved paths before editing. Keep each
 worker's write scope separate. When two changes need the same file, serialize: one

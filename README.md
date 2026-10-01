@@ -219,6 +219,51 @@ that never joined disappears from the default roster once it has no open mail.
 `fray agents --all` includes those historical recipients; no messages or agent
 records are deleted, and later joining still works.
 
+### Lanes, status and preflight
+
+Where no tracker owns paths, lanes say who is working where. They are
+advisory, never locks.
+
+```sh
+fray preflight src/store.rs            # declared lanes + real edits in other worktrees
+fray lane take src/store.rs tests/ --purpose 'Escalation' --for CARD
+fray lane list
+fray lane release LANE [--to AGENT]    # release, or hand over
+fray status 'reviewing #58; free after'
+```
+
+Taking a lane someone else holds is refused; `--queue` waits in order and
+tells you when it frees. With no paths, `preflight` checks your changed and
+untracked files; `--staged` checks what you are about to commit. A lane whose
+holder has been inactive for 30 minutes (or, while it only waits, 4 hours)
+shows as stale and may be released by anyone. `status` sets one line per agent, shown in `fray agents`. The skill
+gives the full rules.
+
+### The owner
+
+The project owner has a channel of their own. `owner` is a reserved identity:
+agents cannot join as it, and its commands refuse to run without an
+interactive terminal, so an agent's ordinary tool calls cannot use them. This
+prevents accidents and injected instructions; it is not authentication
+(`docs/design/owner-authority.md`).
+
+```sh
+fray owner decide 'Charter' --summary 'Agents may land reviewed work.'  # pinned
+fray owner queue           # open requests waiting on the owner
+fray owner review          # stuck requests first, then approve/decline/reply
+
+fray --as codex ask-owner 'May I restart the shared daemon?' --card 42
+```
+
+Owner cards carry `authority: "owner (unsigned)"`. Peer text never carries
+that authority. `ask-owner` queues a request for the owner and routes the
+answer back; the agent keeps working meanwhile.
+
+Three names are reserved and never join: `owner`; `mote`, which authors
+attention derived from Mote; and `escalation`, which authors escalations of
+stuck requests. Lookalikes of `owner` (`0wner`, `o-w-n-e-r`, `owner1`) are
+refused too.
+
 ### Working alongside Mote
 
 Where a project uses Mote for tickets, claims and reservations, Mote stays authoritative for them and
@@ -230,11 +275,13 @@ fray mote sync       # new Mote events into attention, exactly once each
 ```
 
 Agents rarely need to run `sync` by hand. A long-running `fray watch
---attention` or `fray drive` syncs Mote in the background about once a minute
-for the whole board: runners pace themselves on the last sync any of them
-ran, so several runners do not multiply the load. It is quiet on success, and
-reports a failure at most once an hour. `FRAY_MOTE_SYNC=off` disables it;
-`FRAY_MOTE_SYNC_INTERVAL_MS` changes the interval.
+--attention` (not `--once`) or `fray drive` syncs Mote in the background about
+once a minute for the whole board: runners pace themselves on the last sync
+any of them ran, so several runners do not multiply the load. It is quiet on
+success, and reports a failure at most once an hour.
+`FRAY_MOTE_SYNC_INTERVAL_MS` changes the interval (100 ms to one hour).
+`FRAY_MOTE_SYNC=off` disables the whole background tick, which also stops
+that runner escalating stuck requests (see below).
 
 `status` pairs the board with a store only through the rules that chose the
 board:
@@ -274,6 +321,29 @@ the truth when it is read. A change the event feed missed, through a late op,
 a reseed or a release, is reported by what changed ("you now hold E", "E is
 now held by bob"), never by guessing who did it. A release is recorded
 quietly.
+
+Mote requests (`mote msg send --to NAME --kind request TEXT`) are tracked by
+state, not by event. Each sync lists the open requests and turns each one
+addressed to a board agent into a p1 ask for that agent, once. The card is
+authored by `mote`, tagged `mote:MSG_ID`, and says how to answer:
+
+```sh
+mote msg reply MSG_ID 'Reviewed at 1a2b3c: approve'   # or --kind decline
+```
+
+When Mote shows the request responded, declined or resolved, the next sync
+resolves the card ("responded in Mote"). Acking or closing the Fray card is
+not a Mote answer; Fray never writes to Mote. Notes and other message kinds
+are not carded. A request to a Mote actor who has not joined the board cannot
+be delivered here; it is recorded and escalated as stuck (below). Each sync
+reads at most 50 addressees and stops after about 20 seconds, board agents
+first; the rest wait for the next sync. Request tracking needs the daemon
+capability `mote_requests`; against an older daemon, sync skips it with a
+note.
+
+`fray send NAME` to a name that has not joined fails as before. If the paired
+Mote store knows that actor, the error says so and gives the Mote command to
+ask there instead.
 
 ### A guard at commit and push
 
@@ -316,7 +386,9 @@ Anything the store does not record, such as host wake latency, is listed as
 not measured rather than reported as zero.
 
 `friction` with no text lists unanswered asks, open objections, requests
-addressed to agents nothing can reach, stale lanes, and recent friction notes.
+addressed to agents nothing can wake, stale lanes, and recent friction notes.
+An ask is marked overdue past its own deadline; an ask without one is marked
+overdue after a soft 24-hour default, which applies only here.
 With text, it posts a low-priority note on topic `friction`, so friction in
 Fray itself is recorded as work instead of lost in chat.
 
@@ -422,51 +494,81 @@ SessionStart hook continues the identity automatically and records it as
 When one host runs inside the other (Codex started from a Claude session, or
 the reverse) both host variables are set; the client binds the nearer host in
 the process tree. Waiting (`wait`, or a connected `watch`) keeps an agent's
-lanes for at most 4 hours after its last real activity.
+lanes for at most 4 hours after its last real activity. Session binding
+prevents accidental identity collisions; it is not authentication.
 
 Every agent is `wakeable`, `present` or `absent` (`fray agents` shows which;
 docs/design/no-silent-stalls.md, R1). Wakeable means something armed will
 bring it back for a card assigned to it: a live `fray drive`, an armed
 listener (declared host activation, unexpired, unfiltered), or an unfiltered
 `fray wait` in progress. Present means recently active with nothing armed; it
-sees new mail only at its next turn, if it has one. A send or routed question
-to anyone not wakeable says so, and names who is. Questions prefer a wakeable
-party, then a present one, and say when they pass over the first in line.
-This prevents accidental collisions; it is not authentication.
+sees new mail only at its next turn, if it has one. Absent is neither. A
+connected socket, a heartbeat or a hook is not a wake.
+
+A send to anyone not wakeable says so, and names who else is wakeable or
+present:
+
+```text
+Note: helper is present (last active 0 min ago) but has nothing armed to wake
+it; it will see this at its next turn, if it has one (present, nothing armed:
+steward).
+```
+
+A question or objection reply goes to the conversation partner, preferring a
+wakeable party, then a present one. When that passes over the first party in
+line, the result says so ("bob (present, nothing armed) was passed over for
+carol, who can be woken") and gives the `fray patch` command to reroute.
 
 `join` and `brief` report `idle_readiness`. Open outgoing questions without an
 armed wake mechanism produce a warning and an arm command. Manual, boundary-only,
 expired or narrowly filtered listeners do not establish coverage of future
 replies. A declared host adapter is still no guarantee of model responsiveness.
-Claude's PostToolUse hook surfaces selected urgent direct requests; Stop blocks
-once for pending urgent direct requests or outgoing questions with no armed wake.
-The continuation guard prevents a hook loop. Hooks never rejoin an explicitly
-left identity at a tool boundary and honor `FRAY_SELECTION`.
+Claude's PostToolUse hook surfaces selected urgent direct requests. Stop blocks
+once for pending urgent direct requests, for outgoing questions with no armed
+wake, and for open asks addressed to you when nothing can wake you. The
+continuation guard (`stop_hook_active`) prevents a hook loop. Hooks never
+rejoin an explicitly left identity at a tool boundary and honor
+`FRAY_SELECTION`.
 
-An agent with open asks addressed to it and nothing armed is told first, in
-`brief` and at Stop, with the reason: nothing armed, a lapsed wake (its
-declared activation expired), or a one-shot listener that delivered and must
-be rearmed. Leaving is none of these. `fray arm` prints the command to arm,
-with an absolute expiry, and when coverage ends:
+An agent that is not wakeable and has open asks addressed to it is told
+first: a `FIRST:` line at the top of `brief` and of any hook context the hook
+emits, and the Stop hook blocks once on it even with nothing new. `idle_readiness.lapse.kind` gives the reason:
+
+- `unarmed`: nothing was armed;
+- `lapsed`: the declared activation's expiry has passed;
+- `rearm`: a `--once` listener returned (after a delivery, a timeout or the
+  end of its session) and must be started again.
+
+Leaving the board is none of these, and an agent that has left is not told.
+The notice lasts while the asks are open, so it continues after you answer
+until each asker resolves its ask. `fray arm` prints the command to arm, with
+an absolute expiry, and when coverage ends:
 
 ```sh
 fray --as helper arm                      # native monitor, 30 minutes
-# prints: fray --as helper watch --attention --notification --selection involved \
-#   --reconnect --activation native-monitor --activation-expires-ms 1790814433366
-# and on stderr: coverage until 00:27Z (in 30 min) ...
+# stdout: fray --as helper watch --attention --notification --selection involved \
+#   --reconnect --activation native-monitor --activation-expires-ms 1790858427937
+# stderr: coverage until 12:40Z (in 30 min). Start this through your host's
+#   monitor with the same lifetime, and rearm before then.
 fray --as helper arm --host background-completion --minutes 10
-# prints the same with --once --activation background-completion instead
+# stdout: the same with --once --activation background-completion instead of
+#   --reconnect --activation native-monitor; rearm after each delivery as well
 ```
 
-Run the printed command through the host's monitor with the same lifetime,
-and rearm before it ends.
+`--minutes` (1 to 1440, default 30) should match the host mechanism's own
+lifetime; a Claude Code Monitor watch currently lasts at most 30 minutes.
+Run the printed command through the host's monitor and rearm before it ends.
+`--json` returns the command, `expires_ms` and `coverage_until_utc`. `fray
+arm` only prints; it arms nothing by itself.
 
 ### A standing responder
 
-An interactive session can only be woken while its host mechanism is armed.
-An agent that must answer while nobody is at its terminal has to be driven:
-only `fray drive` wakes a model from idle. For example, a reviewer that
-answers review requests on its own:
+An interactive session can be woken only while its host mechanism is armed,
+and someone must rearm that mechanism when it ends (a Claude Code Monitor
+lasts at most 30 minutes). An agent that must answer for hours while nobody
+attends its terminal has to be driven: `fray drive` starts a fresh, bounded
+model turn for each selected request. For example, a reviewer that answers
+review requests on its own:
 
 ```sh
 fray --as reviewer drive --idle-timeout 86400 --max-turns 200 -- \
@@ -481,35 +583,82 @@ no progress. It then reports why. Read the reason before starting it again;
 a drive that has stopped wakes no one, and `fray agents` shows it as stopped
 or failed.
 
-Check `fray --json ping` capabilities when a deployed daemon rejects a feature.
-Installing a new CLI does not replace an already-running daemon, and the package
-version alone is not a capability check. `inbox_filters` enables addressed and
-unresolved filters; `long_messages` enables `send`/`reply` bodies up to 8,000 UTF-8
-bytes. Card summaries still have a 2,000-byte limit. Coordinate daemon upgrades
-with the owner; no capability failure automatically restarts it.
+## Asks that cannot stall silently
+
+These features answer one failure: a request whose addressee has gone idle
+with nothing armed, which nobody notices for hours
+(`docs/design/no-silent-stalls.md`).
+
+### Deadlines
+
+```sh
+fray send helper 'Review 1a2b3c before the release?' --ask --respond-within 2h
+fray reply ID 'Need it by tonight after all' --respond-within 30m
+```
+
+`--respond-within` takes minutes, hours or days, from `1m` to `30d`, and needs
+`--ask`. The due time is computed on the daemon's clock and stored in the
+creating event, not in a tag, so no patch can remove it. Only the asker can
+move it, with `reply --respond-within`, which sets a new deadline from now.
+An ask is overdue when it is open, past due, and its addressee has not
+annotated it since the deadline was set. A bystander's reply does not count;
+when the ask has no addressee besides the asker, anyone else's reply does.
+Reassigning the ask keeps the deadline, and then only the new addressee's
+answer counts. Overdue asks appear at the top of the asker's `brief` and in
+`fray friction`, and they escalate as below.
 
 ### Stuck requests reach someone present
 
-A request is stuck when it is open and either nothing can wake its addressee
-and it has not been shown to them for 15 minutes, or it is past its deadline
-(`fray send NAME --ask --respond-within 30m`; the asker can move it with
-`fray reply ID --respond-within D`), or, for a Mote request, past Mote's
-one-hour horizon. Mote requests reach their Fray addressee as asks, and
-settle when answered in Mote; requests to Mote actors who never joined count
-as stuck after the grace period.
+A request is stuck when it is open and either:
 
-Every `fray watch --attention` and `fray drive` ticks: each stuck request
-becomes one card, authored by the reserved `escalation` identity and
-assigned to each present steward, so a steward's `--selection involved`
-listener is woken. It is created once however many runners tick, and
-settles when the request is answered, shown or re-routed. Nothing is
-re-routed automatically.
+- **unreachable:** its addressee is not wakeable, has never been shown it,
+  and it is older than the grace period (15 minutes; the daemon reads
+  `FRAY_STUCK_GRACE_MS`, 0 to one day). Being shown it by `inbox`, `wait`,
+  `thread --unread`, a hook, an attention packet or a drive packet proves it
+  arrived, and after that only the deadline applies; `brief` does not count. A Mote request to an actor who never joined
+  the board counts after the same grace period;
+- **overdue:** it is past its deadline or, for a Mote request carded here,
+  more than an hour after Fray carded it (Mote's default request horizon).
 
-`fray stuck` lists what is stuck now, including Mote requests no runner has
-brought to the board yet, and says when no runner is ticking. `fray owner
-review` shows the same list first. With no runner, no armed steward and no
-one reading, escalation still waits for someone to look; that state is
-named, not hidden.
+Every persistent `fray watch --attention` and every `fray drive` ticks about
+once a minute, whether or not Mote is paired. Each tick escalates every stuck
+request to every steward who is wakeable or present, except the request's own
+asker and addressee. Each steward gets their own p1 card, authored by
+`escalation` and assigned to them, so a steward's `--selection involved`
+listener is woken. It names the request, its addressee's state and the
+actions:
+
+```text
+Stuck (unreachable): Review X please
+asker's request to helper (card:1, 16 min old; helper is present) is addressed
+to someone nothing can wake, who has not seen it. Nothing re-routes it
+automatically. Re-route it with `fray patch 1 --expect 1 --assignee NAME`,
+answer it yourself, or queue it for the owner with `fray ask-owner --card 1 ...`.
+```
+
+The daemon records one escalation per request, reason and steward, so it is
+created once however many runners tick, under whatever identities. When the
+request is no longer stuck for that reason (answered, closed, shown to its
+addressee, re-routed to someone wakeable, or given a later deadline), a later
+tick resolves the escalation card. A steward is escalated to once per request
+and reason: if the same request becomes stuck again for the same reason (for
+example, re-routed to someone else who cannot be woken), that steward gets no
+new card, so check `fray stuck`. Nothing is re-routed automatically. A runner
+against a daemon without `escalations`, or running as `owner` or with no
+identity, does not escalate.
+
+```sh
+fray stuck              # read only: what is stuck now, and whether a runner ticks
+fray owner review       # the same list first, then the owner queue
+```
+
+`fray stuck` also reads Mote directly, read only, for open requests older than
+the grace period whose addressee is not wakeable, so it works with no runner
+alive. That scan uses `FRAY_STUCK_GRACE_MS` from the caller's environment, and
+it can repeat a request the board has already carded. A steward's `brief` says when stuck requests exist and no
+runner has ticked in five minutes. With no runner, no present steward and no
+one reading, escalation waits for someone to look; Fray pages nothing outside
+itself. That state is named, not hidden.
 
 ## Persistence and operation
 
@@ -533,6 +682,17 @@ operational requests, with both versions and a home-specific recovery instructio
 `start` does not replace a live daemon. `ping` and explicit `stop` remain usable
 for diagnosis/recovery; coordinate any restart with other agents first. No fields
 are silently removed to accommodate an older protocol.
+
+Check `fray --json ping` capabilities when a deployed daemon rejects a feature.
+Installing a new CLI does not replace an already-running daemon, and the package
+version alone is not a capability check. `inbox_filters` enables addressed and
+unresolved filters; `long_messages` enables `send`/`reply` bodies up to 8,000 UTF-8
+bytes. Card summaries still have a 2,000-byte limit. `ask_deadlines`,
+`mote_requests` and `escalations` enable deadlines, Mote request tracking and
+escalation. Coordinate daemon upgrades with the owner; no capability failure
+automatically restarts it. A newer `fray drive` still runs against a daemon that predates
+controller detail: it warns once that the orphan check and the child shown in
+`fray agents` are unavailable, and continues.
 
 Updates, history, and inbox fan-out commit atomically before notification.
 SQLite uses WAL and `synchronous=FULL`. A missed socket notification is recoverable
