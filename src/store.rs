@@ -2475,6 +2475,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                             "INSERT INTO mote_requests(store_id,msg_id,recipient,card_id,state) VALUES(?,?,?,?,'open')",
                             params![store_id, msg_id, recipient, id],
                         )?;
+                        // Carded now (the addressee joined): no longer an
+                        // unknown-recipient request.
+                        conn.execute(
+                            "DELETE FROM mote_requests_unknown WHERE store_id=? AND msg_id=? AND recipient=?",
+                            params![store_id, msg_id, recipient],
+                        )?;
                         created.push(id);
                     }
                     (Some((card_id, _)), answered) => {
@@ -4222,7 +4228,7 @@ fn tick_state(conn: &Connection, now: i64) -> Result<(Option<i64>, bool)> {
 pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let mut s = conn.prepare(&format!(
-        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND (json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question' OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id LIMIT 1000"
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND ((c.assignee IS NOT NULL AND c.assignee<>c.author AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question') OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id LIMIT 1000"
     ))?;
     let ids = s
         .query_map(params![OWNER, ESCALATION], |r| r.get::<_, i64>(0))?

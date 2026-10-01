@@ -326,3 +326,50 @@ fn escalations_are_bounded_per_tick() {
     let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 21 * MIN);
     assert_eq!(t["created"].as_array().unwrap().len(), 10, "{t}");
 }
+
+/// Review of a8dabdf: a Mote request to someone who joins later is carded
+/// and listed once, not also as a request to an unknown actor.
+#[test]
+fn a_request_carded_after_its_addressee_joins_is_listed_once() {
+    let mut s = board();
+    at(
+        &mut s,
+        "alice",
+        "mote_bind",
+        json!({"store":"/r/.mote","store_id":"st-A"}),
+        NOW,
+    );
+    let req = json!({"store_id":"st-A","requests":[{"msg_id":"msg-9","recipient":"yan","from":"alice","state":"open","body":"x"}]});
+    at(&mut s, "runner", "mote_requests_sync", req.clone(), NOW);
+    at(&mut s, "yan", "join", json!({"topics":[]}), NOW + MIN);
+    at(&mut s, "runner", "mote_requests_sync", req, NOW + MIN);
+    let st = at(&mut s, "alice", "stuck_requests", json!({}), NOW + 40 * MIN);
+    let subjects: Vec<&str> = st["stuck"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["subject"].as_str())
+        .collect();
+    assert_eq!(subjects.len(), 1, "{subjects:?}");
+    assert!(subjects[0].starts_with("card:"), "{subjects:?}");
+}
+
+/// Review of a8dabdf: asks that can never be stuck (unassigned, no
+/// deadline) do not crowd a stuck one out of the scan.
+#[test]
+fn unassigned_asks_without_deadlines_do_not_fill_the_scan() {
+    let mut s = board();
+    for _ in 0..1001 {
+        at(
+            &mut s,
+            "alice",
+            "post",
+            json!({"kind":"question","topic":"t","title":"anyone?","summary":"x"}),
+            NOW,
+        );
+    }
+    ask(&mut s, json!({}));
+    heartbeat(&mut s, NOW + 20 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
+    assert_eq!(t["stuck"], 1, "{t}");
+}
