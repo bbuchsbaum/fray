@@ -3894,7 +3894,7 @@ fn unarmed_reason(listening: &Value, now: i64) -> (&'static str, String) {
     if listening["once"] == true && listening["live"] != true {
         return (
             "rearm",
-            "your one-shot listener delivered and returned; rearm it when you finish handling"
+            "your one-shot listener has returned (after a delivery, a timeout or the end of its session); rearm it when you finish handling"
                 .into(),
         );
     }
@@ -3917,13 +3917,20 @@ fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
         [actor],
         |r| r.get(0),
     )?;
-    if enabled && incoming > 0 && !armed {
+    // Wakeable by any means (R1), including an unfiltered wait in progress,
+    // is covered; the hint rearms the way this host last declared it wakes.
+    if enabled && incoming > 0 && reachability(conn, actor, now)? != Reach::Wakeable {
         let (kind, why) = unarmed_reason(&listening, now);
+        let arm = if listening["activation"] == "background-completion" {
+            format!("fray --as {actor} arm --host background-completion")
+        } else {
+            format!("fray --as {actor} arm")
+        };
         out["lapse"] = json!({
             "kind": kind,
             "open_asks_to_you": incoming,
-            "message": format!("{incoming} open ask(s) are addressed to you and {why}. When this turn ends nothing will bring you back for them. Run `fray --as {actor} arm` and start the command it prints through your host's monitor, or answer them now."),
-            "arm": format!("fray --as {actor} arm"),
+            "message": format!("{incoming} open ask(s) are addressed to you and {why}. When this turn ends nothing will bring you back for them. Run `{arm}` and start the command it prints through your host's monitor, or answer them now (an ask stays open until its author resolves it)."),
+            "arm": arm,
         });
     }
     Ok(out)

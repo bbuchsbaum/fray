@@ -219,10 +219,19 @@ fn a_lapse_is_told_apart_from_a_rearm_and_from_leaving() {
     s.listener_end("helper", "conn").unwrap();
     let l = lapse(&mut s, NOW + 33 * MIN);
     assert_eq!(l["kind"], "rearm", "{l}");
+    // The hint rearms the way this host wakes (#78).
+    assert_eq!(
+        l["arm"], "fray --as helper arm --host background-completion",
+        "{l}"
+    );
+    // An unfiltered wait in progress covers the agent: no lapse.
+    s.touch("helper", None, Some("w1"), NOW + 33 * MIN).unwrap();
+    assert!(lapse(&mut s, NOW + 33 * MIN).is_null());
+    s.wait_ended("w1").unwrap();
     // Having left, helper is told nothing.
     at(&mut s, "helper", "leave", json!({}), NOW + 34 * MIN);
-    assert!(s
+    let left = s
         .execute_at(&Request::new("brief", "helper", json!({})), NOW + 34 * MIN)
-        .map(|b| b["idle_readiness"]["lapse"].is_null())
-        .unwrap_or(true));
+        .unwrap_err();
+    assert_eq!(left.code, "not_joined");
 }

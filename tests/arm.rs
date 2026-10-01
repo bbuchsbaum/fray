@@ -135,4 +135,11 @@ fn the_printed_command_arms_and_an_unarmed_stop_is_told_first() {
     assert!(brief["idle_readiness"]["lapse"].is_null(), "{brief}");
     let _ = monitor.kill();
     let _ = monitor.wait();
+    // The background-completion hint prints a one-shot listener (#78).
+    let bg = b.json("helper", &["arm", "--host", "background-completion"]);
+    let bg = bg["arm"]["command"].as_str().unwrap();
+    assert!(
+        bg.contains("--once --activation background-completion") && !bg.contains("--reconnect"),
+        "{bg}"
+    );
 }

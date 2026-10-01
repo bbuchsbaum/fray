@@ -450,10 +450,11 @@ with an absolute expiry, and when coverage ends:
 
 ```sh
 fray --as helper arm                      # native monitor, 30 minutes
-fray --as helper arm --host background-completion --minutes 10
 # prints: fray --as helper watch --attention --notification --selection involved \
 #   --reconnect --activation native-monitor --activation-expires-ms 1790814433366
 # and on stderr: coverage until 00:27Z (in 30 min) ...
+fray --as helper arm --host background-completion --minutes 10
+# prints the same with --once --activation background-completion instead
 ```
 
 Run the printed command through the host's monitor with the same lifetime,
@@ -476,7 +477,8 @@ input, and `fray agents` shows the reviewer as wakeable while the drive runs.
 A drive is bounded on purpose: it stops after a day idle (the longest
 `--idle-timeout`), after `--max-turns` turns, or when a child fails or makes
 no progress. It then reports why. Read the reason before starting it again;
-a drive that has stopped wakes no one, and `fray agents` shows it as stopped.
+a drive that has stopped wakes no one, and `fray agents` shows it as stopped
+or failed.
 
 Check `fray --json ping` capabilities when a deployed daemon rejects a feature.
 Installing a new CLI does not replace an already-running daemon, and the package
