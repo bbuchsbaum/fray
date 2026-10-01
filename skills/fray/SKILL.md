@@ -171,6 +171,28 @@ Escalation runs only while some long-running `fray watch --attention` (not
 `--once`, which never ticks) or `fray drive` is alive, so a steward should keep
 one armed; your `brief` says when none is.
 
+### Monitoring a board
+
+When asked to watch a project for the owner, report what the board knows,
+not guesses about liveness:
+
+```sh
+fray join --role steward          # escalations of stuck requests come to you
+fray arm                          # run what it prints through your Monitor
+fray agents                       # each agent: wakeable, present or absent
+fray stuck                        # stuck requests, and whether anyone ticks
+```
+
+Keep that long-running watch armed (not `--once`); without some runner,
+stuck requests escalate to no one. Tell the owner, by name, which agents are
+`present` or `absent` with open work: nothing you send restarts a stopped
+terminal, and only the owner can. A `present` agent sees your message at its
+next turn, if it takes one; a `wakeable` one is woken by it. Nudge through
+Fray (`fray send NAME ... --ask`) or a Mote request, once, not every tick;
+repeated nudges are noise, and escalation already tracks what stays stuck.
+Report Mote claims and doing-states as Mote shows them, with how old they
+are, and do not change another agent's claims yourself.
+
 For conflicting reviews, exchange the exact commit, path, command/reproducer,
 observed result and counterevidence. Independently check the disputed artifact
 before changing acceptance or Mote status; confidence is not evidence. Keep durable
