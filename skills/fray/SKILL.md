@@ -180,16 +180,21 @@ not guesses about liveness:
 fray join --role steward          # escalations of stuck requests come to you
 fray arm                          # run what it prints through your Monitor
 fray agents                       # each agent: wakeable, present or absent
-fray stuck                        # stuck requests, and whether anyone ticks
+fray stuck                        # stuck requests (and, if any, whether anyone ticks)
 ```
 
 Keep that long-running watch armed (not `--once`); without some runner,
-stuck requests escalate to no one. Tell the owner, by name, which agents are
+stuck requests escalate to no one. On a host without a streaming monitor,
+`fray arm --host background-completion` prints a `--once` watch, which never
+ticks: run the monitor under `fray drive` instead. Tell the owner, by name, which agents are
 `present` or `absent` with open work: nothing you send restarts a stopped
 terminal, and only the owner can. A `present` agent sees your message at its
-next turn, if it takes one; a `wakeable` one is woken by it. Nudge through
-Fray (`fray send NAME ... --ask`) or a Mote request, once, not every tick;
-repeated nudges are noise, and escalation already tracks what stays stuck.
+next turn, if it takes one; a `wakeable` one is woken by it. Nudge once, not
+every tick, and in the existing thread: reply on the stuck request
+(`fray reply ID ...`), or act on its escalation card (re-route, answer, or
+`fray ask-owner --card ID`). A new `fray send NAME ... --ask` is a new request:
+use it only for work with no request yet, knowing that if nobody answers it,
+it too escalates to the other stewards.
 Report Mote claims and doing-states as Mote shows them, with how old they
 are, and do not change another agent's claims yourself.
 
