@@ -420,9 +420,17 @@ SessionStart hook continues the identity automatically and records it as
 "continued after /clear", so clearing does not lock you out.
 When one host runs inside the other (Codex started from a Claude session, or
 the reverse) both host variables are set; the client binds the nearer host in
-the process tree. Waiting (`wait`, or a connected `watch`) makes an agent
-reachable, so messages route to it, but keeps its lanes for at most 4 hours
-after its last real activity.
+the process tree. Waiting (`wait`, or a connected `watch`) keeps an agent's
+lanes for at most 4 hours after its last real activity.
+
+Every agent is `wakeable`, `present` or `absent` (`fray agents` shows which;
+docs/design/no-silent-stalls.md, R1). Wakeable means something armed will
+bring it back for a card assigned to it: a live `fray drive`, an armed
+listener (declared host activation, unexpired, unfiltered), or an unfiltered
+`fray wait` in progress. Present means recently active with nothing armed; it
+sees new mail only at its next turn, if it has one. A send or routed question
+to anyone not wakeable says so, and names who is. Questions prefer a wakeable
+party, then a present one, and say when they pass over the first in line.
 This prevents accidental collisions; it is not authentication.
 
 `join` and `brief` report `idle_readiness`. Open outgoing questions without an
@@ -433,6 +441,42 @@ Claude's PostToolUse hook surfaces selected urgent direct requests; Stop blocks
 once for pending urgent direct requests or outgoing questions with no armed wake.
 The continuation guard prevents a hook loop. Hooks never rejoin an explicitly
 left identity at a tool boundary and honor `FRAY_SELECTION`.
+
+An agent with open asks addressed to it and nothing armed is told first, in
+`brief` and at Stop, with the reason: nothing armed, a lapsed wake (its
+declared activation expired), or a one-shot listener that delivered and must
+be rearmed. Leaving is none of these. `fray arm` prints the command to arm,
+with an absolute expiry, and when coverage ends:
+
+```sh
+fray --as helper arm                      # native monitor, 30 minutes
+fray --as helper arm --host background-completion --minutes 10
+# prints: fray --as helper watch --attention --notification --selection involved \
+#   --reconnect --activation native-monitor --activation-expires-ms 1790814433366
+# and on stderr: coverage until 00:27Z (in 30 min) ...
+```
+
+Run the printed command through the host's monitor with the same lifetime,
+and rearm before it ends.
+
+### A standing responder
+
+An interactive session can only be woken while its host mechanism is armed.
+An agent that must answer while nobody is at its terminal has to be driven:
+only `fray drive` wakes a model from idle. For example, a reviewer that
+answers review requests on its own:
+
+```sh
+fray --as reviewer drive --idle-timeout 86400 --max-turns 200 -- \
+  claude -p --allowedTools 'Bash(fray:*)'
+```
+
+Each addressed request starts one bounded model turn with the packet as
+input, and `fray agents` shows the reviewer as wakeable while the drive runs.
+A drive is bounded on purpose: it stops after a day idle (the longest
+`--idle-timeout`), after `--max-turns` turns, or when a child fails or makes
+no progress. It then reports why. Read the reason before starting it again;
+a drive that has stopped wakes no one, and `fray agents` shows it as stopped.
 
 Check `fray --json ping` capabilities when a deployed daemon rejects a feature.
 Installing a new CLI does not replace an already-running daemon, and the package
