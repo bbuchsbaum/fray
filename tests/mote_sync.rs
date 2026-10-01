@@ -1386,3 +1386,98 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
     let _ = watch.wait();
     assert!(heard.is_some(), "bob's watch never showed the handoff");
 }
+
+/// No silent stalls R2: an open Mote request reaches its Fray addressee as an
+/// ask, once; when it is answered in Mote the card settles; notes are not
+/// carded; a request to an actor not on the board is reported unknown.
+#[test]
+fn a_mote_request_is_carded_once_and_settles_when_answered_in_mote() {
+    let Some(p) = Project::new("mreq") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    let send = |from: &str, to: &str, kind: &str, body: &str| -> String {
+        let out = p.mote(
+            from,
+            &["msg", "send", "--to", to, "--kind", kind, body, "--json"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["msg_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let req = send("alice", "bob", "request", "Review abc123 please");
+    send("alice", "bob", "note", "just so you know");
+    send("alice", "zed", "request", "to someone not on the board");
+    let r = p.sync(&[], "alice").unwrap();
+    assert!(
+        r["unknown_recipients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u == "zed"),
+        "{r}"
+    );
+    let cards = |p: &Project| -> Vec<Value> {
+        let (ok, out) = p.fray(
+            &[],
+            "bob",
+            &["--json", "query", "--all", "--ref", &format!("mote:{req}")],
+        );
+        assert!(ok, "{out}");
+        serde_json::from_str::<Value>(&out).unwrap()["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(r["created"].as_array().map_or(0, Vec::len), 1, "{r}");
+    let found = cards(&p);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let card = &found[0];
+    assert_eq!(card["kind"], "question", "{card}");
+    assert_eq!(card["assignee"], "bob", "{card}");
+    assert_eq!(card["status"], "open", "{card}");
+    assert!(card["summary"]
+        .as_str()
+        .unwrap()
+        .contains("not a Mote answer"));
+    // Notes are not carded.
+    assert!(
+        !p.titles("bob")
+            .iter()
+            .any(|t| t.contains("just so you know")),
+        "{:?}",
+        p.titles("bob")
+    );
+    // A second sync cards nothing new.
+    p.sync(&[], "bob").unwrap();
+    assert_eq!(cards(&p).len(), 1);
+    // bob answers in Mote: the card settles.
+    assert!(p
+        .mote("bob", &["msg", "reply", &req, "looks good"])
+        .status
+        .success());
+    let r = p.sync(&[], "alice").unwrap();
+    assert!(
+        r["request_note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("settled 1"),
+        "{r}"
+    );
+    let found = cards(&p);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["status"], "resolved", "{:?}", found[0]);
+    // A Fray send to zed, known only to Mote, says how to ask there.
+    let (ok, out) = p.fray(&[], "alice", &["send", "zed", "hello", "--ask"]);
+    assert!(!ok);
+    assert!(
+        out.contains("zed is a Mote actor") && out.contains("mote msg send --to zed"),
+        "{out}"
+    );
+}

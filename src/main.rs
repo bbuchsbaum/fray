@@ -1465,13 +1465,150 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
         }
     }
+    // Requests (no-silent-stalls R2), by state: the addressees with open
+    // requests, plus those with requests carded here and still open (to see
+    // them answered), each listed as that actor; reads write no Mote ops.
+    let mut request_note = Value::Null;
+    let requests_ok = send(home, actor, "ping", json!({}), None, 10)
+        .map(|p| {
+            p["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|x| x == "mote_requests"))
+        })
+        .unwrap_or(false);
+    if requests_ok {
+        match sync_requests(home, actor, &store) {
+            Ok(r) => {
+                created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                for u in r["unknown_recipients"].as_array().into_iter().flatten() {
+                    unknown.push(u["recipient"].clone());
+                }
+                if let Some(n) = r["note"].as_str() {
+                    request_note = json!(n);
+                }
+                if r["settled"].as_array().is_some_and(|s| !s.is_empty()) {
+                    request_note = json!(format!(
+                        "{}settled {} request card(s) answered in Mote",
+                        request_note
+                            .as_str()
+                            .map(|n| format!("{n}; "))
+                            .unwrap_or_default(),
+                        r["settled"].as_array().map_or(0, Vec::len)
+                    ));
+                }
+            }
+            Err(e) => request_note = json!(format!("requests failed: {}: {}", e.code, e.message)),
+        }
+    } else {
+        request_note =
+            json!("request tracking skipped: the daemon predates it; restart it on this build");
+    }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
-        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
+        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,"request_note":request_note,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
         "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,
         "candidate_note":if candidate_notes.is_empty() { Value::Null } else { json!(candidate_notes.join("; ")) }}}),
+    )
+}
+
+/// Whether `name` is an actor in the Mote store paired with this board. Any
+/// failure means no: this only adds a hint.
+fn mote_knows(home: &Path, name: &str) -> bool {
+    use fray::mote;
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    let Ok(Some(path)) = mote::locate(home, &cwd) else {
+        return false;
+    };
+    let Ok(store_id) = mote::store_id(&path) else {
+        return false;
+    };
+    let store = mote::Store { path, store_id };
+    match mote::run(&store, None, &["actor", "list"], mote::read_timeout()) {
+        mote::Outcome::Ok(list) => list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|a| a["actor"].as_str() == Some(name)),
+        _ => false,
+    }
+}
+
+/// One state pass over Mote requests (no-silent-stalls R2). Bounded: at
+/// most 50 addressees are read per sync.
+fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<Value> {
+    use fray::mote;
+    let mut who: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    match mote::run(store, Some(actor), &["actor", "list"], mote::read_timeout()) {
+        mote::Outcome::Ok(list) => {
+            for a in list.as_array().into_iter().flatten() {
+                if a["incoming_open_requests"].as_i64().unwrap_or(0) > 0 {
+                    if let Some(name) = a["actor"].as_str() {
+                        who.push(name.to_owned());
+                    }
+                }
+            }
+        }
+        other => {
+            return Err(Error::new(
+                "mote_failed",
+                format!("mote actor list: {other:?}"),
+            ))
+        }
+    }
+    let store_id = store.store_id.clone();
+    let tracked = send(
+        home,
+        actor,
+        "mote_requests_tracked",
+        json!({"store_id":store_id}),
+        None,
+        10,
+    )?;
+    for t in tracked["tracked"].as_array().into_iter().flatten() {
+        if let Some(r) = t["recipient"].as_str() {
+            who.push(r.to_owned());
+        }
+    }
+    who.sort();
+    who.dedup();
+    if who.len() > 50 {
+        notes.push(format!("{} addressees; only 50 were read", who.len()));
+        who.truncate(50);
+    }
+    let mut items = Vec::new();
+    for to in &who {
+        match mote::run(store, Some(to), &["msg", "requests"], mote::read_timeout()) {
+            mote::Outcome::Ok(list) => items.extend(mote::request_items(&list, to)),
+            other => notes.push(format!("requests for {to} skipped: {other:?}")),
+        }
+    }
+    let (mut created, mut settled, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+    for chunk in items.chunks(500) {
+        let r = send(
+            home,
+            actor,
+            "mote_requests_sync",
+            json!({"store_id":store_id,"requests":chunk}),
+            None,
+            10,
+        )?;
+        created.extend(r["created"].as_array().cloned().unwrap_or_default());
+        settled.extend(r["settled"].as_array().cloned().unwrap_or_default());
+        unknown.extend(
+            r["unknown_recipients"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    Ok(
+        json!({"created":created,"settled":settled,"unknown_recipients":unknown,
+        "note":if notes.is_empty() { Value::Null } else { json!(notes.join("; ")) }}),
     )
 }
 
@@ -2531,7 +2668,22 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(Some(client::rpc(&home, &r, secs)?));
         }
     };
-    let mut value = send(&home, &actor, op, args, key, timeout)?;
+    let to = (op == "send")
+        .then(|| args["to"].as_str().map(str::to_owned))
+        .flatten();
+    let mut value = match send(&home, &actor, op, args, key, timeout) {
+        Err(mut e) if e.code == "unknown_agent" => {
+            // A name only the paired Mote store knows (no-silent-stalls R2):
+            // say so, and how to ask there.
+            if let Some(to) = to.filter(|to| mote_knows(&home, to)) {
+                e.message.push_str(&format!(
+                    " {to} is a Mote actor who has not joined this board; to ask there: mote msg send --to {to} --kind request TEXT"
+                ));
+            }
+            return Err(e);
+        }
+        other => other?,
+    };
     if matches!(op, "inbox" | "wait") {
         let receipts: Vec<Value> = value["items"]
             .as_array()

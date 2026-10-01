@@ -365,6 +365,7 @@ impl Store {
                 | "mote_bind"
                 | "mote_ingest"
                 | "mote_sync_failed"
+                | "mote_requests_sync"
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
@@ -2281,6 +2282,113 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"raced":raced,"cursor":cursor,"synced_by":actor}),
             )
         }
+        "mote_requests_sync" => {
+            // State, not events (R2): each request is carded once while open,
+            // to its addressee, and settled when Mote shows it answered.
+            // Fray never acts in Mote; acking or closing the card is not a
+            // Mote answer, and the card says so.
+            check_fields(a, &["store_id", "requests"])?;
+            let store_id = string(a, "store_id")?;
+            let bound = mote_binding(conn)?;
+            if bound.is_null() || bound["store_id"] != store_id {
+                return Err(Error::new(
+                    "mote_store_mismatch",
+                    "requests are from a Mote store this board is not bound to; run fray mote status",
+                ));
+            }
+            let requests = a["requests"]
+                .as_array()
+                .ok_or_else(|| Error::invalid("requests must be an array"))?;
+            if requests.len() > 500 {
+                return Err(Error::invalid("at most 500 requests per call"));
+            }
+            let (mut created, mut settled, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+            for r in requests {
+                check_fields(
+                    r,
+                    &["msg_id", "recipient", "from", "state", "body", "entity"],
+                )?;
+                let msg_id = string(r, "msg_id")?;
+                let recipient = string(r, "recipient")?;
+                let state = string(r, "state")?;
+                text(msg_id, "msg_id", 200, false)?;
+                if !["open", "responded", "declined", "resolved"].contains(&state) {
+                    return Err(Error::invalid("state: open|responded|declined|resolved"));
+                }
+                let row: Option<(i64, String)> = conn
+                    .query_row(
+                        "SELECT card_id,state FROM mote_requests WHERE store_id=? AND msg_id=? AND recipient=?",
+                        params![store_id, msg_id, recipient],
+                        |x| Ok((x.get(0)?, x.get(1)?)),
+                    )
+                    .optional()?;
+                match (row, state) {
+                    // Already carded, or answered before it was ever carded.
+                    (Some((_, ref was)), "open") if was == "open" => {}
+                    (Some((_, ref was)), _) if was != "open" => {}
+                    (None, s) if s != "open" => {}
+                    (None, _) => {
+                        let joined: bool = conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
+                            [recipient],
+                            |x| x.get(0),
+                        )?;
+                        if recipient == MOTE || !joined {
+                            unknown.push(json!({"recipient":recipient,"msg_id":msg_id}));
+                            continue;
+                        }
+                        let from = r["from"].as_str().unwrap_or("?");
+                        let body = r["body"].as_str().unwrap_or("");
+                        let mut tags = vec!["mote".to_owned(), format!("mote:{msg_id}")];
+                        if let Some(entity) = r["entity"].as_str().filter(|e| !e.is_empty()) {
+                            tags.push(format!("mote:{entity}"));
+                        }
+                        let card = create_card(
+                            conn,
+                            MOTE,
+                            &json!({"kind":"question","topic":format!("@{recipient}"),
+                                "title":clip(&format!("Mote request from {from}: {}", body.lines().next().unwrap_or("")), 160),
+                                "summary":clip(&format!("{body}\n\n{from} asked you this in Mote ({msg_id}). Answer there: `mote msg reply {msg_id} TEXT` (or --kind decline). Acking or closing this card is not a Mote answer; it settles here when Mote shows the request answered."), 2000),
+                                "priority":1,"tags":tags,"assignee":recipient}),
+                            json!({"mote_request":msg_id,"from":from}),
+                            now,
+                        )?;
+                        let id = card["card"]["id"].as_i64().unwrap_or(0);
+                        conn.execute(
+                            "INSERT INTO mote_requests(store_id,msg_id,recipient,card_id,state) VALUES(?,?,?,?,'open')",
+                            params![store_id, msg_id, recipient, id],
+                        )?;
+                        created.push(id);
+                    }
+                    (Some((card_id, _)), answered) => {
+                        // Open here, answered in Mote: settle the card.
+                        conn.execute(
+                            "UPDATE mote_requests SET state=? WHERE store_id=? AND msg_id=? AND recipient=?",
+                            params![answered, store_id, msg_id, recipient],
+                        )?;
+                        let c = get_card(conn, card_id)?;
+                        if !c.terminal() {
+                            conn.execute(
+                                "UPDATE cards SET rev=rev+1,status='resolved',lease_owner=NULL,lease_until_ms=0,fence=fence+1,updated_ms=? WHERE id=?",
+                                params![now, card_id],
+                            )?;
+                            emit(
+                                conn,
+                                MOTE,
+                                "patch",
+                                card_id,
+                                json!({"mote_request":msg_id,"mote_state":answered,
+                                    "note":format!("{answered} in Mote")}),
+                                now,
+                                true,
+                            )?;
+                        }
+                        settled.push(card_id);
+                    }
+                }
+            }
+            Ok(json!({"created":created,"settled":settled,"unknown_recipients":unknown}))
+        }
         "mote_sync_failed" => {
             // Consecutive timed-out syncs; the client reseeds at the tail after
             // three, and reconciliation covers the gap.
@@ -2438,7 +2546,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2708,6 +2816,22 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "mote_binding" => {
             check_fields(a, &[])?;
             Ok(json!({"binding":mote_binding(conn)?}))
+        }
+        "mote_requests_tracked" => {
+            // The requests carded and still open here, so a sync can read
+            // their current state from Mote even after they leave its open
+            // listing.
+            check_fields(a, &["store_id"])?;
+            let store_id = string(a, "store_id")?;
+            let mut s = conn.prepare(
+                "SELECT msg_id,recipient FROM mote_requests WHERE store_id=? AND state='open' ORDER BY msg_id LIMIT 500",
+            )?;
+            let rows = s
+                .query_map([store_id], |r| {
+                    Ok(json!({"msg_id":r.get::<_,String>(0)?,"recipient":r.get::<_,String>(1)?}))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(json!({"tracked":rows}))
         }
         "mote_claims" => {
             // Every live holder Fray has recorded for a store, for
