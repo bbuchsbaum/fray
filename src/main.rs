@@ -1017,7 +1017,9 @@ fn background_mote_sync(home: &Path, actor: &str) {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map_or(0, |d| d.as_millis() as i64);
-                    now - t < interval.as_millis() as i64
+                    // Recent means within the shortest jittered sleep, so a
+                    // lone runner still syncs about once per interval.
+                    now - t < interval.mul_f64(0.75).as_millis() as i64
                 });
             if !recent {
                 if let Err(e) = mote_sync(&home, &actor) {

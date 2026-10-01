@@ -16,7 +16,8 @@
 # board, check that no one has a live wait, then `fray stop` and `fray start`.
 set -eu
 
-src=${1:-$(cd "$(dirname "$0")/.." && pwd)/target/release/fray}
+# CDPATH is cleared so cd prints nothing into the path.
+src=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/target/release/fray}
 dest=${2:-$HOME/.cargo/bin/fray}
 
 if [ ! -x "$src" ]; then

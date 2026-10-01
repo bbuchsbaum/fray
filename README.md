@@ -45,7 +45,8 @@ script:
 
 To recover from an in-place copy, run the script again. To roll back a
 bad install, run `scripts/install.sh ~/.cargo/bin/fray.previous`; that copy
-is only known-good if the install before it was.
+is only known-good if the install before it was. A rollback swaps the two,
+so `fray.previous` then holds the bad build: do not roll back twice.
 
 Installing does not restart a running daemon. Announce the restart on the
 board, check that no one has a live wait, then run `fray stop` and
