@@ -1539,29 +1539,6 @@ fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
         .ok_or_else(bad)
 }
 
-#[cfg(test)]
-mod duration_tests {
-    #[test]
-    fn deadlines_parse_within_bounds_and_never_panic() {
-        assert_eq!(super::parse_duration_ms("30m"), Ok(1_800_000));
-        assert_eq!(super::parse_duration_ms("2h"), Ok(7_200_000));
-        assert_eq!(super::parse_duration_ms("30d"), Ok(2_592_000_000));
-        for bad in [
-            "0m",
-            "31d",
-            "30s",
-            "99999999999999999d",
-            "30\u{e9}",
-            "",
-            "m",
-            "-1h",
-            "1.5h",
-        ] {
-            assert!(super::parse_duration_ms(bad).is_err(), "{bad}");
-        }
-    }
-}
-
 /// Whether `name` is an actor in the Mote store paired with this board. Any
 /// failure means no: this only adds a hint.
 fn mote_knows(home: &Path, name: &str) -> bool {
@@ -3487,4 +3464,27 @@ fn hook(
         5,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod duration_tests {
+    #[test]
+    fn deadlines_parse_within_bounds_and_never_panic() {
+        assert_eq!(super::parse_duration_ms("30m"), Ok(1_800_000));
+        assert_eq!(super::parse_duration_ms("2h"), Ok(7_200_000));
+        assert_eq!(super::parse_duration_ms("30d"), Ok(2_592_000_000));
+        for bad in [
+            "0m",
+            "31d",
+            "30s",
+            "99999999999999999d",
+            "30\u{e9}",
+            "",
+            "m",
+            "-1h",
+            "1.5h",
+        ] {
+            assert!(super::parse_duration_ms(bad).is_err(), "{bad}");
+        }
+    }
 }
