@@ -1249,7 +1249,19 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let c = get_card(conn, integer(a, "id")?)?;
             // Only the requester moves its ask's deadline, and only on an ask.
             let new_deadline = respond_by(a, now)?;
-            if new_deadline.is_some() && (c.kind != "question" || c.author != actor) {
+            let asked_at_creation = || -> Result<bool> {
+                Ok(conn
+                    .query_row(
+                        "SELECT json_extract(payload,'$.card.kind')='question' FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+                        [c.id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false))
+            };
+            // Ask-ness from the creation event, as for overdue: a kind patch
+            // cannot stop the asker moving its deadline.
+            if new_deadline.is_some() && (c.author != actor || !asked_at_creation()?) {
                 return Err(Error::invalid(
                     "only the author of an ask can set its --respond-within",
                 ));
