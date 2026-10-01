@@ -155,3 +155,57 @@ fn a_deadline_needs_an_ask_and_asks_without_one_use_the_soft_default() {
     assert_eq!(item["overdue"], true, "{item}");
     assert_eq!(item["soft_deadline"], true, "{item}");
 }
+
+/// Review of 9fbddc4, #81: no patch that answers nothing can hide an overdue
+/// ask, whoever makes it.
+#[test]
+fn no_patch_hides_an_overdue_ask() {
+    for (who, change) in [
+        ("bystander", json!({"assignee":null})),
+        ("helper", json!({"status":"blocked"})),
+        ("bystander", json!({"kind":"note"})),
+        ("bystander", json!({"assignee":"alice"})),
+    ] {
+        let mut s = board();
+        let (id, rev) = ask(&mut s, 30 * MIN);
+        let mut args = json!({"id":id,"expect":rev});
+        args.as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        at(&mut s, who, "patch", args, NOW + MIN).unwrap();
+        assert_eq!(overdue(&mut s, NOW + 31 * MIN), vec![id], "{who} {change}");
+    }
+}
+
+/// With nobody (or only the asker) assigned, anyone else's reply answers it.
+#[test]
+fn an_unassigned_ask_is_answered_by_anyone_but_the_asker() {
+    let mut s = board();
+    let (id, rev) = ask(&mut s, 30 * MIN);
+    at(
+        &mut s,
+        "alice",
+        "patch",
+        json!({"id":id,"expect":rev,"assignee":null}),
+        NOW + MIN,
+    )
+    .unwrap();
+    at(
+        &mut s,
+        "alice",
+        "annotate",
+        json!({"id":id,"body":"anyone?"}),
+        NOW + 2 * MIN,
+    )
+    .unwrap();
+    assert_eq!(overdue(&mut s, NOW + 31 * MIN), vec![id]);
+    at(
+        &mut s,
+        "bystander",
+        "annotate",
+        json!({"id":id,"body":"me"}),
+        NOW + 32 * MIN,
+    )
+    .unwrap();
+    assert!(overdue(&mut s, NOW + 33 * MIN).is_empty());
+}

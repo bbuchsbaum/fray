@@ -1520,24 +1520,46 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     )
 }
 
-/// A duration such as 90s, 30m, 2h or 1d, in milliseconds.
+/// A deadline such as 30m, 2h or 1d, in milliseconds: one minute to thirty
+/// days, the daemon's bounds. Never panics (review of 9fbddc4, #82).
 fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
-    let (n, unit) = text.split_at(text.len().saturating_sub(1));
-    let n: u64 = n
+    let bad = || format!("{text:?}: use a number and m, h or d, from 1m to 30d (e.g. 30m)");
+    let unit = text.chars().last().ok_or_else(bad)?;
+    let n: u64 = text[..text.len() - unit.len_utf8()]
         .parse()
-        .map_err(|_| format!("{text:?}: use a number and s, m, h or d (e.g. 30m)"))?;
-    let scale = match unit {
-        "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
-        _ => {
-            return Err(format!(
-                "{text:?}: use a number and s, m, h or d (e.g. 30m)"
-            ))
-        }
+        .map_err(|_| bad())?;
+    let scale: u64 = match unit {
+        'm' => 60_000,
+        'h' => 3_600_000,
+        'd' => 86_400_000,
+        _ => return Err(bad()),
     };
-    Ok(n * scale)
+    n.checked_mul(scale)
+        .filter(|ms| (60_000..=30 * 86_400_000).contains(ms))
+        .ok_or_else(bad)
+}
+
+#[cfg(test)]
+mod duration_tests {
+    #[test]
+    fn deadlines_parse_within_bounds_and_never_panic() {
+        assert_eq!(super::parse_duration_ms("30m"), Ok(1_800_000));
+        assert_eq!(super::parse_duration_ms("2h"), Ok(7_200_000));
+        assert_eq!(super::parse_duration_ms("30d"), Ok(2_592_000_000));
+        for bad in [
+            "0m",
+            "31d",
+            "30s",
+            "99999999999999999d",
+            "30\u{e9}",
+            "",
+            "m",
+            "-1h",
+            "1.5h",
+        ] {
+            assert!(super::parse_duration_ms(bad).is_err(), "{bad}");
+        }
+    }
 }
 
 /// Whether `name` is an actor in the Mote store paired with this board. Any
@@ -3128,6 +3150,12 @@ fn human(v: &Value, out: &mut String) {
                 clean(o["title"].as_str().unwrap_or("")),
                 clean(o["assignee"].as_str().unwrap_or("?")),
                 o["overdue_min"]
+            ));
+        }
+        if v["overdue_asks"]["more"] == true {
+            out.push_str(&format!(
+                "\nOverdue: {} asks in all; fray friction lists them.",
+                v["overdue_asks"]["total"]
             ));
         }
         if let Some(warning) = v["idle_readiness"]["warning"].as_str() {
