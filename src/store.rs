@@ -945,8 +945,21 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "send" => {
             check_fields(
                 a,
-                &["to", "body", "title", "ask", "priority", "refs", "pending"],
+                &[
+                    "to",
+                    "body",
+                    "title",
+                    "ask",
+                    "priority",
+                    "refs",
+                    "pending",
+                    "respond_within_ms",
+                ],
             )?;
+            let respond_by = respond_by(a, now)?;
+            if respond_by.is_some() && !boolean(a, "ask", false)? {
+                return Err(Error::invalid("--respond-within needs --ask"));
+            }
             let target = string(a, "to")?;
             if !valid_name(target) {
                 return Err(Error::invalid("to must be a registered agent name"));
@@ -991,7 +1004,10 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "topic":format!("@{target}"),"title":title,"summary":summary,
                     "assignee":target,"priority":bounded(a,"priority",2,0,3)?,"tags":refs
                 }),
-                json!({"body":body}),
+                match respond_by {
+                    Some(by) => json!({"body":body,"respond_by_ms":by}),
+                    None => json!({"body":body}),
+                },
                 now,
             )?;
             if target != OWNER && target != actor {
@@ -1202,9 +1218,24 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "annotate" => {
             check_fields(
                 a,
-                &["id", "kind", "body", "refs", "ack_batch", "review_verdict"],
+                &[
+                    "id",
+                    "kind",
+                    "body",
+                    "refs",
+                    "ack_batch",
+                    "review_verdict",
+                    "respond_within_ms",
+                ],
             )?;
             let c = get_card(conn, integer(a, "id")?)?;
+            // Only the requester moves its ask's deadline, and only on an ask.
+            let new_deadline = respond_by(a, now)?;
+            if new_deadline.is_some() && (c.kind != "question" || c.author != actor) {
+                return Err(Error::invalid(
+                    "only the author of an ask can set its --respond-within",
+                ));
+            }
             let body = string(a, "body")?;
             text(body, "body", 8000, false)?;
             let verdict = a
@@ -1373,7 +1404,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 actor,
                 "annotate",
                 c.id,
-                json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs,"review":verdict}),
+                {
+                    let mut d = json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs,"review":verdict});
+                    if let Some(by) = new_deadline {
+                        d["respond_by_ms"] = json!(by);
+                    }
+                    d
+                },
                 now,
                 true,
             )?;
@@ -2546,7 +2583,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -3943,6 +3980,56 @@ fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
     }
     Ok(json!({"items":items,"more":more}))
 }
+pub(crate) fn get_card_pub(conn: &Connection, id: i64) -> Result<Card> {
+    get_card(conn, id)
+}
+
+/// `respond_within_ms`, if given, as an absolute deadline on the daemon's
+/// clock (no-silent-stalls R4): one minute to thirty days.
+fn respond_by(a: &Value, now: i64) -> Result<Option<i64>> {
+    a.get("respond_within_ms")
+        .map(|_| bounded(a, "respond_within_ms", 0, 60_000, 30 * 86_400_000).map(|ms| now + ms))
+        .transpose()
+}
+
+/// An ask's deadline: the latest `respond_by_ms` its author recorded, in the
+/// creation event or a later reply, with that event's sequence. Kept in
+/// events, never in tags, so nobody can patch it away; reassignment keeps it.
+pub(crate) fn ask_deadline(
+    conn: &Connection,
+    card: i64,
+    author: &str,
+) -> Result<Option<(i64, i64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT json_extract(payload,'$.detail.respond_by_ms'),seq FROM events WHERE card_id=? AND actor=? AND op IN ('post','annotate') AND json_extract(payload,'$.detail.respond_by_ms') IS NOT NULL ORDER BY seq DESC LIMIT 1",
+            params![card, author],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Whether an open ask is overdue: past its deadline with no annotation from
+/// its current addressee since the deadline was set. A bystander's reply does
+/// not count; the addressee's "seen, later" does, since the requester sees it.
+pub(crate) fn ask_overdue(conn: &Connection, c: &Card, now: i64) -> Result<Option<i64>> {
+    if c.kind != "question" || c.terminal() || c.status == "blocked" {
+        return Ok(None);
+    }
+    let (Some((by, seq)), Some(to)) = (ask_deadline(conn, c.id, &c.author)?, &c.assignee) else {
+        return Ok(None);
+    };
+    if now < by {
+        return Ok(None);
+    }
+    let answered: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=? AND actor=? AND op='annotate' AND seq>?)",
+        params![c.id, to, seq],
+        |r| r.get(0),
+    )?;
+    Ok((!answered).then_some(by))
+}
+
 /// The strict "armed" test: `(enabled, listening, armed)`. A live drive
 /// controller, or a live, unexpired, unfiltered listener whose host wake
 /// mechanism is declared (managed, native-monitor or background-completion).
@@ -4036,6 +4123,27 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         })?;
     let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12,false)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
     out["idle_readiness"] = idle_readiness(conn, actor, now)?;
+    // The asker's overdue asks (R4), oldest deadline first, at most 5.
+    let mut st = conn.prepare(&format!(
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 ORDER BY c.id LIMIT 200"
+    ))?;
+    let ids = st
+        .query_map([actor], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut overdue = Vec::new();
+    for id in ids {
+        let c = get_card(conn, id)?;
+        if let Some(by) = ask_overdue(conn, &c, now)? {
+            overdue.push(json!({"id":id,"title":c.title,"assignee":c.assignee,
+                "due_ms":by,"overdue_min":(now-by)/60_000}));
+        }
+    }
+    overdue.sort_by_key(|o| o["due_ms"].as_i64());
+    if !overdue.is_empty() {
+        let total = overdue.len();
+        overdue.truncate(5);
+        out["overdue_asks"] = json!({"total":total,"items":overdue});
+    }
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {
         let mut removed = false;
@@ -4046,6 +4154,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
             "context",
             "blockers",
             "attention",
+            "overdue_asks",
         ] {
             if let Some(items) = out[key]["items"].as_array_mut() {
                 if items.pop().is_some() {

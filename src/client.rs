@@ -228,6 +228,9 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             "mote_bind" | "mote_binding" => Some(("mote_adapter", "the Mote adapter")),
             "mote_ingest" | "mote_sync_failed" => Some(("mote_sync", "fray mote sync")),
             "mote_claims" => Some(("mote_reconcile", "Mote claim reconciliation")),
+            "send" | "annotate" if req.args.get("respond_within_ms").is_some() => {
+                Some(("ask_deadlines", "--respond-within"))
+            }
             "mote_requests_sync" | "mote_requests_tracked" => {
                 Some(("mote_requests", "Mote request tracking"))
             }

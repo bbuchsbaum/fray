@@ -163,6 +163,10 @@ enum Cmd {
         /// delivered when that name joins. Without this, unknown names fail.
         #[arg(long)]
         pending: bool,
+        /// Expect an answer within this long (30m, 2h, 1d); with --ask. Past
+        /// it, an unanswered ask is overdue and escalated.
+        #[arg(long, value_parser = parse_duration_ms, requires = "ask")]
+        respond_within: Option<u64>,
     },
     /// Reply in a conversation. Questions and objections open linked questions.
     Reply {
@@ -180,6 +184,9 @@ enum Cmd {
         /// Other cards and newer replies stay pending; failure changes neither.
         #[arg(long)]
         ack_batch: Option<String>,
+        /// On your own ask: a new deadline from now (30m, 2h, 1d).
+        #[arg(long, value_parser = parse_duration_ms)]
+        respond_within: Option<u64>,
     },
     /// Read a conversation's current head, ordered history, and delivery receipts.
     Thread {
@@ -1513,6 +1520,26 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     )
 }
 
+/// A duration such as 90s, 30m, 2h or 1d, in milliseconds.
+fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
+    let (n, unit) = text.split_at(text.len().saturating_sub(1));
+    let n: u64 = n
+        .parse()
+        .map_err(|_| format!("{text:?}: use a number and s, m, h or d (e.g. 30m)"))?;
+    let scale = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => {
+            return Err(format!(
+                "{text:?}: use a number and s, m, h or d (e.g. 30m)"
+            ))
+        }
+    };
+    Ok(n * scale)
+}
+
 /// Whether `name` is an actor in the Mote store paired with this board. Any
 /// failure means no: this only adds a hint.
 fn mote_knows(home: &Path, name: &str) -> bool {
@@ -2206,6 +2233,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             priority,
             refs,
             pending,
+            respond_within,
         } => {
             let mut a = json!({"to":to,"body":message_body(body,body_file)?,"ask":ask,"priority":priority,"refs":refs});
             if let Some(title) = title {
@@ -2213,6 +2241,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             if pending {
                 a["pending"] = json!(true);
+            }
+            if let Some(ms) = respond_within {
+                a["respond_within_ms"] = json!(ms);
             }
             ("send", a)
         }
@@ -2223,6 +2254,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             kind,
             refs,
             ack_batch,
+            respond_within,
         } => {
             let mut args = json!({"id":id,"body":message_body(body,body_file)?,"kind":kind});
             if !refs.is_empty() {
@@ -2230,6 +2262,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             if let Some(batch) = ack_batch {
                 args["ack_batch"] = json!(batch);
+            }
+            if let Some(ms) = respond_within {
+                args["respond_within_ms"] = json!(ms);
             }
             ("annotate", args)
         }
@@ -3028,6 +3063,15 @@ fn human(v: &Value, out: &mut String) {
             "FRAY  agent={}  cursor={}  current state\n",
             v["agent"], v["cursor"]
         ));
+        for o in v["overdue_asks"]["items"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "\nOverdue: your ask #{} ({}) to {} is {} min past its deadline with no answer.",
+                o["id"],
+                clean(o["title"].as_str().unwrap_or("")),
+                clean(o["assignee"].as_str().unwrap_or("?")),
+                o["overdue_min"]
+            ));
+        }
         if let Some(warning) = v["idle_readiness"]["warning"].as_str() {
             out.push_str(&format!(
                 "\nWarning: {}\nArm through your host: {}\n{}\n",
