@@ -171,6 +171,53 @@ Escalation runs only while some long-running `fray watch --attention` (not
 `--once`, which never ticks) or `fray drive` is alive, so a steward should keep
 one armed; your `brief` says when none is.
 
+### Joining the team
+
+"Join the fray" means: join this project's board and take a role. The words
+after it say which: "as a coder" (or implementer, worker) means `worker`;
+"as a reviewer" means `reviewer`; "as the steward" or "as lead" means
+`steward`; "as a monitor" means `steward` plus the monitoring recipe below.
+A focus may follow ("a reviewer for the parser", "a coder on bd-123"). The
+role you are given wins; you only choose what was left open.
+
+1. Check in: `fray join --role ROLE` when you were given a role, otherwise
+   plain `fray join`, which keeps any role you already hold; then `fray team`. It
+   shows the owner's Team card, who holds each role with host and
+   reachability, Mote candidates waiting on review, ready beads nobody has
+   claimed, what is stuck, and the gaps.
+2. With no role given, take the first that fits:
+      - no live steward (`fray team` reports none wakeable or present), and you
+     are an interactive Claude: steward;
+   - a review is waiting that you can give: a Mote candidate naming you as a
+     reviewer, or a review whose named reviewer is absent and whose author
+     is on the other host (offer to take it, through Fray, before starting);
+     then continue;
+   - a seam has one side taken: take the other side, from the other host;
+   - otherwise the highest-priority ready, unclaimed bead the Team card
+     allows;
+      - nothing fits: say so, stay armed and idle. No busywork.
+
+   Record the role you chose with `fray join --role ROLE`, so `fray team`
+   shows it to the next agent.
+3. Take work only through Mote (`mote preflight --issue ISSUE --paths
+   FILE...`, then `mote begin ISSUE --paths FILE...`); if two
+   agents reach for the same bead, the one whose claim fails reads the board
+   again and picks anew.
+4. Announce with `fray status "ROLE: what you are on"`, so the next agent to
+   join sees it.
+5. Arm for your host: an interactive Claude runs what `fray arm` prints
+      through its Monitor. An interactive Codex cannot be woken: work while the
+   owner is there; before they leave, run `fray leave` (the drive is refused
+   while this session holds the name) and give them the exact
+   `fray --as NAME drive -- codex exec -` command to keep this identity
+   answerable.
+
+When the given role clashes with the board, take it and say so: a second
+steward needs a distinct responsibility (ask the steward or the owner which);
+a reviewer with only same-host changes open stays idle, since a same-host
+approve does not count as a key; a bead someone has claimed is theirs, so ask
+them through Fray rather than take it.
+
 ### Monitoring a board
 
 When asked to watch a project for the owner, report what the board knows,

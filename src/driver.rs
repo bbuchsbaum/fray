@@ -635,6 +635,24 @@ impl Run<'_> {
     }
 }
 
+/// The host a drive's child is, from its program name: "claude", "codex",
+/// or the program's own name.
+fn child_host(command: &[String]) -> String {
+    let program = command
+        .first()
+        .map(|c| {
+            std::path::Path::new(c)
+                .file_name()
+                .map_or(c.clone(), |f| f.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    match program.as_str() {
+        p if p.starts_with("claude") => "claude".to_owned(),
+        p if p.starts_with("codex") => "codex".to_owned(),
+        p => p.to_owned(),
+    }
+}
+
 /// `on_joined` runs once the daemon is up and `actor` has joined, before the
 /// first wait (the background Mote sync starts there, not before).
 pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()) -> Result<()> {
@@ -656,7 +674,10 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         id: random_key()?,
         options,
         detail: RefCell::new(
-            json!({"on_urgent":options.on_urgent,"turn":0,"child":null,"presented":[],"queued_urgent":[]}),
+            json!({"on_urgent":options.on_urgent,"turn":0,"child":null,"presented":[],"queued_urgent":[],
+                // Which host the child is, so `fray team` can tell a driven
+                // Codex from a driven Claude.
+                "host":child_host(&options.command)}),
         ),
         detail_ok: std::cell::Cell::new(true),
     };
@@ -684,4 +705,18 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     }
     result?;
     cleanup
+}
+
+#[cfg(test)]
+mod host_tests {
+    #[test]
+    fn a_drives_host_is_its_childs_program() {
+        let host = |cmd: &[&str]| {
+            super::child_host(&cmd.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(host(&["codex", "exec", "-"]), "codex");
+        assert_eq!(host(&["/opt/homebrew/bin/claude", "-p"]), "claude");
+        assert_eq!(host(&["sh", "stub.sh"]), "sh");
+        assert_eq!(host(&[]), "");
+    }
 }
