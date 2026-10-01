@@ -243,9 +243,14 @@ for one conversation.
 
 ## Arm a wake before you go idle
 
-If waiting for a peer answer, arm a supported host wake mechanism before ending
-an interactive turn. `join` and `brief` warn about open outgoing requests without
-an armed listener. A socket connection, heartbeat or hook alone is not idle wake.
+If waiting for a peer answer, or if asks are addressed to you, arm a supported
+host wake mechanism before ending an interactive turn. `join` and `brief` warn
+about open outgoing requests without an armed listener, and `brief` and the
+Stop hook put a FIRST line on asks addressed to you with nothing armed. A socket
+connection, heartbeat or hook alone is not idle wake. `fray arm` prints the
+exact command with an absolute expiry and when coverage ends; give the host
+mechanism the same lifetime and rearm before it ends. `fray agents` shows who
+is wakeable, present or absent.
 
 - Hosts with a native monitor: run `fray watch --attention --notification
   --selection involved --reconnect` through that monitor. Declare
@@ -255,6 +260,7 @@ an armed listener. A socket connection, heartbeat or hook alone is not idle wake
   and `--activation background-completion`; handle the packet, then rearm.
 - Managed stdin agents, including Codex: an authorized `fray drive -- COMMAND`
   owns waiting. It starts a separate worker; it does not wake another idle chat.
+  Only a driven agent can be woken with nobody at its terminal.
 - Without host wake support, use an explicit `fray wait --timeout none` while
   active, or report that a new user turn is required. Never promise an idle wake
   that has no implemented host mechanism.

@@ -181,3 +181,57 @@ fn friction_counts_a_present_but_unarmed_addressee_as_unreachable() {
         "{f}"
     );
 }
+
+/// R5: idle readiness names why an agent with asks addressed to it is not
+/// covered: unarmed, lapsed, or a one-shot listener to rearm. Leaving is
+/// none of these.
+#[test]
+fn a_lapse_is_told_apart_from_a_rearm_and_from_leaving() {
+    let lapse = |s: &mut Store, now: i64| {
+        at(s, "helper", "brief", json!({}), now)["idle_readiness"]["lapse"].clone()
+    };
+    let mut s = board();
+    // No ask yet: nothing to say.
+    assert!(lapse(&mut s, NOW).is_null());
+    at(
+        &mut s,
+        "alice",
+        "send",
+        json!({"to":"helper","body":"review?","ask":true}),
+        NOW,
+    );
+    let l = lapse(&mut s, NOW + MIN);
+    assert_eq!(l["kind"], "unarmed", "{l}");
+    assert!(l["arm"].as_str().unwrap().ends_with("arm"), "{l}");
+    // Armed: covered.
+    listen(&s, monitor(NOW + 30 * MIN), NOW + 2 * MIN);
+    assert!(lapse(&mut s, NOW + 2 * MIN).is_null());
+    // The declared activation expired: a lapse.
+    listen(&s, monitor(NOW + 30 * MIN), NOW + 31 * MIN);
+    let l = lapse(&mut s, NOW + 31 * MIN);
+    assert_eq!(l["kind"], "lapsed", "{l}");
+    s.listener_end("helper", "conn").unwrap();
+    // A one-shot listener that returned: rearm, not a lapse.
+    let mut once = monitor(NOW + 60 * MIN);
+    once["once"] = json!(true);
+    once["activation"]["mode"] = json!("background-completion");
+    listen(&s, once, NOW + 32 * MIN);
+    s.listener_end("helper", "conn").unwrap();
+    let l = lapse(&mut s, NOW + 33 * MIN);
+    assert_eq!(l["kind"], "rearm", "{l}");
+    // The hint rearms the way this host wakes (#78).
+    assert_eq!(
+        l["arm"], "fray --as helper arm --host background-completion",
+        "{l}"
+    );
+    // An unfiltered wait in progress covers the agent: no lapse.
+    s.touch("helper", None, Some("w1"), NOW + 33 * MIN).unwrap();
+    assert!(lapse(&mut s, NOW + 33 * MIN).is_null());
+    s.wait_ended("w1").unwrap();
+    // Having left, helper is told nothing.
+    at(&mut s, "helper", "leave", json!({}), NOW + 34 * MIN);
+    let left = s
+        .execute_at(&Request::new("brief", "helper", json!({})), NOW + 34 * MIN)
+        .unwrap_err();
+    assert_eq!(left.code, "not_joined");
+}
