@@ -209,3 +209,27 @@ fn an_unassigned_ask_is_answered_by_anyone_but_the_asker() {
     .unwrap();
     assert!(overdue(&mut s, NOW + 33 * MIN).is_empty());
 }
+
+/// After a kind patch, the asker can still move its ask's deadline.
+#[test]
+fn the_asker_moves_the_deadline_even_after_a_kind_patch() {
+    let mut s = board();
+    let (id, rev) = ask(&mut s, 30 * MIN);
+    at(
+        &mut s,
+        "bystander",
+        "patch",
+        json!({"id":id,"expect":rev,"kind":"note"}),
+        NOW + MIN,
+    )
+    .unwrap();
+    at(
+        &mut s,
+        "alice",
+        "annotate",
+        json!({"id":id,"body":"another hour","respond_within_ms":60*MIN}),
+        NOW + 20 * MIN,
+    )
+    .unwrap();
+    assert!(overdue(&mut s, NOW + 31 * MIN).is_empty());
+}

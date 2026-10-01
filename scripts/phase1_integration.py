@@ -206,7 +206,7 @@ if len(sys.argv) > 2:
         stop = self.hook('Stop')
         self.assertEqual(stop['decision'], 'block')
         self.assertIn('no armed listener', stop['reason'])
-        self.assertIn('watch --attention --notification', stop['reason'])
+        self.assertIn('fray --as bob arm', stop['reason'])
         self.assertEqual(self.hook('Stop', active=True), {})
 
 

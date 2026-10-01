@@ -99,6 +99,33 @@ Contributors have a delivery row even before receiving a peer event. A zero
 pending sequence records participation only; it is excluded from receipt output
 and never acknowledges previously unseen updates.
 
+Later features add tables, never columns, so an older board gains them on the
+next start (`CREATE TABLE IF NOT EXISTS`) and its existing rows are untouched:
+
+| Tables | Purpose |
+| --- | --- |
+| `participants`, `controllers`, `controller_details`, `muted_cards` | conversation membership, drive runs, mutes |
+| `listeners`, `sessions`, `agent_waits`, `wake_waits` | transport leases, host session binding, waits in progress |
+| `presented_batches`, `presented_items` | immutable records of what a read showed (exposure, not handling) |
+| `lanes`, `agent_status`, `peer_generations`, `peer_seen` | advisory lanes, status lines, peer notices |
+| `review_subjects`, `review_verdicts` | versioned review references |
+| `mote_events`, `mote_claims`, `mote_subjects`, `mote_requests`, `mote_requests_unknown` | the Mote adapter's exactly-once and last-state records |
+| `escalations` | escalation cards per stuck request, addressee, reason and steward |
+
+`wake_waits` has one row per unfiltered `wait` in progress (no card, kind,
+priority, addressed or unresolved filter); the row is deleted on every way the
+wait ends, and rows a stopped daemon left behind expire after 150 seconds.
+`mote_requests` maps each Mote request (`store_id`, `msg_id`, recipient) to the
+card made for it and its last known state. `mote_requests_unknown` holds open
+requests to Mote actors who never joined, with first and last sighting; a row
+not refreshed for two hours is treated as gone; its first sighting is the
+request's Mote `sent_ts`. `escalations` has one row per escalation card:
+subject (`card:ID:ADDRESSEE` or `mreq:MSG_ID:ADDRESSEE`), reason, steward,
+card, creation and settlement times. At most one row per subject, reason and
+steward is open, which makes escalation idempotent across runners.
+`meta.last_tick_ms` and `meta.tick_interval_ms` record the last tick and the
+runners' interval.
+
 Indices cover active status/priority, topic, ownership, recent sequence, per-card
 events, and per-agent pending sequence. Current-state reads do not replay operations.
 Memory/response size is bounded by endpoint caps. Disk history, actor registrations,
@@ -121,7 +148,15 @@ fields fail rather than being silently ignored.
 Core operations: `ping`, `join`, `leave`, `heartbeat`, `brief`, `post`, `send`, `patch`,
 `annotate`, `query`, `show`, `search_history`, `inbox`, `ack`, `expose`, `claim`,
 `renew`, `release`, `follow`, `unfollow`, `receipt_status`, `controller`, `agents`,
-`wait`, `watch`, and `shutdown`.
+`wait`, `watch`, and `shutdown`. Later operations, each behind a capability:
+`present`, `batch`, `mute`/`unmute`, `peers`, `peer_present`, `review_request`,
+`review_subject`, `owner_decide`, `owner_answer`, `lane_take`, `lane_release`,
+`lanes`, `set_status`, `stats`, `friction`, `mote_bind`, `mote_binding`,
+`mote_ingest`, `mote_sync_failed`, `mote_claims`, `mote_requests_sync`,
+`mote_requests_tracked`, `escalate_tick` and `stuck_requests`.
+`escalate_tick` takes only an optional `interval_ms` (the runner's interval,
+used for the "not ticking" window); the daemon decides what is stuck, so a
+runner can neither forge nor revive an escalation.
 
 `ping` advertises `protocol_version: 2` separately from the package version.
 `send` accepts `to`, `body`, optional `title`, `ask`, `priority`, and `refs`.
@@ -133,9 +168,13 @@ complete body in the creation event's `detail.body`, with a bounded summary in
 the card head (unchanged 2,000-byte limit). Older post events without `detail.body`
 use the historical card summary when rendered by `thread --bodies`. Both file
 input and human thread rendering are client conveniences; no attachment store
-or schema migration is introduced. `ping.capabilities` advertises `long_messages`,
-`inbox_filters`, and `reply_refs`; the client checks required capabilities on the
-same connection before sending the operational request.
+or schema migration is introduced. `ping.capabilities` lists every optional
+feature (for example `long_messages`, `inbox_filters`, `reply_refs`, `sessions`,
+`lanes`, `owner_channel`, `mote_sync`, `mote_requests`, `ask_deadlines`,
+`escalations`); the client checks a required capability on the same connection
+before sending the operational request, and names the missing one.
+`send` and `annotate` accept `respond_within_ms` (one minute to 30 days). The
+daemon adds its own clock and stores `respond_by_ms` in that event's detail.
 
 `watch` takes an optional `after` and topic. It emits a ready frame, ordered events,
 and checkpoints, each with store identity and cursor. Topic-filtered checkpoints
@@ -194,9 +233,14 @@ heads and retains these receipts. It does not replay closed history for newcomer
 
 The default scope is `*`. A worker has no special permissions; a steward has broader
 attention, not write authority. Assignment is routing, not a claim or exclusive
-permission. New questions produced by annotations route to the current owner,
-otherwise assignee, otherwise author. Closing the parent does not silently resolve
-those questions. Generic dependency DAGs and automatic escalation are not implemented.
+permission. New questions produced by annotations route to the conversation
+partner: the author's question goes to whoever is working the card (live lease
+holder, then assignee, then author); anyone else's goes to a live lease
+holder, then the author, then the assignee; an objection to an owner request
+stays with the owner. Among those, a wakeable party is preferred, then a
+present one, and the result says when it passes over the first. Closing the parent does not
+silently resolve those questions. Generic dependency DAGs and automatic
+re-routing are not implemented; escalation of stuck requests is described below.
 
 `last_seen_ms` is approximate presence, separate from enabled registration and task
 lease expiry. Claim TTL defaults to 900 seconds. Expiry is based on wall-clock time;
@@ -208,6 +252,50 @@ Begin rejects a fresh waiting/running owner. Updates require the same live token
 controller; heartbeat cannot re-enable a departed identity. `agents` reports both
 registration and controller waiting/running/failed/stopped/stale, with `live` derived
 from freshness. This is advisory local liveness, not a network authentication fence.
+
+**Reachability.** One function classifies every agent for routing, send
+notices, `agents`, friction and escalation. `wakeable`: a live drive
+controller; a live, unexpired, unfiltered listener whose declared activation is
+`managed`, `native-monitor` or `background-completion`; or an unfiltered wait in
+progress (`wake_waits`). `present`: activity within 30 minutes, or any wait or
+listener, with none of those. `absent`: neither. Wakeable is defined for cards
+assigned to the agent, which every selection mode covers; that is why routed
+questions and escalations are always assigned.
+
+**Deadlines.** An ask's deadline is the latest `respond_by_ms` its author
+recorded, in the creation event or a later annotation. Whether a card is an ask
+is read from its creation event, so changing kind, tags or assignee hides it
+neither from deadlines nor from escalation, nor stops its asker moving the
+deadline with `reply --respond-within`. It is
+overdue when open, past due, and without an annotation by its current
+addressee (or, with none, by anyone but the asker) after the deadline was set.
+
+**Stuck requests and escalation.** `stuck_set` computes, at read time, open
+asks that are unreachable (addressee not wakeable, never shown them in a
+presented batch or exposure and has not replied, older than the grace period, default 15 minutes,
+`FRAY_STUCK_GRACE_MS` in the daemon's environment) or overdue (past deadline;
+for Mote requests, an hour after Mote's `sent_ts`, from which the grace period
+also counts), plus fresh `mote_requests_unknown` rows past the grace period.
+Asks assigned to `owner`, and escalation cards, are never stuck. The scan takes
+only cards created as asks with an addressee other than the asker, or cards
+with a deadline, oldest first, up to 1,000. Time passing writes nothing, and a listener wakes only on a
+delivery, so the runners (`watch --attention` without `--once`, and `drive`)
+call `escalate_tick` about once per `FRAY_MOTE_SYNC_INTERVAL_MS` on every
+board, after syncing Mote where it is paired. One tick, in one transaction,
+creates a p1 note authored by the reserved `escalation` identity and assigned
+to each enabled steward who is not absent and is neither the request's asker
+nor its addressee, unless that steward already has an open escalation for the
+same subject and reason. If the steward closed that card and it is at least an
+hour old, the tick settles it and creates a "Still stuck" reminder. At most 20
+new cards are created per tick; the rest are counted as deferred. The tick then
+re-checks each open escalation's request directly (not through the scan
+window) and resolves only those found clear. Because the subject names the
+addressee, a re-route to another unwakeable addressee escalates anew, and a
+request that clears and becomes stuck again escalates again. `brief` and hooks
+never run Mote and never tick; a steward's `brief` reads the stuck set and says
+when the board is not ticking: no tick for more than twice the runners'
+interval, and at least five minutes. Nothing is re-routed
+automatically and nothing pages outside Fray.
 
 Schema v2 creates participation/controller tables transactionally. A v1 migration
 backfills participants from actual event authors once; it preserves all existing

@@ -618,8 +618,11 @@ enum MoteCmd {
     /// Which Mote store this board uses, whether it is reachable, and the
     /// binding. Binds the board to the store on first use.
     Status,
-    /// Turn new Mote events (reservations expiring or expired, claims handed
-    /// to you) into attention for their recipients, exactly once each.
+    /// Bring Mote into Fray once: new events (reservations expiring or
+    /// expired, claims handed to you) become attention for their recipients,
+    /// claims and pending candidates are reconciled, and open requests become
+    /// asks for their addressees. Runners (`watch --attention`, `drive`) do
+    /// this in the background.
     Sync,
 }
 
@@ -995,11 +998,12 @@ fn mote_status(home: &Path, actor: &str) -> Result<Value> {
 /// Background Mote sync for long-running runners (`watch --attention`,
 /// `drive`), per docs/design/mote-adapter.md section 6: about once per
 /// interval for the whole board, paced on the last sync any agent ran, so
-/// several runners do not multiply the load. Only when a Mote store is paired
-/// and the runner has an identity. Quiet on success; a failure is reported at
-/// most once an hour, on stderr, never into the attention stream.
-/// `FRAY_MOTE_SYNC=off` disables it; `FRAY_MOTE_SYNC_INTERVAL_MS` sets the
-/// interval (default 60 s).
+/// several runners do not multiply the load. Each round also ticks
+/// escalation of stuck requests (no-silent-stalls R3) on every board, Mote
+/// or not, once the daemon offers it. Needs an agent identity. Quiet on
+/// success; a sync failure is reported at most once an hour, on stderr,
+/// never into the attention stream. `FRAY_MOTE_SYNC=off` stops the Mote sync
+/// only; `FRAY_MOTE_SYNC_INTERVAL_MS` sets the interval (default 60 s).
 fn background_mote_sync(home: &Path, actor: &str) {
     if actor.is_empty() || actor == fray::store::OWNER {
         return;
@@ -1635,8 +1639,8 @@ fn stuck_text(v: &Value) -> String {
             m["age_min"]
         ));
     }
-    if v["ticking"] != true {
-        lines.push("  No runner is ticking: escalation happens only when someone reads. A `fray watch --attention` or `fray drive` keeps it running.".to_owned());
+    if v["ticking"] != true && !lines.is_empty() {
+        lines.push("  No runner is ticking, so nobody is being escalated to: these are seen only when someone reads them. A `fray watch --attention` or `fray drive` (not --once) keeps escalation running.".to_owned());
     }
     if lines.is_empty() {
         "Nothing is stuck.\n".to_owned()
@@ -3346,6 +3350,9 @@ fn human(v: &Value, out: &mut String) {
             "FRAY  agent={}  cursor={}  current state\n",
             v["agent"], v["cursor"]
         ));
+        if let Some(note) = v["escalation_note"].as_str() {
+            out.push_str(&format!("\nSteward: {}\n", clean(note)));
+        }
         if let Some(lapse) = v["idle_readiness"]["lapse"]["message"].as_str() {
             out.push_str(&format!("\nFIRST: {}\n", clean(lapse)));
         }

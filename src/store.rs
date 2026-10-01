@@ -1249,7 +1249,19 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             let c = get_card(conn, integer(a, "id")?)?;
             // Only the requester moves its ask's deadline, and only on an ask.
             let new_deadline = respond_by(a, now)?;
-            if new_deadline.is_some() && (c.kind != "question" || c.author != actor) {
+            let asked_at_creation = || -> Result<bool> {
+                Ok(conn
+                    .query_row(
+                        "SELECT json_extract(payload,'$.card.kind')='question' FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+                        [c.id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false))
+            };
+            // Ask-ness from the creation event, as for overdue: a kind patch
+            // cannot stop the asker moving its deadline.
+            if new_deadline.is_some() && (c.author != actor || !asked_at_creation()?) {
                 return Err(Error::invalid(
                     "only the author of an ask can set its --respond-within",
                 ));
@@ -2474,6 +2486,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         conn.execute(
                             "INSERT INTO mote_requests(store_id,msg_id,recipient,card_id,state) VALUES(?,?,?,?,'open')",
                             params![store_id, msg_id, recipient, id],
+                        )?;
+                        // Carded now (the addressee joined): no longer an
+                        // unknown-recipient request.
+                        conn.execute(
+                            "DELETE FROM mote_requests_unknown WHERE store_id=? AND msg_id=? AND recipient=?",
+                            params![store_id, msg_id, recipient],
                         )?;
                         created.push(id);
                     }
@@ -4222,7 +4240,7 @@ fn tick_state(conn: &Connection, now: i64) -> Result<(Option<i64>, bool)> {
 pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let mut s = conn.prepare(&format!(
-        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND (json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question' OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id LIMIT 1000"
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND ((c.assignee IS NOT NULL AND c.assignee<>c.author AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question') OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id LIMIT 1000"
     ))?;
     let ids = s
         .query_map(params![OWNER, ESCALATION], |r| r.get::<_, i64>(0))?
@@ -4277,9 +4295,10 @@ fn card_stuck(conn: &Connection, id: i64, now: i64) -> Result<Vec<Value>> {
     } else if ask_overdue(conn, &c, now)?.is_some() {
         reasons.push("overdue");
     }
-    // Shown to the addressee proves it arrived; then only deadlines apply.
+    // Shown to the addressee, or answered by it, proves it arrived; then only
+    // deadlines apply (#87).
     let shown: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM deliveries WHERE agent=?1 AND card_id=?2 AND shown_at_ms>0) OR EXISTS(SELECT 1 FROM presented_items i JOIN presented_batches b ON b.batch=i.batch WHERE b.agent=?1 AND i.card_id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM deliveries WHERE agent=?1 AND card_id=?2 AND shown_at_ms>0) OR EXISTS(SELECT 1 FROM presented_items i JOIN presented_batches b ON b.batch=i.batch WHERE b.agent=?1 AND i.card_id=?2) OR EXISTS(SELECT 1 FROM events WHERE card_id=?2 AND actor=?1 AND op='annotate')",
         params![to, id],
         |r| r.get(0),
     )?;
@@ -4595,13 +4614,17 @@ fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
     let mut out = json!({"enabled":enabled,"open_requests_awaiting_others":outgoing,"armed":armed,"listening":listening,"model_response_guaranteed":false});
     if enabled && outgoing > 0 && !armed {
         out["warning"] = json!(format!("{outgoing} open requests awaiting others; no armed listener covering their replies. A connected transport or a hook alone cannot wake an idle host."));
-        out["arm_command"] = json!(arm_command(actor, None, None));
-        out["arm_guidance"] = json!("Run the command through the host's supported notification tool. Add --activation native-monitor or background-completion only when that mechanism is actually installed, and --activation-expires-ms for a bounded lifetime. In hosts without idle wake support, use an explicit fray wait --timeout none while the session is active; do not promise automatic wake after returning control.");
+        // `fray arm` prints the full command with a declared activation and
+        // expiry; the bare watch alone would not count as armed.
+        out["arm_command"] = json!(format!("fray --as {actor} arm"));
+        out["arm_guidance"] = json!("Run `fray arm` (or `fray arm --host background-completion`) and start the command it prints through the host's supported notification tool, with the same lifetime. In hosts without idle wake support, use an explicit fray wait --timeout none while the session is active; do not promise automatic wake after returning control.");
     }
     // Asks addressed to this agent that nothing will wake it for once its
     // turn ends (no-silent-stalls R5). The next hook context says so first.
     let incoming: i64 = conn.query_row(
-        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.assignee=?1 AND c.author<>?1"),
+        // Asks this agent has not yet answered: an answer is any annotation
+        // by it after the ask was created (the asker resolves the card).
+        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.assignee=?1 AND c.author<>?1 AND NOT EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=?1 AND e.op='annotate')"),
         [actor],
         |r| r.get(0),
     )?;
@@ -4677,7 +4700,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         let stuck = stuck_set(conn, now)?;
         if !stuck.is_empty() {
             out["escalation_note"] = json!(format!(
-                "{} stuck request(s), and no runner is ticking: escalation happens only when someone reads. `fray owner review` lists them; a `fray watch --attention` or `fray drive` keeps escalation running.",
+                "{} stuck request(s), and no runner is ticking, so nobody is being escalated to: they are seen only when someone reads them. `fray stuck` and `fray owner review` list them; a `fray watch --attention` or `fray drive` (not --once) keeps escalation running.",
                 stuck.len()
             ));
         }

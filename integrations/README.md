@@ -62,9 +62,12 @@ PreToolUse maintains presence without consuming exposure markers. PostToolUse an
 PostToolUseFailure surface up to four fresh or overdue urgent (p0/p1), unresolved
 direct requests, honoring `FRAY_SELECTION` (default `involved`). Exposure suppresses
 repeat injection for 60 seconds; it never acknowledges. At Stop, unhandled urgent
-direct requests or open outgoing questions without an armed wake mechanism may
-prevent stopping once, guarded by `stop_hook_active`. Outgoing requests need not
-be urgent: the warning is about missing wake coverage. The hook payload is bounded
+direct requests, open outgoing questions without an armed wake mechanism, or
+open asks addressed to the agent while it is not wakeable may prevent stopping
+once, guarded by `stop_hook_active`. Requests need not be urgent: the warning is
+about missing wake coverage. The last case leads the context with a `FIRST:`
+line naming the cause (nothing armed, a lapsed expiry, or a one-shot listener
+to rearm) and the `fray arm` command to run. The hook payload is bounded
 to 6,000 bytes before its explanatory envelope; omissions remain explicit.
 
 The hook reads the host's `session_id` when available; ordinary Claude tool
@@ -206,6 +209,13 @@ The host owns the process; Fray neither starts another model nor changes permiss
 Use one identity per live session. `FRAY_BIN` can select an explicit Fray executable.
 Use this adapter without the older boundary hooks to avoid duplicate notifications.
 
+Without the plugin, arm the Monitor tool directly: `fray --as NAME arm` prints
+the stream command with `--activation native-monitor` and an absolute
+`--activation-expires-ms` (default 30 minutes, matching the Monitor's limit),
+and reports when coverage ends. Give the Monitor the same lifetime and rearm
+before it ends; once the declared expiry passes, the agent is no longer
+`wakeable`, even if the stream is still connected.
+
 Claude's plugin monitors are experimental, interactive-CLI-only, and share the
 Monitor tool's availability restrictions. Their declared lifetime is the session;
 individual Monitor tool watches have a separate deadline (currently at most 30
@@ -306,6 +316,9 @@ or crashes. A job meant to outlive its turn must leave the group (for example wi
 `setsid`) and be recorded on the board; Fray then does not own it. A new run refuses
 to start while a previous run's unverified group is still alive (`orphaned_child`);
 inspect it with `pgrep -l -g PGID` and stop it, or pass `--release-orphan PGID`.
+Against a daemon that predates controller detail, `drive` warns once that this
+orphan check and the child shown in `fray agents` are unavailable, and runs
+without them; restart the daemon on the current build to restore both.
 Because the owned group is not the terminal's foreground group, a child that reads
 or reconfigures the terminal (a password prompt, `stty`, a TUI) is stopped by the
 kernel; the runner detects the stopped group and fails fast with `child_stopped`.
@@ -363,6 +376,14 @@ fray --as manager drive -- codex exec -
 ```
 
 Use `drive --selection all` only when that manager should process the full firehose.
+
+Stuck requests are escalated to stewards: each steward who is wakeable or
+present gets a p1 card of their own, authored by `escalation` and assigned to
+them, which an `involved` listener or drive receives. Escalation is computed by
+the runners' periodic tick, so keep at least one `watch --attention` (not
+`--once`) or `drive` alive on the board; a steward's `brief` says when no
+runner has ticked for more than twice the runners' interval (at least five
+minutes). `fray stuck` lists what is stuck now.
 
 Keep implementation ownership, dependencies, and completion in Mote. Use
 `send PEER BODY --ask --ref mote:ID` for a question/handoff, `reply ID BODY` for

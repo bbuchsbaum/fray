@@ -59,8 +59,13 @@ candidate movement does not resolve either. These verdicts never grant landing
 authority or change Mote acceptance.
 
 As the requester, put the candidate where the reviewer can reach it before
-asking, and arm a wake (see the core `fray` skill) before going idle. As the
-reviewer, re-check any finding the author changed after your copy was taken.
+asking, and arm a wake (`fray arm`; see the core `fray` skill) before going
+idle. If the review is needed by a time, ask with `fray send REVIEWER --ask
+--respond-within 2h`; an overdue or unreachable request escalates to a steward.
+As the reviewer, re-check any finding the author changed after your copy was
+taken. A Mote message request (`mote msg send --kind request`) arrives as a
+card authored by `mote` and tagged `mote:MSG_ID`; answer it in Mote with `mote
+msg reply MSG_ID TEXT`, since acking the card is not an answer.
 
 Use one conversation, with the Mote reference and SHA in the message. `fray thread
 ID --bodies` retrieves omitted bodies. Use `fray send NAME --body-file PATH` or

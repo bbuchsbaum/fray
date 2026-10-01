@@ -235,3 +235,29 @@ fn a_lapse_is_told_apart_from_a_rearm_and_from_leaving() {
         .unwrap_err();
     assert_eq!(left.code, "not_joined");
 }
+
+/// The lapse counts only asks the agent has not answered: replying, even
+/// before the asker resolves the card, ends the reminder at Stop.
+#[test]
+fn an_answered_ask_no_longer_counts_toward_the_lapse() {
+    let mut s = board();
+    let sent = at(
+        &mut s,
+        "alice",
+        "send",
+        json!({"to":"helper","body":"review?","ask":true}),
+        NOW,
+    );
+    let lapse = |s: &mut Store, now: i64| {
+        at(s, "helper", "brief", json!({}), now)["idle_readiness"]["lapse"].clone()
+    };
+    assert_eq!(lapse(&mut s, NOW + MIN)["open_asks_to_you"], 1);
+    at(
+        &mut s,
+        "helper",
+        "annotate",
+        json!({"id":sent["card"]["id"],"body":"done, see 1a2b3c"}),
+        NOW + 2 * MIN,
+    );
+    assert!(lapse(&mut s, NOW + 3 * MIN).is_null());
+}

@@ -1,5 +1,155 @@
 # Validation
 
+## No silent stalls (2026-10-01)
+
+`docs/design/no-silent-stalls.md` slices R1 to R5, on branch
+`claude/esc-followup` (main 63ae3a0 plus R5, R2, R4, R3 as approved at
+a8dabdf, and the follow-up commits through the reviewed SHA). `CARGO_INCREMENTAL=0 cargo
+test` on macOS 14.3 arm64: every test target passes, including those named
+below. The Mote tests ran against the real `mote 0.1.0`; they skip
+themselves when `mote` is not on `PATH`.
+
+### R1: one reachability test
+
+`tests/reachability.rs` (9 tests, in-memory store with explicit clocks) and
+`tests/wake_waits.rs` (1 test, a real daemon) prove:
+
+- a turn that ended 5 minutes ago is `present` and the send notice says
+  "nothing armed to wake it"; an hour later it is `absent`;
+- an armed native-monitor listener is `wakeable` until its declared expiry,
+  and not after, although the transport is still connected;
+- a listener filtered to one card, or with no declared activation, is
+  `present`;
+- a driven agent is `wakeable` while its controller waits and while a child
+  runs;
+- only an unfiltered wait in progress is `wakeable`. Each wait counts on its
+  own: a concurrent filtered wait, or a second unfiltered wait that times
+  out, leaves the first one counting, and the armed wait's client hanging up
+  ends it at once;
+- a question prefers a wakeable assignee over a present author, and the
+  result says who was passed over and how to reroute; a send notice names
+  who is wakeable;
+- friction counts a present but unarmed addressee as unreachable.
+
+Approved at 607a29b by independent review (fray card #26).
+
+### R5: arming and lapses
+
+`tests/arm.rs` (2 tests, a real daemon and the built binary) runs the Stop
+hook for an unarmed agent with an ask addressed to it: the hook blocks, and
+its reason begins with `FIRST: 1 open ask(s) are addressed to you and
+nothing is armed` and contains `fray --as helper arm`. It then runs the
+command `fray arm --minutes 5` prints, through `sh`, as a host monitor would,
+and the agent becomes `wakeable` within 10 s; with it running, `brief` has no
+lapse. `fray arm --host background-completion` prints `--once --activation
+background-completion` and no `--reconnect`. The second test
+(`a_stewards_text_brief_names_the_no_runner_state`) checks that a steward's
+text `brief` says when no runner is ticking.
+
+`a_lapse_is_told_apart_from_a_rearm_and_from_leaving` in
+`tests/reachability.rs` steps one agent through `unarmed`, covered, `lapsed`
+(declared expiry passed) and `rearm` (a one-shot listener ended); the rearm
+hint names `--host background-completion`; an unfiltered wait covers the
+agent; an agent that left is told nothing. Approved at 9935207 (fray card
+#26).
+
+### R2: Mote requests tracked by state
+
+In `tests/mote_sync.rs`, against `mote 0.1.0`:
+
+- `a_mote_request_is_carded_once_and_settles_when_answered_in_mote`: an open
+  request reaches its addressee as one card; a second sync creates nothing;
+  a note is not carded; when the addressee answers in Mote, the card is
+  resolved; `fray send` to an actor only Mote knows names the `mote msg send`
+  command;
+- `one_malformed_mote_request_does_not_stop_the_rest` and
+  `the_daemon_skips_an_uncardable_request_and_cards_the_rest`: a request
+  with a NUL in its body is carded with the NUL replaced, and a request Fray
+  cannot card (an over-long message id) is skipped and reported while the
+  others land (#79);
+- `board_agents_requests_are_read_before_mote_only_actors`: many Mote actors
+  who never joined cannot crowd out a board agent's requests (#80).
+
+Approved at b3bd95f (fray card #26).
+
+### R4: deadlines on asks
+
+`tests/deadlines.rs` (8 tests, in-memory store) proves:
+
+- an ask with `respond_within_ms` of 30 minutes is not overdue at 29 and is
+  at 31, in the asker's `brief` and in friction (`overdue: true`,
+  `soft_deadline: false`);
+- a bystander's reply does not clear it; the addressee's does;
+- patching tags, kind, status (short of closing) or assignee, by the asker,
+  the addressee or a bystander, neither removes the deadline nor hides the
+  ask (#81); after reassignment, the previous addressee's answer no longer
+  counts;
+- only the asker can move the deadline; a new one runs from the reply;
+- a deadline without `ask` is refused; an ask without one never appears in
+  `brief` and is overdue in friction after 24 hours (`soft_deadline: true`);
+- with no addressee other than the asker, anyone else's reply answers it;
+- after a bystander patches the kind to note, the asker can still move the
+  deadline (`the_asker_moves_the_deadline_even_after_a_kind_patch`).
+
+A unit test in `src/main.rs` checks that `--respond-within` accepts `30m`,
+`2h` and `30d` and rejects `0m`, `31d`, `30s`, `-1h`, `1.5h`, an overflowing
+count and non-ASCII units without panicking (#82). Approved at a460080 (fray
+card #26).
+
+### R3: escalation of stuck requests
+
+`tests/escalation.rs` (13 tests, in-memory store) proves:
+
+- an unreachable ask creates nothing within the grace period and, after it,
+  exactly one card for each of two present stewards, assigned to them and
+  visible in their `involved` inbox, naming `fray patch ID` and saying
+  nothing re-routes automatically; a second tick under another identity
+  creates nothing; the asker gets none;
+- a driven addressee, or one shown the ask by `inbox`, is not unreachable;
+- an overdue ask escalates even after it was shown, and both escalations are
+  resolved at the next tick after the addressee answers;
+- escalation cards are never escalated themselves, hours later;
+- a Mote request to an actor not on the board escalates, says that actor
+  has not joined, and settles when `mote_requests_sync` reports it answered;
+- a steward's `brief` says no runner is ticking until a tick happens; a
+  non-steward's does not; after a tick, `stuck_requests` lists the request
+  and reports the board as ticking; a steward's text `brief` carries the
+  note too (`a_stewards_text_brief_names_the_no_runner_state`, in
+  `tests/arm.rs`);
+- an addressee's reply ends "unreachable" even if nothing recorded showing it
+  (`a_reply_from_the_addressee_ends_unreachable`);
+- `escalation` (any case) cannot join;
+- re-routing to another addressee who cannot be woken escalates again, and a
+  steward who closed their card while the request is still stuck gets
+  nothing before an hour has passed, then one reminder (#83);
+- patching an ask's kind to `note` does not hide it from unreachable
+  escalation (#86);
+- 15 stuck asks to two stewards (30 cards due) produce 20 cards and 10
+  deferred on the first tick, and the other 10 on the next;
+- a Mote request whose addressee joins after it was first seen is listed
+  once, as its card, not also as a request to an unknown actor;
+- 1,001 unassigned asks without deadlines do not crowd a stuck ask out of
+  the scan window.
+
+`the_incident_reaches_a_present_steward_and_the_stuck_list` in
+`tests/mote_sync.rs` replays the 2026-09-30 incident against `mote 0.1.0`:
+alice sends helper a Mote request, and helper has nothing armed. With no
+runner alive, `fray --json stuck` reports `ticking: false` and lists the
+request from Mote directly. A steward then runs `watch --attention
+--notification --selection involved`; with no other board activity, its own
+background tick syncs Mote and escalates, and the steward's listener prints
+`Stuck (unreachable): Mote request from alice` within 20 s. In
+`an_answered_request_to_an_unjoined_actor_is_no_longer_stuck`, a Mote
+request to an actor who never joined is stuck, and once it is answered in
+Mote the next real sync re-reads it and `fray stuck` lists nothing (#84).
+
+Not tested: owner review's terminal walk-through (it needs a TTY); a board
+with several runners under real wall-clock time; and the brief's
+readiness-details trimming at the minimum budget, which the shorter arm hint
+no longer reaches in `tests/phase1.rs`. The R5 lapse counting only
+unanswered asks is tested by `an_answered_ask_no_longer_counts_toward_the_lapse`. R3 was approved at
+a8dabdf by independent review (fray card #26 @453).
+
 ## Git guard (epic child 4, 2026-09-30)
 
 `fray guard install` adds `pre-commit` and `pre-push` hooks to the
