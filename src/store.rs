@@ -4112,24 +4112,44 @@ pub(crate) fn ask_deadline(
         .optional()?)
 }
 
-/// Whether an open ask is overdue: past its deadline with no annotation from
-/// its current addressee since the deadline was set. A bystander's reply does
-/// not count; the addressee's "seen, later" does, since the requester sees it.
+/// Whether an open ask is overdue: past its deadline with no answer since
+/// the deadline was set. An answer is an annotation by its addressee; with no
+/// addressee other than the asker, any annotation by someone else. Whether
+/// it is an ask comes from its creation event, so changing the kind, status
+/// (short of closing it) or assignee cannot hide it (review of 9fbddc4, #81).
 pub(crate) fn ask_overdue(conn: &Connection, c: &Card, now: i64) -> Result<Option<i64>> {
-    if c.kind != "question" || c.terminal() || c.status == "blocked" {
+    if c.terminal() {
         return Ok(None);
     }
-    let (Some((by, seq)), Some(to)) = (ask_deadline(conn, c.id, &c.author)?, &c.assignee) else {
+    let asked: bool = conn
+        .query_row(
+            "SELECT json_extract(payload,'$.card.kind')='question' FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+            [c.id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !asked {
+        return Ok(None);
+    }
+    let Some((by, seq)) = ask_deadline(conn, c.id, &c.author)? else {
         return Ok(None);
     };
     if now < by {
         return Ok(None);
     }
-    let answered: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=? AND actor=? AND op='annotate' AND seq>?)",
-        params![c.id, to, seq],
-        |r| r.get(0),
-    )?;
+    let answered: bool = match c.assignee.as_deref().filter(|a| *a != c.author) {
+        Some(to) => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=? AND actor=? AND op='annotate' AND seq>?)",
+            params![c.id, to, seq],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=? AND actor<>? AND op='annotate' AND seq>?)",
+            params![c.id, c.author, seq],
+            |r| r.get(0),
+        )?,
+    };
     Ok((!answered).then_some(by))
 }
 
@@ -4448,7 +4468,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
     }
     // The asker's overdue asks (R4), oldest deadline first, at most 5.
     let mut st = conn.prepare(&format!(
-        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 ORDER BY c.id LIMIT 200"
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author=?1 AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=?1 AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL) ORDER BY c.id LIMIT 200"
     ))?;
     let ids = st
         .query_map([actor], |r| r.get::<_, i64>(0))?
@@ -4465,7 +4485,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
     if !overdue.is_empty() {
         let total = overdue.len();
         overdue.truncate(5);
-        out["overdue_asks"] = json!({"total":total,"items":overdue});
+        out["overdue_asks"] = json!({"total":total,"more":total > 5,"items":overdue});
     }
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {
