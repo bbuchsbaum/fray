@@ -1727,3 +1727,49 @@ fn an_answered_request_to_an_unjoined_actor_is_no_longer_stuck() {
     let v = stuck(&p);
     assert!(v["stuck"].as_array().unwrap().is_empty(), "{v}");
 }
+
+/// `fray team`: the roster with roles, hosts and reachability, ready beads
+/// nobody has claimed (claimed ones left out), and the gaps.
+#[test]
+fn fray_team_shows_roles_unclaimed_work_and_gaps() {
+    let Some(p) = Project::new("team") else {
+        return;
+    };
+    p.fray(&[], "lead", &["join", "--role", "steward"]);
+    let free = p.bead("alice");
+    let taken = p.bead("alice");
+    assert!(p.mote("bob", &["claim", &taken]).status.success());
+    let (ok, out) = p.fray(&[], "alice", &["--json", "team"]);
+    assert!(ok, "{out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let t = &v["team"];
+    let lead = t["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "lead")
+        .unwrap();
+    assert_eq!(lead["role"], "steward", "{t}");
+    let ready: Vec<&str> = t["ready_unclaimed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    assert!(ready.contains(&free.as_str()), "{t}");
+    assert!(
+        !ready.contains(&taken.as_str()),
+        "claimed beads are left out: {t}"
+    );
+    let gaps = t["gaps"].to_string();
+    assert!(
+        gaps.contains("no Team card") && gaps.contains("no wakeable steward"),
+        "{gaps}"
+    );
+    // The text form names the same things.
+    let (_, text) = p.fray(&[], "alice", &["team"]);
+    assert!(
+        text.contains("Ready, unclaimed: ") && text.contains("Gaps:"),
+        "{text}"
+    );
+}

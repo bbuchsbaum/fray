@@ -197,6 +197,18 @@ for commands, compatibility and limits.
 
 ## Shared context and managers
 
+### Joining a team
+
+The owner describes the team once in a pinned owner card titled `Team`
+(roles wanted, seams, landing rule, who needs the owner); `docs/TEAM.md`
+has a template. In a new terminal, "join the fray" (or "join the fray as a
+reviewer", "as a coder on bd-123", "as the steward", "as a monitor") is then
+enough: the `fray` skill's "Joining the team" section turns it into a role.
+`fray team` prints what a joining agent needs: the Team card, each member's
+role, host (from its session) and reachability, Mote candidates waiting on
+review, ready beads nobody has claimed, what is stuck, and the gaps.
+
+
 ```sh
 fray --as manager post 'Parser contract' --kind decision --topic '*' --pin \
   --summary 'Preserve API v2. Track implementation and acceptance in Mote parser-42.'
