@@ -750,7 +750,67 @@ pub fn request_items(list: &Value, to: &str) -> Vec<Value> {
                 "state": r["request_state"].as_str()?,
                 "body": body,
                 "entity": r["entity"].as_str(),
+                "sent_ms": r["sent_ts"].as_str().and_then(parse_ts_ms),
             }))
         })
         .collect()
+}
+
+/// Unix milliseconds from a Mote UTC timestamp such as
+/// `2026-10-01T00:05:40.486230Z`. None for anything else.
+pub fn parse_ts_ms(ts: &str) -> Option<i64> {
+    let ts = ts.strip_suffix('Z')?;
+    let (date, time) = ts.split_once('T')?;
+    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, "0"));
+    let mut t = hms.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+    let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Digits only, so a sign or a multibyte character cannot get through.
+    if !frac.bytes().all(|b| b.is_ascii_digit())
+        || !date
+            .bytes()
+            .chain(hms.bytes())
+            .all(|b| b.is_ascii_digit() || b == b'-' || b == b':')
+        || hms.contains('-')
+        || date.starts_with('-')
+    {
+        return None;
+    }
+    let ms: i64 = format!("{:0<3}", &frac[..frac.len().min(3)]).parse().ok()?;
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + ms)
+}
+
+#[cfg(test)]
+mod ts_tests {
+    #[test]
+    fn mote_timestamps_parse_to_unix_ms() {
+        assert_eq!(super::parse_ts_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            super::parse_ts_ms("2026-10-01T00:05:40.486230Z"),
+            Some(1_790_813_140_486)
+        );
+        assert_eq!(
+            super::parse_ts_ms("2000-02-29T12:00:00.5Z"),
+            Some(951_825_600_500)
+        );
+        assert_eq!(super::parse_ts_ms("2026-10-01 00:05:40Z"), None);
+        for bad in [
+            "2026-10-01T00:05:40.\u{e9}9Z",
+            "2026-10-01T-1:05:40Z",
+            "2026-10-01T00:05:40.-5Z",
+        ] {
+            assert_eq!(super::parse_ts_ms(bad), None, "{bad}");
+        }
+    }
 }

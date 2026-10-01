@@ -488,6 +488,29 @@ unresolved filters; `long_messages` enables `send`/`reply` bodies up to 8,000 UT
 bytes. Card summaries still have a 2,000-byte limit. Coordinate daemon upgrades
 with the owner; no capability failure automatically restarts it.
 
+### Stuck requests reach someone present
+
+A request is stuck when it is open and either nothing can wake its addressee
+and it has not been shown to them for 15 minutes, or it is past its deadline
+(`fray send NAME --ask --respond-within 30m`; the asker can move it with
+`fray reply ID --respond-within D`), or, for a Mote request, past Mote's
+one-hour horizon. Mote requests reach their Fray addressee as asks, and
+settle when answered in Mote; requests to Mote actors who never joined count
+as stuck after the grace period.
+
+Every `fray watch --attention` and `fray drive` ticks: each stuck request
+becomes one card, authored by the reserved `escalation` identity and
+assigned to each present steward, so a steward's `--selection involved`
+listener is woken. It is created once however many runners tick, and
+settles when the request is answered, shown or re-routed. Nothing is
+re-routed automatically.
+
+`fray stuck` lists what is stuck now, including Mote requests no runner has
+brought to the board yet, and says when no runner is ticking. `fray owner
+review` shows the same list first. With no runner, no armed steward and no
+one reading, escalation still waits for someone to look; that state is
+named, not hidden.
+
 ## Persistence and operation
 
 The default home is an ancestor `.fray/`, otherwise `fray/` inside Git's common
