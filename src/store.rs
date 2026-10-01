@@ -4601,13 +4601,17 @@ fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
     let mut out = json!({"enabled":enabled,"open_requests_awaiting_others":outgoing,"armed":armed,"listening":listening,"model_response_guaranteed":false});
     if enabled && outgoing > 0 && !armed {
         out["warning"] = json!(format!("{outgoing} open requests awaiting others; no armed listener covering their replies. A connected transport or a hook alone cannot wake an idle host."));
-        out["arm_command"] = json!(arm_command(actor, None, None));
-        out["arm_guidance"] = json!("Run the command through the host's supported notification tool. Add --activation native-monitor or background-completion only when that mechanism is actually installed, and --activation-expires-ms for a bounded lifetime. In hosts without idle wake support, use an explicit fray wait --timeout none while the session is active; do not promise automatic wake after returning control.");
+        // `fray arm` prints the full command with a declared activation and
+        // expiry; the bare watch alone would not count as armed.
+        out["arm_command"] = json!(format!("fray --as {actor} arm"));
+        out["arm_guidance"] = json!("Run `fray arm` (or `fray arm --host background-completion`) and start the command it prints through the host's supported notification tool, with the same lifetime. In hosts without idle wake support, use an explicit fray wait --timeout none while the session is active; do not promise automatic wake after returning control.");
     }
     // Asks addressed to this agent that nothing will wake it for once its
     // turn ends (no-silent-stalls R5). The next hook context says so first.
     let incoming: i64 = conn.query_row(
-        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.assignee=?1 AND c.author<>?1"),
+        // Asks this agent has not yet answered: an answer is any annotation
+        // by it after the ask was created (the asker resolves the card).
+        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.assignee=?1 AND c.author<>?1 AND NOT EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=?1 AND e.op='annotate')"),
         [actor],
         |r| r.get(0),
     )?;

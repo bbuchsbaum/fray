@@ -237,7 +237,12 @@ fn readiness_warning_with_maximum_identity_fits_the_minimum_brief_budget() {
     assert!(brief["idle_readiness"]["warning"].is_string());
     assert!(brief["idle_readiness"]["arm_command"].is_string());
     assert_eq!(brief["idle_readiness"]["open_requests_awaiting_others"], 1);
-    assert_eq!(brief["idle_readiness"]["details_omitted"], true);
+    // The hint is `fray arm`, short enough that the readiness details now
+    // fit beside it; rows are still trimmed to the budget.
+    assert_eq!(
+        brief["idle_readiness"]["arm_command"],
+        format!("fray --as {actor} arm")
+    );
     assert_eq!(brief["budget_truncated"], true);
 }
 
