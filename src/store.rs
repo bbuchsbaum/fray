@@ -2302,7 +2302,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             if requests.len() > 500 {
                 return Err(Error::invalid("at most 500 requests per call"));
             }
-            let (mut created, mut settled, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut created, mut settled, mut unknown, mut invalid) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            // Cards here are authored by the reserved, never-enabled `mote`
+            // identity, as mote_ingest's are; register it on first use.
+            conn.execute(
+                "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
+                params![MOTE, now],
+            )?;
             for r in requests {
                 check_fields(
                     r,
@@ -2311,7 +2318,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 let msg_id = string(r, "msg_id")?;
                 let recipient = string(r, "recipient")?;
                 let state = string(r, "state")?;
-                text(msg_id, "msg_id", 200, false)?;
+                if let Err(e) = text(msg_id, "msg_id", 200, false) {
+                    invalid.push(
+                        json!({"msg_id":clip(msg_id, 60),"recipient":recipient,"error":e.message}),
+                    );
+                    continue;
+                }
                 if !["open", "responded", "declined", "resolved"].contains(&state) {
                     return Err(Error::invalid("state: open|responded|declined|resolved"));
                 }
@@ -2337,22 +2349,51 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                             unknown.push(json!({"recipient":recipient,"msg_id":msg_id}));
                             continue;
                         }
-                        let from = r["from"].as_str().unwrap_or("?");
-                        let body = r["body"].as_str().unwrap_or("");
-                        let mut tags = vec!["mote".to_owned(), format!("mote:{msg_id}")];
-                        if let Some(entity) = r["entity"].as_str().filter(|e| !e.is_empty()) {
-                            tags.push(format!("mote:{entity}"));
+                        // Mote text is untrusted input: control characters are
+                        // replaced, over-long refs dropped, and an item that
+                        // still fails is skipped and reported, never allowed to
+                        // stop the rest (mote-adapter.md section 6; #79).
+                        let scrub = |t: &str| -> String {
+                            t.chars()
+                                .map(|ch| {
+                                    if ch.is_control() && ch != '\n' {
+                                        '\u{FFFD}'
+                                    } else {
+                                        ch
+                                    }
+                                })
+                                .collect()
+                        };
+                        let from = scrub(r["from"].as_str().unwrap_or("?"));
+                        let body = scrub(r["body"].as_str().unwrap_or(""));
+                        let mut tags = vec!["mote".to_owned()];
+                        for t in [Some(msg_id), r["entity"].as_str().filter(|e| !e.is_empty())]
+                            .into_iter()
+                            .flatten()
+                        {
+                            let tag = format!("mote:{t}");
+                            if tag.len() <= 80 && !tag.chars().any(char::is_control) {
+                                tags.push(tag);
+                            }
                         }
-                        let card = create_card(
+                        // The instructions first, so a long request cannot clip them.
+                        let card = match create_card(
                             conn,
                             MOTE,
                             &json!({"kind":"question","topic":format!("@{recipient}"),
                                 "title":clip(&format!("Mote request from {from}: {}", body.lines().next().unwrap_or("")), 160),
-                                "summary":clip(&format!("{body}\n\n{from} asked you this in Mote ({msg_id}). Answer there: `mote msg reply {msg_id} TEXT` (or --kind decline). Acking or closing this card is not a Mote answer; it settles here when Mote shows the request answered."), 2000),
+                                "summary":clip(&format!("{from} asked you this in Mote ({msg_id}). Answer there: `mote msg reply {msg_id} TEXT` (or --kind decline). Acking or closing this card is not a Mote answer; it settles here when Mote shows the request answered.\n\n{body}"), 2000),
                                 "priority":1,"tags":tags,"assignee":recipient}),
                             json!({"mote_request":msg_id,"from":from}),
                             now,
-                        )?;
+                        ) {
+                            Ok(card) => card,
+                            Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
+                                invalid.push(json!({"msg_id":msg_id,"recipient":recipient,"error":e.message}));
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        };
                         let id = card["card"]["id"].as_i64().unwrap_or(0);
                         conn.execute(
                             "INSERT INTO mote_requests(store_id,msg_id,recipient,card_id,state) VALUES(?,?,?,?,'open')",
@@ -2367,7 +2408,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                             params![answered, store_id, msg_id, recipient],
                         )?;
                         let c = get_card(conn, card_id)?;
-                        if !c.terminal() {
+                        // Already closed here: recorded, but not counted as
+                        // settled by this sync.
+                        if c.terminal() {
+                            continue;
+                        }
+                        {
                             conn.execute(
                                 "UPDATE cards SET rev=rev+1,status='resolved',lease_owner=NULL,lease_until_ms=0,fence=fence+1,updated_ms=? WHERE id=?",
                                 params![now, card_id],
@@ -2387,7 +2433,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     }
                 }
             }
-            Ok(json!({"created":created,"settled":settled,"unknown_recipients":unknown}))
+            Ok(
+                json!({"created":created,"settled":settled,"unknown_recipients":unknown,"invalid":invalid}),
+            )
         }
         "mote_sync_failed" => {
             // Consecutive timed-out syncs; the client reseeds at the tail after
@@ -2831,7 +2879,13 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     Ok(json!({"msg_id":r.get::<_,String>(0)?,"recipient":r.get::<_,String>(1)?}))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(json!({"tracked":rows}))
+            // Board agents, so a sync reads their requests before those of
+            // Mote actors who never joined (review of 405e671, #80).
+            let mut s = conn.prepare("SELECT name FROM agents WHERE enabled=1 ORDER BY name")?;
+            let joined = s
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(json!({"tracked":rows,"joined":joined}))
         }
         "mote_claims" => {
             // Every live holder Fray has recorded for a store, for

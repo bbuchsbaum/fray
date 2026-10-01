@@ -1481,3 +1481,103 @@ fn a_mote_request_is_carded_once_and_settles_when_answered_in_mote() {
         "{out}"
     );
 }
+
+/// Review of 405e671, #79: a request Fray cannot card as-is (a NUL in its
+/// body) never stops the others.
+#[test]
+fn one_malformed_mote_request_does_not_stop_the_rest() {
+    let Some(p) = Project::new("mreqbad") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    // A NUL cannot go through argv; mote reads it literally from stdin.
+    let mut bad = Command::new("mote")
+        .current_dir(&p.t.0)
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .arg("--store")
+        .arg(p.t.0.join(".mote"))
+        .args([
+            "--actor", "alice", "msg", "send", "--to", "bob", "--kind", "request", "--stdin",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        bad.stdin.take().unwrap().write_all(b"bad\0body").unwrap();
+    }
+    assert!(bad.wait().unwrap().success());
+    let out = p.mote(
+        "alice",
+        &[
+            "msg",
+            "send",
+            "--to",
+            "bob",
+            "--kind",
+            "request",
+            "a normal request",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = p.sync(&[], "alice").unwrap();
+    assert_eq!(r["created"].as_array().map_or(0, Vec::len), 2, "{r}");
+}
+
+/// Review of 405e671, #80: Mote actors who never joined cannot crowd out a
+/// board agent's requests, however many there are.
+#[test]
+fn board_agents_requests_are_read_before_mote_only_actors() {
+    let Some(p) = Project::new("mreqmany") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    for n in 1..=55 {
+        let to = format!("a{n:02}");
+        assert!(p
+            .mote(
+                "alice",
+                &["msg", "send", "--to", &to, "--kind", "request", "x"]
+            )
+            .status
+            .success());
+    }
+    assert!(p
+        .mote(
+            "alice",
+            &["msg", "send", "--to", "bob", "--kind", "request", "for bob"]
+        )
+        .status
+        .success());
+    let r = p.sync(&[], "alice").unwrap();
+    assert_eq!(r["created"].as_array().map_or(0, Vec::len), 1, "{r}");
+    assert!(
+        r["request_note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("56 addressees; 50 read"),
+        "{r}"
+    );
+}
+
+/// #79 at the daemon: an item that cannot be carded is skipped and
+/// reported; the rest of the call still lands.
+#[test]
+fn the_daemon_skips_an_uncardable_request_and_cards_the_rest() {
+    let mut b = board();
+    let r = b.execute_at(&Request::new(
+        "mote_requests_sync",
+        "alice",
+        json!({"store_id":"st-A","requests":[
+            {"msg_id":"x".repeat(300),"recipient":"bob","from":"alice","state":"open","body":"b"},
+            {"msg_id":"msg-ok","recipient":"bob","from":"alice","state":"open","body":"fine"}
+        ]})), NOW)
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(r["created"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["invalid"].as_array().unwrap().len(), 1, "{r}");
+}

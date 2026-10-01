@@ -1537,18 +1537,24 @@ fn mote_knows(home: &Path, name: &str) -> bool {
     }
 }
 
-/// One state pass over Mote requests (no-silent-stalls R2). Bounded: at
-/// most 50 addressees are read per sync.
+/// One state pass over Mote requests (no-silent-stalls R2), bounded to 50
+/// addressee reads and about 20 seconds. Requests already carded here, and
+/// board agents' requests, are read first; Mote actors who never joined
+/// (read only so R3 can report them) share what remains, from a random start
+/// so none is starved across ticks (review of 405e671, #80). Only open
+/// requests and those carded here go to the daemon.
 fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<Value> {
     use fray::mote;
-    let mut who: Vec<String> = Vec::new();
+    const READS: usize = 50;
+    let budget = std::time::Instant::now() + Duration::from_secs(20);
     let mut notes: Vec<String> = Vec::new();
+    let mut with_open: Vec<String> = Vec::new();
     match mote::run(store, Some(actor), &["actor", "list"], mote::read_timeout()) {
         mote::Outcome::Ok(list) => {
             for a in list.as_array().into_iter().flatten() {
                 if a["incoming_open_requests"].as_i64().unwrap_or(0) > 0 {
                     if let Some(name) = a["actor"].as_str() {
-                        who.push(name.to_owned());
+                        with_open.push(name.to_owned());
                     }
                 }
             }
@@ -1569,21 +1575,65 @@ fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<
         None,
         10,
     )?;
-    for t in tracked["tracked"].as_array().into_iter().flatten() {
-        if let Some(r) = t["recipient"].as_str() {
-            who.push(r.to_owned());
-        }
+    let tracked_ids: std::collections::HashSet<String> = tracked["tracked"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["msg_id"].as_str().map(str::to_owned))
+        .collect();
+    let joined: Vec<String> = tracked["joined"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str().map(str::to_owned))
+        .collect();
+    let mut first: Vec<String> = tracked["tracked"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["recipient"].as_str().map(str::to_owned))
+        .chain(with_open.iter().filter(|n| joined.contains(n)).cloned())
+        .collect();
+    first.sort();
+    first.dedup();
+    let mut rest: Vec<String> = with_open
+        .iter()
+        .filter(|n| !first.contains(n))
+        .cloned()
+        .collect();
+    rest.sort();
+    if !rest.is_empty() {
+        let start = fray::model::random_key()
+            .ok()
+            .and_then(|k| usize::from_str_radix(&k[..8], 16).ok())
+            .unwrap_or(0)
+            % rest.len();
+        rest.rotate_left(start);
     }
-    who.sort();
-    who.dedup();
-    if who.len() > 50 {
-        notes.push(format!("{} addressees; only 50 were read", who.len()));
-        who.truncate(50);
+    let total = first.len() + rest.len();
+    let mut who = first;
+    who.extend(rest);
+    if total > READS {
+        notes.push(format!(
+            "{total} addressees; {READS} read this sync, board agents first"
+        ));
+        who.truncate(READS);
     }
     let mut items = Vec::new();
     for to in &who {
+        if std::time::Instant::now() > budget {
+            notes.push("time budget reached; the rest next sync".to_owned());
+            break;
+        }
         match mote::run(store, Some(to), &["msg", "requests"], mote::read_timeout()) {
-            mote::Outcome::Ok(list) => items.extend(mote::request_items(&list, to)),
+            mote::Outcome::Ok(list) => {
+                items.extend(mote::request_items(&list, to).into_iter().filter(|r| {
+                    r["state"] == "open"
+                        || r["msg_id"]
+                            .as_str()
+                            .is_some_and(|m| tracked_ids.contains(m))
+                }))
+            }
             other => notes.push(format!("requests for {to} skipped: {other:?}")),
         }
     }
@@ -1605,6 +1655,14 @@ fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<
                 .cloned()
                 .unwrap_or_default(),
         );
+        for i in r["invalid"].as_array().into_iter().flatten() {
+            notes.push(format!(
+                "request {} to {} not carded: {}",
+                i["msg_id"].as_str().unwrap_or("?"),
+                i["recipient"].as_str().unwrap_or("?"),
+                i["error"].as_str().unwrap_or("?")
+            ));
+        }
     }
     Ok(
         json!({"created":created,"settled":settled,"unknown_recipients":unknown,
