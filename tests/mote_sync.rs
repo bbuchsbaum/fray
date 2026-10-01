@@ -1761,9 +1761,12 @@ fn fray_team_shows_roles_unclaimed_work_and_gaps() {
         !ready.contains(&taken.as_str()),
         "claimed beads are left out: {t}"
     );
+    // lead is a steward who just joined: present, so alive (no gap), and
+    // nobody should take the steward role from it (#98).
+    assert_eq!(t["steward_alive"], true, "{t}");
     let gaps = t["gaps"].to_string();
     assert!(
-        gaps.contains("no Team card") && gaps.contains("no wakeable steward"),
+        gaps.contains("no Team card") && !gaps.contains("steward"),
         "{gaps}"
     );
     // The text form names the same things.
@@ -1771,5 +1774,29 @@ fn fray_team_shows_roles_unclaimed_work_and_gaps() {
     assert!(
         text.contains("Ready, unclaimed: ") && text.contains("Gaps:"),
         "{text}"
+    );
+}
+
+/// Review of d9a64e9, #95: when Mote cannot be read, `fray team` says so;
+/// it never presents unknown work as no work.
+#[test]
+fn fray_team_reports_an_unreadable_mote_as_unknown() {
+    let Some(p) = Project::new("teamfail") else {
+        return;
+    };
+    p.bead("alice");
+    let (ok, out) = p.fray(
+        &[("FRAY_MOTE_BIN", "/usr/bin/false")],
+        "alice",
+        &["--json", "team"],
+    );
+    assert!(ok, "{out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let t = &v["team"];
+    assert!(t["ready_unclaimed"].is_null(), "{t}");
+    assert!(t["reviews_waiting"].is_null(), "{t}");
+    assert!(
+        t["gaps"].to_string().contains("Mote could not be read"),
+        "{t}"
     );
 }

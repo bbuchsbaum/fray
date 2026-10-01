@@ -180,12 +180,14 @@ after it say which: "as a coder" (or implementer, worker) means `worker`;
 A focus may follow ("a reviewer for the parser", "a coder on bd-123"). The
 role you are given wins; you only choose what was left open.
 
-1. Check in: `fray join --role ROLE` (worker if unsure), then `fray team`. It
+1. Check in: `fray join --role ROLE` when you were given a role, otherwise
+   plain `fray join`, which keeps any role you already hold; then `fray team`. It
    shows the owner's Team card, who holds each role with host and
    reachability, Mote candidates waiting on review, ready beads nobody has
    claimed, what is stuck, and the gaps.
 2. With no role given, take the first that fits:
-   - no wakeable steward, and you are an interactive Claude: steward;
+      - no live steward (`fray team` reports none wakeable or present), and you
+     are an interactive Claude: steward;
    - a review is waiting that you can give: a Mote candidate naming you as a
      reviewer, or a review whose named reviewer is absent and whose author
      is on the other host (offer to take it, through Fray, before starting);
@@ -193,15 +195,20 @@ role you are given wins; you only choose what was left open.
    - a seam has one side taken: take the other side, from the other host;
    - otherwise the highest-priority ready, unclaimed bead the Team card
      allows;
-   - nothing fits: say so, stay armed and idle. No busywork.
-3. Take work only through Mote (`mote preflight`, then `mote begin`); if two
+      - nothing fits: say so, stay armed and idle. No busywork.
+
+   Record the role you chose with `fray join --role ROLE`, so `fray team`
+   shows it to the next agent.
+3. Take work only through Mote (`mote preflight --issue ISSUE --paths
+   FILE...`, then `mote begin ISSUE --paths FILE...`); if two
    agents reach for the same bead, the one whose claim fails reads the board
    again and picks anew.
 4. Announce with `fray status "ROLE: what you are on"`, so the next agent to
    join sees it.
 5. Arm for your host: an interactive Claude runs what `fray arm` prints
-   through its Monitor. An interactive Codex cannot be woken: work while the
-   owner is there, and before they leave, give them the exact
+      through its Monitor. An interactive Codex cannot be woken: work while the
+   owner is there; before they leave, run `fray leave` (the drive is refused
+   while this session holds the name) and give them the exact
    `fray --as NAME drive -- codex exec -` command to keep this identity
    answerable.
 

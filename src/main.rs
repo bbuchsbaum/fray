@@ -1592,16 +1592,23 @@ fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
         .ok_or_else(bad)
 }
 
-/// The host an agent runs in, from its bound session (`claude:...`,
-/// `codex:...`); "unknown" otherwise, e.g. a drive started outside a host.
-fn agent_host(a: &Value) -> &'static str {
+/// The host an agent runs in: for a driven agent, the child its drive
+/// records (#99); otherwise its bound session (`claude:...`, `codex:...`);
+/// "unknown" when neither says.
+fn agent_host(a: &Value) -> String {
+    if let Some(host) = a["controller"]["detail"]["host"]
+        .as_str()
+        .filter(|h| !h.is_empty())
+    {
+        return host.to_owned();
+    }
     let session = a["session"]["bound"]["session"].as_str().unwrap_or("");
     if session.starts_with("claude:") {
-        "claude"
+        "claude".to_owned()
     } else if session.starts_with("codex:") {
-        "codex"
+        "codex".to_owned()
     } else {
-        "unknown"
+        "unknown".to_owned()
     }
 }
 
@@ -1621,9 +1628,21 @@ fn team_report(home: &Path, actor: &str) -> Result<Value> {
             "lanes":a["lanes"]}),
         );
     }
-    let wakeable_steward = members
-        .iter()
-        .any(|m| m["role"] == "steward" && m["reachability"] == "wakeable");
+    if roster["more"] == true {
+        // Listed in full only up to 100; say so rather than miss a role.
+        members
+            .push(json!({"name":"…","role":"more agents not listed","host":"","reachability":""}));
+    }
+    // A steward is alive when it can be woken or is merely between arms
+    // (present). A daemon too old to report reachability: recently seen.
+    let steward_alive = roster["items"].as_array().into_iter().flatten().any(|a| {
+        a["enabled"] == true
+            && a["role"] == "steward"
+            && match a["reachability"].as_str() {
+                Some(r) => r != "absent",
+                None => a["recently_seen"] == true,
+            }
+    });
     // The owner's Team card: a pinned owner decision titled "Team".
     let decisions = send(
         home,
@@ -1637,22 +1656,30 @@ fn team_report(home: &Path, actor: &str) -> Result<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .find(|c| {
+        .filter(|c| {
             c["title"]
                 .as_str()
                 .is_some_and(|t| t.trim().eq_ignore_ascii_case("team"))
         })
+        .max_by_key(|c| c["id"].as_i64().unwrap_or(0))
+        // The newest wins: revising the team is deciding "Team" again (#96).
         .map(|c| json!({"id":c["id"],"summary":c["summary"]}));
     let stuck = send(home, actor, "stuck_requests", json!({}), None, 10)
         .map(|v| v["stuck"].as_array().map_or(0, Vec::len))
         .ok();
-    let (reviews, ready) = team_mote(home, actor);
+    let (reviews, ready, mote_failures) = team_mote(home, actor);
     let mut gaps = Vec::new();
     if card.is_none() {
         gaps.push("no Team card: the owner pins one with `fray owner decide \"Team\" --summary ...` (docs/TEAM.md)".to_owned());
     }
-    if !wakeable_steward {
-        gaps.push("no wakeable steward".to_owned());
+    if !steward_alive {
+        gaps.push("no live steward (none wakeable or present)".to_owned());
+    }
+    if !mote_failures.is_empty() {
+        gaps.push(format!(
+            "Mote could not be read ({}): reviews and ready beads are unknown, not empty",
+            mote_failures.join("; ")
+        ));
     }
     if let Some(n) = stuck.filter(|n| *n > 0) {
         gaps.push(format!("{n} stuck request(s): `fray stuck`"));
@@ -1664,14 +1691,15 @@ fn team_report(home: &Path, actor: &str) -> Result<Value> {
         gaps.push(format!("{} ready bead(s) unclaimed", r.len()));
     }
     Ok(
-        json!({"team":{"card":card,"members":members,"wakeable_steward":wakeable_steward,
+        json!({"team":{"card":card,"members":members,"steward_alive":steward_alive,
         "stuck":stuck,"reviews_waiting":reviews,"ready_unclaimed":ready,"gaps":gaps}}),
     )
 }
 
 /// Pending Mote candidates still missing a named reviewer's review, and
-/// ready beads with no active claim; Null when Mote is not paired or fails.
-fn team_mote(home: &Path, actor: &str) -> (Value, Value) {
+/// ready beads with no active claim or assignee. Each is Null when Mote is
+/// not paired, or when its read failed, which the third value names (#95).
+fn team_mote(home: &Path, actor: &str) -> (Value, Value, Vec<String>) {
     use fray::mote;
     let store = (|| {
         let cwd = std::env::current_dir().ok()?;
@@ -1680,16 +1708,22 @@ fn team_mote(home: &Path, actor: &str) -> (Value, Value) {
         Some(mote::Store { path, store_id })
     })();
     let Some(store) = store else {
-        return (Value::Null, Value::Null);
+        return (Value::Null, Value::Null, Vec::new());
     };
+    let mut failures = Vec::new();
     let who = (!actor.is_empty() && actor != fray::store::OWNER).then_some(actor);
     let mut reviews = Vec::new();
-    if let mote::Outcome::Ok(list) = mote::run(
+    let candidates = mote::run(
         &store,
         who,
         &["candidate", "list", "--phase", "pending"],
         mote::read_timeout(),
-    ) {
+    );
+    let reviews_ok = matches!(candidates, mote::Outcome::Ok(_));
+    if !reviews_ok {
+        failures.push("candidate list".to_owned());
+    }
+    if let mote::Outcome::Ok(list) = candidates {
         for c in list.as_array().into_iter().flatten().take(50) {
             let missing: Vec<&str> = c["policy"]["reviewers"]
                 .as_array()
@@ -1705,7 +1739,12 @@ fn team_mote(home: &Path, actor: &str) -> (Value, Value) {
         }
     }
     let mut claimed = std::collections::HashSet::new();
-    if let mote::Outcome::Ok(board) = mote::run(&store, who, &["board"], mote::read_timeout()) {
+    let board = mote::run(&store, who, &["board"], mote::read_timeout());
+    let mut ready_ok = matches!(board, mote::Outcome::Ok(_));
+    if !ready_ok {
+        failures.push("board".to_owned());
+    }
+    if let mote::Outcome::Ok(board) = board {
         for c in board["active_claims"].as_array().into_iter().flatten() {
             if let Some(e) = c["entity"].as_str() {
                 claimed.insert(e.to_owned());
@@ -1713,7 +1752,12 @@ fn team_mote(home: &Path, actor: &str) -> (Value, Value) {
         }
     }
     let mut ready = Vec::new();
-    if let mote::Outcome::Ok(list) = mote::run(&store, who, &["ready"], mote::read_timeout()) {
+    let listed = mote::run(&store, who, &["ready"], mote::read_timeout());
+    if !matches!(listed, mote::Outcome::Ok(_)) {
+        failures.push("ready".to_owned());
+        ready_ok = false;
+    }
+    if let mote::Outcome::Ok(list) = listed {
         for b in list.as_array().into_iter().flatten() {
             let Some(id) = b["id"].as_str() else {
                 continue;
@@ -1727,7 +1771,15 @@ fn team_mote(home: &Path, actor: &str) -> (Value, Value) {
             }
         }
     }
-    (json!(reviews), json!(ready))
+    (
+        if reviews_ok {
+            json!(reviews)
+        } else {
+            Value::Null
+        },
+        if ready_ok { json!(ready) } else { Value::Null },
+        failures,
+    )
 }
 
 fn team_text(v: &Value) -> String {

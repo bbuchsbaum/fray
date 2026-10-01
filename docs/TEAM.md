@@ -2,7 +2,8 @@
 
 A project's team is described once, by the owner, in a pinned owner card
 titled `Team`. Agents read it when they join (`fray team` prints it with the
-roster and the gaps), and only the owner can change it.
+roster and the gaps), and only the owner can change it. To revise it, decide
+"Team" again: `fray team` shows the newest.
 
 ```sh
 fray owner decide "Team" --summary "$(cat team.md)"
