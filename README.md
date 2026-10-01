@@ -280,8 +280,8 @@ once a minute for the whole board: runners pace themselves on the last sync
 any of them ran, so several runners do not multiply the load. It is quiet on
 success, and reports a failure at most once an hour.
 `FRAY_MOTE_SYNC_INTERVAL_MS` changes the interval (100 ms to one hour).
-`FRAY_MOTE_SYNC=off` disables the whole background tick, which also stops
-that runner escalating stuck requests (see below).
+`FRAY_MOTE_SYNC=off` stops only the Mote sync; the runner still escalates
+stuck requests (see below).
 
 `status` pairs the board with a store only through the rules that chose the
 board:
@@ -530,7 +530,8 @@ continuation guard (`stop_hook_active`) prevents a hook loop. Hooks never
 rejoin an explicitly left identity at a tool boundary and honor
 `FRAY_SELECTION`.
 
-An agent that is not wakeable and has open asks addressed to it is told
+An agent that is not wakeable and has open asks addressed to it, without a
+reply from it, is told
 first: a `FIRST:` line at the top of `brief` and of any hook context the hook
 emits, and the Stop hook blocks once on it even with nothing new. `idle_readiness.lapse.kind` gives the reason:
 
@@ -540,8 +541,9 @@ emits, and the Stop hook blocks once on it even with nothing new. `idle_readines
   end of its session) and must be started again.
 
 Leaving the board is none of these, and an agent that has left is not told.
-The notice lasts while the asks are open, so it continues after you answer
-until each asker resolves its ask. `fray arm` prints the command to arm, with
+Only asks you have not yet replied to count: once you annotate an ask, it no
+longer keeps you on notice, though it stays open until its asker resolves it.
+The outgoing-asks warning gives `fray --as NAME arm` as its arm command. `fray arm` prints the command to arm, with
 an absolute expiry, and when coverage ends:
 
 ```sh
@@ -615,10 +617,14 @@ A request is stuck when it is open and either:
   and it is older than the grace period (15 minutes; the daemon reads
   `FRAY_STUCK_GRACE_MS`, 0 to one day). Being shown it by `inbox`, `wait`,
   `thread --unread`, a hook, an attention packet or a drive packet proves it
-  arrived, and after that only the deadline applies; `brief` does not count. A Mote request to an actor who never joined
-  the board counts after the same grace period;
-- **overdue:** it is past its deadline or, for a Mote request carded here,
-  more than an hour after Fray carded it (Mote's default request horizon).
+  arrived, and after that only the deadline applies. Reading `brief` does not
+  count as being shown. A Mote request to an actor who never joined the board
+  counts after the same grace period;
+- **overdue:** it is past its deadline or, for a Mote request, more than an
+  hour after it was sent (Mote's default request horizon).
+
+For Mote requests, both the grace period and the horizon count from Mote's
+`sent_ts`, not from when Fray first saw the request.
 
 Every persistent `fray watch --attention` and every `fray drive` ticks about
 once a minute, whether or not Mote is paired. Each tick escalates every stuck
@@ -636,16 +642,22 @@ automatically. Re-route it with `fray patch 1 --expect 1 --assignee NAME`,
 answer it yourself, or queue it for the owner with `fray ask-owner --card 1 ...`.
 ```
 
-The daemon records one escalation per request, reason and steward, so it is
-created once however many runners tick, under whatever identities. When the
-request is no longer stuck for that reason (answered, closed, shown to its
-addressee, re-routed to someone wakeable, or given a later deadline), a later
-tick resolves the escalation card. A steward is escalated to once per request
-and reason: if the same request becomes stuck again for the same reason (for
-example, re-routed to someone else who cannot be woken), that steward gets no
-new card, so check `fray stuck`. Nothing is re-routed automatically. A runner
-against a daemon without `escalations`, or running as `owner` or with no
-identity, does not escalate.
+The daemon keeps at most one open escalation per request, addressee, reason
+and steward, so a card is created once however many runners tick, under
+whatever identities. Each tick re-checks every open escalation's request
+directly. It resolves the escalation card only when the request is found
+clear: answered, closed, shown to its addressee, re-routed to someone
+wakeable, or given a later deadline. Otherwise:
+
+- re-routing to another addressee who cannot be woken is a new stuck request,
+  and escalates again;
+- a steward who closes their escalation card while the request is still stuck
+  gets a "Still stuck" card one hour after the escalation they closed;
+- a request that clears and later becomes stuck again escalates again.
+
+A tick creates at most 20 new escalation cards; the rest are deferred to later
+ticks. Nothing is re-routed automatically. A runner against a daemon without
+`escalations`, or running as `owner` or with no identity, does not escalate.
 
 ```sh
 fray stuck              # read only: what is stuck now, and whether a runner ticks
@@ -654,9 +666,12 @@ fray owner review       # the same list first, then the owner queue
 
 `fray stuck` also reads Mote directly, read only, for open requests older than
 the grace period whose addressee is not wakeable, so it works with no runner
-alive. That scan uses `FRAY_STUCK_GRACE_MS` from the caller's environment, and
-it can repeat a request the board has already carded. A steward's `brief` says when stuck requests exist and no
-runner has ticked in five minutes. With no runner, no present steward and no
+alive. It skips every request the board already tracks, so nothing is listed
+twice, and it uses `FRAY_STUCK_GRACE_MS` from the caller's environment. With
+nothing stuck it prints `Nothing is stuck.` A board is "not ticking" when no
+runner has ticked for more than twice the runners' interval, and never less
+than five minutes; a steward's `brief` then says so if stuck requests exist,
+and `fray stuck` adds the same line. With no runner, no present steward and no
 one reading, escalation waits for someone to look; Fray pages nothing outside
 itself. That state is named, not hidden.
 

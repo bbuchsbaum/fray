@@ -110,7 +110,7 @@ next start (`CREATE TABLE IF NOT EXISTS`) and its existing rows are untouched:
 | `lanes`, `agent_status`, `peer_generations`, `peer_seen` | advisory lanes, status lines, peer notices |
 | `review_subjects`, `review_verdicts` | versioned review references |
 | `mote_events`, `mote_claims`, `mote_subjects`, `mote_requests`, `mote_requests_unknown` | the Mote adapter's exactly-once and last-state records |
-| `escalations` | one row per stuck request, reason and steward |
+| `escalations` | escalation cards per stuck request, addressee, reason and steward |
 
 `wake_waits` has one row per unfiltered `wait` in progress (no card, kind,
 priority, addressed or unresolved filter); the row is deleted on every way the
@@ -118,10 +118,13 @@ wait ends, and rows a stopped daemon left behind expire after 150 seconds.
 `mote_requests` maps each Mote request (`store_id`, `msg_id`, recipient) to the
 card made for it and its last known state. `mote_requests_unknown` holds open
 requests to Mote actors who never joined, with first and last sighting; a row
-not refreshed for two hours is treated as gone. `escalations` is keyed
-`stuck:card:ID:REASON:STEWARD` (or `stuck:mreq:MSG_ID:...`), records the card it
-created and when it settled, and is what makes escalation idempotent across
-runners. `meta.last_tick_ms` records the last escalation tick.
+not refreshed for two hours is treated as gone; its first sighting is the
+request's Mote `sent_ts`. `escalations` has one row per escalation card:
+subject (`card:ID:ADDRESSEE` or `mreq:MSG_ID:ADDRESSEE`), reason, steward,
+card, creation and settlement times. At most one row per subject, reason and
+steward is open, which makes escalation idempotent across runners.
+`meta.last_tick_ms` and `meta.tick_interval_ms` record the last tick and the
+runners' interval.
 
 Indices cover active status/priority, topic, ownership, recent sequence, per-card
 events, and per-agent pending sequence. Current-state reads do not replay operations.
@@ -256,31 +259,38 @@ assigned to the agent, which every selection mode covers; that is why routed
 questions and escalations are always assigned.
 
 **Deadlines.** An ask's deadline is the latest `respond_by_ms` its author
-recorded, in the creation event or a later annotation. For deadlines, whether a
-card is an ask is read from its creation event, so changing kind, tags or
-assignee cannot hide an overdue ask. (The unreachable test, and moving a
-deadline, use the card's current kind.) It is overdue when open, past due, and without an annotation by its current
+recorded, in the creation event or a later annotation. Whether a card is an ask
+is read from its creation event, so changing kind, tags or assignee hides it
+neither from deadlines nor from escalation. (Moving a deadline with
+`reply --respond-within` does need the current kind to be `question`.) It is
+overdue when open, past due, and without an annotation by its current
 addressee (or, with none, by anyone but the asker) after the deadline was set.
 
 **Stuck requests and escalation.** `stuck_set` computes, at read time, open
 asks that are unreachable (addressee not wakeable, never shown them in a
 presented batch or exposure, older than the grace period, default 15 minutes,
 `FRAY_STUCK_GRACE_MS` in the daemon's environment) or overdue (past deadline;
-for Mote request cards, an hour after carding), plus fresh
-`mote_requests_unknown` rows past the grace period. Asks assigned to `owner`,
-and escalation cards, are never stuck; at most the 500 newest candidate cards
-are examined. An `escalations` key outlives its settlement, so a request that
-becomes stuck again for the same reason is not escalated again to the same
-steward. Time passing writes nothing, and a listener wakes only on a
+for Mote requests, an hour after Mote's `sent_ts`, from which the grace period
+also counts), plus fresh `mote_requests_unknown` rows past the grace period.
+Asks assigned to `owner`, and escalation cards, are never stuck. The scan takes
+only cards created as asks with an addressee other than the asker, or cards
+with a deadline, oldest first, up to 1,000. Time passing writes nothing, and a listener wakes only on a
 delivery, so the runners (`watch --attention` without `--once`, and `drive`)
 call `escalate_tick` about once per `FRAY_MOTE_SYNC_INTERVAL_MS` on every
 board, after syncing Mote where it is paired. One tick, in one transaction,
 creates a p1 note authored by the reserved `escalation` identity and assigned
 to each enabled steward who is not absent and is neither the request's asker
-nor its addressee, at most once per `escalations` key; and it resolves every
-open escalation whose request is no longer stuck for that reason. `brief` and
-hooks never run Mote and never tick; a steward's `brief` reads the stuck set
-and says when no tick happened within five minutes. Nothing is re-routed
+nor its addressee, unless that steward already has an open escalation for the
+same subject and reason. If the steward closed that card and it is at least an
+hour old, the tick settles it and creates a "Still stuck" reminder. At most 20
+new cards are created per tick; the rest are counted as deferred. The tick then
+re-checks each open escalation's request directly (not through the scan
+window) and resolves only those found clear. Because the subject names the
+addressee, a re-route to another unwakeable addressee escalates anew, and a
+request that clears and becomes stuck again escalates again. `brief` and hooks
+never run Mote and never tick; a steward's `brief` reads the stuck set and says
+when the board is not ticking: no tick for more than twice the runners'
+interval, and at least five minutes. Nothing is re-routed
 automatically and nothing pages outside Fray.
 
 Schema v2 creates participation/controller tables transactionally. A v1 migration

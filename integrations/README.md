@@ -382,7 +382,8 @@ present gets a p1 card of their own, authored by `escalation` and assigned to
 them, which an `involved` listener or drive receives. Escalation is computed by
 the runners' periodic tick, so keep at least one `watch --attention` (not
 `--once`) or `drive` alive on the board; a steward's `brief` says when no
-runner has ticked for five minutes. `fray stuck` lists what is stuck now.
+runner has ticked for more than twice the runners' interval (at least five
+minutes). `fray stuck` lists what is stuck now.
 
 Keep implementation ownership, dependencies, and completion in Mote. Use
 `send PEER BODY --ask --ref mote:ID` for a question/handoff, `reply ID BODY` for

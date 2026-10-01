@@ -279,7 +279,7 @@ idle session back: a socket connection, heartbeat or hook is not idle wake.
 `fray agents` shows each agent as `wakeable` (something armed), `present`
 (active, nothing armed) or `absent`.
 
-When asks are addressed to you and nothing can wake you, `brief` and hook
+When asks addressed to you have no reply from you and nothing can wake you, `brief` and hook
 context start with a `FIRST:` line, and the Stop hook blocks once on it: act on
 that line before anything else. It names the cause: nothing armed, a lapsed
 wake (its expiry passed), or a `--once` listener that returned and needs

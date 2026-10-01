@@ -195,11 +195,19 @@ sends a Mote request to an interactive agent with a lapsed listener.
 
 **Implementation note.** `fray owner review` does not run a tick. It lists
 the stuck set the daemon computes, plus a read-only scan of Mote for open
-requests older than the grace period whose addressee is not wakeable (at
-6f392e4 this scan can repeat a request the board already carded), and then
-walks the owner queue. The owner identity never writes as an agent,
+requests older than the grace period whose addressee is not wakeable, skipping
+every request the board already tracks, and then walks the owner queue. The owner identity never writes as an agent,
 so creating escalation cards stays with the runners. `fray stuck` shows the
 same list to anyone.
+
+**Implementation note: deduplication.** The daemon operation is
+`escalate_tick`. Instead of a permanent key per request, reason and steward,
+it keeps at most one open escalation per subject, reason and steward, and
+the subject names the addressee (`card:ID:NAME`, `mreq:MSG_ID:NAME`). A
+re-route to someone else who cannot be woken therefore escalates again, and
+so does a request that clears and later becomes stuck again. A steward who
+closes an escalation while its request is still stuck gets a "Still stuck"
+card an hour after the one they closed. A tick creates at most 20 cards.
 
 **The limit, stated plainly.** With no armed steward, no runner, and an owner
 who does not open review, escalation still waits for someone to look. Fray

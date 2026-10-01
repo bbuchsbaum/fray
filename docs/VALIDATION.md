@@ -2,8 +2,9 @@
 
 ## No silent stalls (2026-10-01)
 
-`docs/design/no-silent-stalls.md` slices R1 to R5, on branch `claude/docs` at
-6f392e4 (main 63ae3a0 plus R5, R2, R4 and R3). `CARGO_INCREMENTAL=0 cargo
+`docs/design/no-silent-stalls.md` slices R1 to R5, on branch
+`claude/esc-followup` at 664ae02 (main 63ae3a0 plus R5, R2, R4, R3 as approved
+at a8dabdf, and two follow-up commits). `CARGO_INCREMENTAL=0 cargo
 test` on macOS 14.3 arm64: every test target passes, including those named
 below. The Mote tests ran against the real `mote 0.1.0`; they skip
 themselves when `mote` is not on `PATH`.
@@ -91,7 +92,7 @@ card #26).
 
 ### R3: escalation of stuck requests
 
-`tests/escalation.rs` (7 tests, in-memory store) proves:
+`tests/escalation.rs` (12 tests, in-memory store) proves:
 
 - an unreachable ask creates nothing within the grace period and, after it,
   exactly one card for each of two present stewards, assigned to them and
@@ -103,14 +104,21 @@ card #26).
   resolved at the next tick after the addressee answers;
 - escalation cards are never escalated themselves, hours later;
 - a Mote request to an actor not on the board escalates, says that actor
-  has not joined, and settles when `mote_requests_sync` reports it
-  answered. The test feeds that operation directly; at 6f392e4 a real sync
-  never re-reads such a request once it leaves Mote's open list, so in
-  practice the escalation settles only when the unknown-recipient row ages
-  out, two hours after it was last seen;
+  has not joined, and settles when `mote_requests_sync` reports it answered;
 - a steward's `brief` says no runner is ticking until a tick happens; a
   non-steward's does not; `stuck_requests` lists the request either way;
-- `escalation` (any case) cannot join.
+- `escalation` (any case) cannot join;
+- re-routing to another addressee who cannot be woken escalates again, and a
+  steward who closed their card while the request is still stuck gets
+  nothing before an hour has passed, then one reminder (#83);
+- patching an ask's kind to `note` does not hide it from unreachable
+  escalation (#86);
+- 15 stuck asks to two stewards (30 cards due) produce 20 cards and 10
+  deferred on the first tick, and the other 10 on the next;
+- a Mote request whose addressee joins after it was first seen is listed
+  once, as its card, not also as a request to an unknown actor;
+- 1,001 unassigned asks without deadlines do not crowd a stuck ask out of
+  the scan window.
 
 `the_incident_reaches_a_present_steward_and_the_stuck_list` in
 `tests/mote_sync.rs` replays the 2026-09-30 incident against `mote 0.1.0`:
@@ -119,11 +127,16 @@ runner alive, `fray --json stuck` reports `ticking: false` and lists the
 request from Mote directly. A steward then runs `watch --attention
 --notification --selection involved`; with no other board activity, its own
 background tick syncs Mote and escalates, and the steward's listener prints
-`Stuck (unreachable): Mote request from alice` within 20 s.
+`Stuck (unreachable): Mote request from alice` within 20 s. In
+`an_answered_request_to_an_unjoined_actor_is_no_longer_stuck`, a Mote
+request to an actor who never joined is stuck, and once it is answered in
+Mote the next real sync re-reads it and `fray stuck` lists nothing (#84).
 
-Not tested: owner review's terminal walk-through (it needs a TTY), and a
-board with several runners under real wall-clock time. R3 was under
-independent review at 6f392e4.
+Not tested: owner review's terminal walk-through (it needs a TTY); a board
+with several runners under real wall-clock time; and the 664ae02 change that
+makes the R5 lapse count only asks the agent has not annotated (only the
+changed arm hint in `tests/phase1.rs` is checked). R3 was approved at
+a8dabdf by independent review (fray card #26 @453).
 
 ## Git guard (epic child 4, 2026-09-30)
 
