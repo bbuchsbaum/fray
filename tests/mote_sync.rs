@@ -1673,10 +1673,57 @@ fn the_incident_reaches_a_present_steward_and_the_stuck_list() {
     }
     let _ = watch.kill();
     let _ = watch.wait();
+    if heard.is_some() {
+        // #85: now carded, it is listed from the board, not as unsynced.
+        let (_, out) = p.fray(&grace, "", &["--json", "stuck"]);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["mote_not_on_board"].as_array().unwrap().is_empty(), "{v}");
+    }
     if heard.is_none() {
         let rest: Vec<String> = rx.try_iter().collect();
         let (_, stuck) = p.fray(&grace, "", &["--json", "stuck"]);
         let (_, inbox) = p.fray(&[], "steward", &["--json", "inbox", "--selection", "all"]);
         panic!("the steward's listener never heard the escalation; lines {rest:?}; stuck {stuck}; inbox {inbox}");
     }
+}
+
+/// Review of 39ca448, #84: a request to an actor who never joined stops
+/// being stuck as soon as it is answered in Mote.
+#[test]
+fn an_answered_request_to_an_unjoined_actor_is_no_longer_stuck() {
+    let Some(p) = Project::new("unknownans") else {
+        return;
+    };
+    let grace = [("FRAY_STUCK_GRACE_MS", "0")];
+    p.fray(&[], "", &["stop"]);
+    p.fray(&grace, "", &["start"]);
+    p.sync(&[], "alice").unwrap();
+    let out = p.mote(
+        "alice",
+        &[
+            "msg", "send", "--to", "zed", "--kind", "request", "x", "--json",
+        ],
+    );
+    let msg = serde_json::from_slice::<Value>(&out.stdout).unwrap()["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.sync(&grace, "alice").unwrap();
+    let stuck = |p: &Project| -> Value {
+        let (_, out) = p.fray(&grace, "", &["--json", "stuck"]);
+        serde_json::from_str(&out).unwrap()
+    };
+    assert_eq!(
+        stuck(&p)["stuck"].as_array().unwrap().len(),
+        1,
+        "{}",
+        stuck(&p)
+    );
+    assert!(p
+        .mote("zed", &["msg", "reply", &msg, "done"])
+        .status
+        .success());
+    p.sync(&grace, "alice").unwrap();
+    let v = stuck(&p);
+    assert!(v["stuck"].as_array().unwrap().is_empty(), "{v}");
 }

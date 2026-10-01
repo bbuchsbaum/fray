@@ -239,3 +239,90 @@ fn the_escalation_name_is_reserved() {
         .unwrap_err();
     assert_eq!(e.code, "reserved_escalation");
 }
+
+/// Review of 39ca448, #83: re-routing to someone else who cannot be woken
+/// escalates again, and a steward who closed theirs while it is still stuck
+/// is reminded an hour later.
+#[test]
+fn a_still_stuck_request_escalates_again_after_a_reroute_or_an_hour() {
+    let mut s = board();
+    at(&mut s, "other", "join", json!({"topics":[]}), NOW);
+    let id = ask(&mut s, json!({}));
+    heartbeat(&mut s, NOW + 20 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
+    assert_eq!(t["created"].as_array().unwrap().len(), 2, "{t}");
+    // steward re-routes to `other`, who is not armed either.
+    let rev =
+        at(&mut s, "steward", "show", json!({"id":id}), NOW + 21 * MIN)["card"]["rev"].clone();
+    at(
+        &mut s,
+        "steward",
+        "patch",
+        json!({"id":id,"expect":rev,"assignee":"other"}),
+        NOW + 21 * MIN,
+    );
+    heartbeat(&mut s, NOW + 40 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 40 * MIN);
+    assert_eq!(t["created"].as_array().unwrap().len(), 2, "re-routed: {t}");
+    assert_eq!(
+        t["settled"].as_array().unwrap().len(),
+        2,
+        "old subject: {t}"
+    );
+    // steward closes its card; still stuck, nothing until an hour has passed.
+    let mine = escalations(&mut s, "steward", NOW + 41 * MIN)
+        .into_iter()
+        .find(|c| c["status"] == "open")
+        .unwrap();
+    at(
+        &mut s,
+        "steward",
+        "patch",
+        json!({"id":mine["id"],"expect":mine["rev"],"status":"resolved"}),
+        NOW + 41 * MIN,
+    );
+    heartbeat(&mut s, NOW + 60 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 60 * MIN);
+    assert_eq!(t["created"].as_array().unwrap().len(), 0, "{t}");
+    heartbeat(&mut s, NOW + 101 * MIN);
+    let t = at(
+        &mut s,
+        "runner",
+        "escalate_tick",
+        json!({}),
+        NOW + 101 * MIN,
+    );
+    assert_eq!(t["created"].as_array().unwrap().len(), 1, "reminder: {t}");
+}
+
+/// #86: patching an ask's kind away does not hide it from escalation.
+#[test]
+fn a_kind_patch_does_not_hide_an_unreachable_ask() {
+    let mut s = board();
+    let id = ask(&mut s, json!({}));
+    at(
+        &mut s,
+        "runner",
+        "patch",
+        json!({"id":id,"expect":1,"kind":"note"}),
+        NOW + MIN,
+    );
+    heartbeat(&mut s, NOW + 20 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
+    assert_eq!(t["stuck"], 1, "{t}");
+}
+
+/// A burst of stuck requests is escalated a bounded number per tick.
+#[test]
+fn escalations_are_bounded_per_tick() {
+    let mut s = board();
+    for _ in 0..15 {
+        ask(&mut s, json!({}));
+    }
+    heartbeat(&mut s, NOW + 20 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
+    assert_eq!(t["created"].as_array().unwrap().len(), 20, "{t}");
+    assert_eq!(t["deferred"], 10, "{t}");
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 21 * MIN);
+    assert_eq!(t["created"].as_array().unwrap().len(), 10, "{t}");
+}

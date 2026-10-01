@@ -750,6 +750,7 @@ pub fn request_items(list: &Value, to: &str) -> Vec<Value> {
                 "state": r["request_state"].as_str()?,
                 "body": body,
                 "entity": r["entity"].as_str(),
+                "sent_ms": r["sent_ts"].as_str().and_then(parse_ts_ms),
             }))
         })
         .collect()
@@ -766,6 +767,17 @@ pub fn parse_ts_ms(ts: &str) -> Option<i64> {
     let mut t = hms.splitn(3, ':').map(|p| p.parse::<i64>().ok());
     let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
     if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Digits only, so a sign or a multibyte character cannot get through.
+    if !frac.bytes().all(|b| b.is_ascii_digit())
+        || !date
+            .bytes()
+            .chain(hms.bytes())
+            .all(|b| b.is_ascii_digit() || b == b'-' || b == b':')
+        || hms.contains('-')
+        || date.starts_with('-')
+    {
         return None;
     }
     let ms: i64 = format!("{:0<3}", &frac[..frac.len().min(3)]).parse().ok()?;
@@ -793,5 +805,12 @@ mod ts_tests {
             Some(951_825_600_500)
         );
         assert_eq!(super::parse_ts_ms("2026-10-01 00:05:40Z"), None);
+        for bad in [
+            "2026-10-01T00:05:40.\u{e9}9Z",
+            "2026-10-01T-1:05:40Z",
+            "2026-10-01T00:05:40.-5Z",
+        ] {
+            assert_eq!(super::parse_ts_ms(bad), None, "{bad}");
+        }
     }
 }

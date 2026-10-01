@@ -988,12 +988,11 @@ fn mote_status(home: &Path, actor: &str) -> Result<Value> {
 /// `FRAY_MOTE_SYNC=off` disables it; `FRAY_MOTE_SYNC_INTERVAL_MS` sets the
 /// interval (default 60 s).
 fn background_mote_sync(home: &Path, actor: &str) {
-    if actor.is_empty()
-        || actor == fray::store::OWNER
-        || std::env::var("FRAY_MOTE_SYNC").as_deref() == Ok("off")
-    {
+    if actor.is_empty() || actor == fray::store::OWNER {
         return;
     }
+    // FRAY_MOTE_SYNC=off stops the Mote sync only; escalation still ticks.
+    let mote_off = std::env::var("FRAY_MOTE_SYNC").as_deref() == Ok("off");
     // Every board ticks (no-silent-stalls R3): Mote is synced only where it
     // is paired, and stuck requests are escalated wherever the daemon can.
     let Ok(cwd) = std::env::current_dir() else {
@@ -1022,16 +1021,19 @@ fn background_mote_sync(home: &Path, actor: &str) {
         // Asked here, not before the runner starts: nothing extra happens
         // on the way to its first wait. A daemon without escalations, on a
         // board without Mote, leaves nothing to do.
-        let escalates = send(&home, &actor, "ping", json!({}), None, 10)
-            .map(|p| {
-                p["capabilities"]
-                    .as_array()
-                    .is_some_and(|c| c.iter().any(|x| x == "escalations"))
-            })
-            .unwrap_or(false);
-        if !paired && !escalates {
-            return;
-        }
+        let paired = paired && !mote_off;
+        // Asked again each round until the daemon has it: a ping that
+        // failed at startup, or a daemon upgraded later, still ends in ticks.
+        let has_escalations = || {
+            send(&home, &actor, "ping", json!({}), None, 10)
+                .map(|p| {
+                    p["capabilities"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().any(|x| x == "escalations"))
+                })
+                .unwrap_or(false)
+        };
+        let mut escalates = has_escalations();
         loop {
             let recent = paired
                 && send(&home, &actor, "mote_binding", json!({}), None, 10)
@@ -1057,7 +1059,16 @@ fn background_mote_sync(home: &Path, actor: &str) {
                 }
             }
             if escalates {
-                let _ = send(&home, &actor, "escalate_tick", json!({}), None, 10);
+                let _ = send(
+                    &home,
+                    &actor,
+                    "escalate_tick",
+                    json!({"interval_ms":interval.as_millis() as u64}),
+                    None,
+                    10,
+                );
+            } else {
+                escalates = has_escalations();
             }
             std::thread::sleep(interval.mul_f64(0.75) + jitter(interval / 2));
         }
@@ -1565,11 +1576,13 @@ fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
 /// grace period whose addressee nothing here can wake. Writes nothing.
 fn stuck_report(home: &Path, who: &str) -> Result<Value> {
     let v = send(home, who, "stuck_requests", json!({}), None, 10)?;
-    let known: Vec<String> = v["stuck"]
+    // Requests the board already tracks are listed from the board, not as
+    // "not yet on the board" (#85).
+    let known: Vec<String> = v["known_msg_ids"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|s| s["msg_id"].as_str().map(str::to_owned))
+        .filter_map(|m| m.as_str().map(str::to_owned))
         .collect();
     let unseen = mote_unseen_requests(home, who, &known).unwrap_or_default();
     Ok(
@@ -1765,6 +1778,7 @@ fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<
         .as_array()
         .into_iter()
         .flatten()
+        .chain(tracked["unknown"].as_array().into_iter().flatten())
         .filter_map(|t| t["msg_id"].as_str().map(str::to_owned))
         .collect();
     let joined: Vec<String> = tracked["joined"]
@@ -1777,6 +1791,7 @@ fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<
         .as_array()
         .into_iter()
         .flatten()
+        .chain(tracked["unknown"].as_array().into_iter().flatten())
         .filter_map(|t| t["recipient"].as_str().map(str::to_owned))
         .chain(with_open.iter().filter(|n| joined.contains(n)).cloned())
         .collect();

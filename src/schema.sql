@@ -248,13 +248,15 @@ CREATE TABLE IF NOT EXISTS mote_requests_unknown(
 -- Escalations of stuck requests (docs/design/no-silent-stalls.md R3): one
 -- card per stuck request, reason and steward, whoever ticks.
 CREATE TABLE IF NOT EXISTS escalations(
-    key TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     subject TEXT NOT NULL,
+    reason TEXT NOT NULL,
     recipient TEXT NOT NULL,
     card_id INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL,
     settled_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS escalations_open ON escalations(settled_ms, subject);
+CREATE INDEX IF NOT EXISTS escalations_open ON escalations(subject, reason, recipient, settled_ms);
 CREATE TABLE IF NOT EXISTS mote_subjects(
     store_id TEXT NOT NULL,
     subject TEXT NOT NULL,
