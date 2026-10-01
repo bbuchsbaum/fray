@@ -11,7 +11,7 @@ themselves when `mote` is not on `PATH`.
 
 ### R1: one reachability test
 
-`tests/reachability.rs` (8 tests, in-memory store with explicit clocks) and
+`tests/reachability.rs` (9 tests, in-memory store with explicit clocks) and
 `tests/wake_waits.rs` (1 test, a real daemon) prove:
 
 - a turn that ended 5 minutes ago is `present` and the send notice says
@@ -35,14 +35,16 @@ Approved at 607a29b by independent review (fray card #26).
 
 ### R5: arming and lapses
 
-`tests/arm.rs` (1 test, a real daemon and the built binary) runs the Stop
+`tests/arm.rs` (2 tests, a real daemon and the built binary) runs the Stop
 hook for an unarmed agent with an ask addressed to it: the hook blocks, and
 its reason begins with `FIRST: 1 open ask(s) are addressed to you and
 nothing is armed` and contains `fray --as helper arm`. It then runs the
 command `fray arm --minutes 5` prints, through `sh`, as a host monitor would,
 and the agent becomes `wakeable` within 10 s; with it running, `brief` has no
 lapse. `fray arm --host background-completion` prints `--once --activation
-background-completion` and no `--reconnect`.
+background-completion` and no `--reconnect`. The second test
+(`a_stewards_text_brief_names_the_no_runner_state`) checks that a steward's
+text `brief` says when no runner is ticking.
 
 `a_lapse_is_told_apart_from_a_rearm_and_from_leaving` in
 `tests/reachability.rs` steps one agent through `unarmed`, covered, `lapsed`
@@ -72,7 +74,7 @@ Approved at b3bd95f (fray card #26).
 
 ### R4: deadlines on asks
 
-`tests/deadlines.rs` (7 tests, in-memory store) proves:
+`tests/deadlines.rs` (8 tests, in-memory store) proves:
 
 - an ask with `respond_within_ms` of 30 minutes is not overdue at 29 and is
   at 31, in the asker's `brief` and in friction (`overdue: true`,
@@ -85,7 +87,9 @@ Approved at b3bd95f (fray card #26).
 - only the asker can move the deadline; a new one runs from the reply;
 - a deadline without `ask` is refused; an ask without one never appears in
   `brief` and is overdue in friction after 24 hours (`soft_deadline: true`);
-- with no addressee other than the asker, anyone else's reply answers it.
+- with no addressee other than the asker, anyone else's reply answers it;
+- after a bystander patches the kind to note, the asker can still move the
+  deadline (`the_asker_moves_the_deadline_even_after_a_kind_patch`).
 
 A unit test in `src/main.rs` checks that `--respond-within` accepts `30m`,
 `2h` and `30d` and rejects `0m`, `31d`, `30s`, `-1h`, `1.5h`, an overflowing
@@ -110,7 +114,8 @@ card #26).
 - a steward's `brief` says no runner is ticking until a tick happens; a
   non-steward's does not; after a tick, `stuck_requests` lists the request
   and reports the board as ticking; a steward's text `brief` carries the
-  note too (`a_stewards_text_brief_names_the_no_runner_state`);
+  note too (`a_stewards_text_brief_names_the_no_runner_state`, in
+  `tests/arm.rs`);
 - an addressee's reply ends "unreachable" even if nothing recorded showing it
   (`a_reply_from_the_addressee_ends_unreachable`);
 - `escalation` (any case) cannot join;
