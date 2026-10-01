@@ -12,6 +12,9 @@ pub const OWNER: &str = "owner";
 /// The reserved identity that authors attention derived from Mote. It never
 /// joins or acts; it only lets a Mote event reach the agent who synced it.
 pub const MOTE: &str = "mote";
+/// The reserved identity that authors escalations of stuck requests
+/// (no-silent-stalls R3). Like `mote`, it never joins or acts.
+pub const ESCALATION: &str = "escalation";
 
 /// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
 /// owner1 …): case, separators and a numeric suffix are ignored.
@@ -366,6 +369,7 @@ impl Store {
                 | "mote_ingest"
                 | "mote_sync_failed"
                 | "mote_requests_sync"
+                | "escalate_tick"
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
@@ -396,6 +400,20 @@ impl Store {
             return Err(Error::new(
                 "reserved_mote",
                 "`mote` is reserved for attention derived from Mote; choose another name",
+            ));
+        }
+        if req.op == "join"
+            && req
+                .actor
+                .to_lowercase()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                == ESCALATION
+        {
+            return Err(Error::new(
+                "reserved_escalation",
+                "`escalation` is reserved for escalations of stuck requests; choose another name",
             ));
         }
         if req.actor != OWNER && req.op == "join" && owner_lookalike(&req.actor) {
@@ -2375,7 +2393,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     // Already carded, or answered before it was ever carded.
                     (Some((_, ref was)), "open") if was == "open" => {}
                     (Some((_, ref was)), _) if was != "open" => {}
-                    (None, s) if s != "open" => {}
+                    (None, s) if s != "open" => {
+                        conn.execute(
+                            "DELETE FROM mote_requests_unknown WHERE store_id=? AND msg_id=? AND recipient=?",
+                            params![store_id, msg_id, recipient],
+                        )?;
+                    }
                     (None, _) => {
                         let joined: bool = conn.query_row(
                             "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
@@ -2383,6 +2406,12 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                             |x| x.get(0),
                         )?;
                         if recipient == MOTE || !joined {
+                            // Kept for R3: nobody here can be asked, so it
+                            // escalates once its grace period passes.
+                            conn.execute(
+                                "INSERT INTO mote_requests_unknown(store_id,msg_id,recipient,sender,first_seen_ms,last_seen_ms) VALUES(?1,?2,?3,?4,?5,?5) ON CONFLICT(store_id,msg_id,recipient) DO UPDATE SET last_seen_ms=excluded.last_seen_ms",
+                                params![store_id, msg_id, recipient, r["from"].as_str().unwrap_or("?"), now],
+                            )?;
                             unknown.push(json!({"recipient":recipient,"msg_id":msg_id}));
                             continue;
                         }
@@ -2473,6 +2502,14 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             Ok(
                 json!({"created":created,"settled":settled,"unknown_recipients":unknown,"invalid":invalid}),
             )
+        }
+        "escalate_tick" => {
+            // R3: find stuck requests and escalate each to every present
+            // steward, once, board-wide; settle escalations whose request has
+            // cleared. The daemon decides what is stuck, so a runner can
+            // neither forge nor revive one.
+            check_fields(a, &[])?;
+            escalate_tick(conn, now)
         }
         "mote_sync_failed" => {
             // Consecutive timed-out syncs; the client reseeds at the tail after
@@ -2631,7 +2668,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2901,6 +2938,18 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "mote_binding" => {
             check_fields(a, &[])?;
             Ok(json!({"binding":mote_binding(conn)?}))
+        }
+        "stuck_requests" => {
+            // R3, read only: what is stuck now, and whether anyone is ticking.
+            check_fields(a, &[])?;
+            let last = conn
+                .query_row("SELECT value FROM meta WHERE key='last_tick_ms'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?
+                .and_then(|v| v.parse::<i64>().ok());
+            Ok(json!({"stuck":stuck_set(conn, now)?,"last_tick_ms":last,
+                "ticking":last.is_some_and(|t| now - t < TICK_STALE_MS)}))
         }
         "mote_requests_tracked" => {
             // The requests carded and still open here, so a sync can read
@@ -4084,6 +4133,199 @@ pub(crate) fn ask_overdue(conn: &Connection, c: &Card, now: i64) -> Result<Optio
     Ok((!answered).then_some(by))
 }
 
+/// R3 timings: an addressee nothing can wake gets this long before its
+/// request counts as stuck; a Mote request is overdue after Mote's own
+/// default request horizon; an unknown-recipient row unseen this long is gone;
+/// a board with no tick this long is "not ticking".
+const STUCK_GRACE_MS: i64 = 15 * 60_000;
+const MOTE_HORIZON_MS: i64 = 60 * 60_000;
+const UNKNOWN_FRESH_MS: i64 = 2 * 60 * 60_000;
+pub(crate) const TICK_STALE_MS: i64 = 5 * 60_000;
+
+/// Requests that are stuck now (R3): open asks whose addressee nothing can
+/// wake and who was never shown them, after a grace period; asks past their
+/// deadline (R4) or, for Mote requests, past Mote's horizon; and open Mote
+/// requests to actors who never joined. Escalation cards are never stuck.
+pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut s = conn.prepare(&format!(
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.status IN ('open','active') AND c.assignee IS NOT NULL AND c.assignee<>?1 AND c.author<>?2 ORDER BY c.id DESC LIMIT 500"
+    ))?;
+    let ids = s
+        .query_map(params![OWNER, ESCALATION], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in ids {
+        let c = get_card(conn, id)?;
+        let Some(to) = c.assignee.clone() else {
+            continue;
+        };
+        let reach = reachability(conn, &to, now)?;
+        let mut reasons = Vec::new();
+        if c.author == MOTE {
+            if now - c.created_ms >= MOTE_HORIZON_MS {
+                reasons.push("overdue");
+            }
+        } else if ask_overdue(conn, &c, now)?.is_some() {
+            reasons.push("overdue");
+        }
+        // Shown to the addressee proves it arrived; then only deadlines apply.
+        let shown: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deliveries WHERE agent=?1 AND card_id=?2 AND shown_at_ms>0) OR EXISTS(SELECT 1 FROM presented_items i JOIN presented_batches b ON b.batch=i.batch WHERE b.agent=?1 AND i.card_id=?2)",
+            params![to, id],
+            |r| r.get(0),
+        )?;
+        if reach != Reach::Wakeable && !shown && now - c.created_ms >= STUCK_GRACE_MS {
+            reasons.push("unreachable");
+        }
+        for reason in reasons {
+            out.push(
+                json!({"subject":format!("card:{id}"),"card_id":id,"reason":reason,
+                "addressee":to,"requester":c.author,"title":c.title,"rev":c.rev,
+                "reachability":reach.as_str(),"age_min":(now-c.created_ms)/60_000}),
+            );
+        }
+    }
+    let mut s = conn.prepare(
+        "SELECT msg_id,recipient,sender,first_seen_ms FROM mote_requests_unknown WHERE last_seen_ms>? AND first_seen_ms<=? ORDER BY first_seen_ms LIMIT 200",
+    )?;
+    let rows = s
+        .query_map(params![now - UNKNOWN_FRESH_MS, now - STUCK_GRACE_MS], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (msg, to, from, first) in rows {
+        out.push(
+            json!({"subject":format!("mreq:{msg}"),"msg_id":msg,"reason":"unreachable",
+            "addressee":to,"requester":from,"title":format!("Mote request {msg}"),
+            "reachability":"not on this board","age_min":(now-first)/60_000}),
+        );
+    }
+    Ok(out)
+}
+
+/// One R3 tick (see `stuck_set`): new escalations for present stewards,
+/// settled ones for requests that have cleared.
+fn escalate_tick(conn: &Connection, now: i64) -> Result<Value> {
+    conn.execute(
+        "INSERT INTO meta(key,value) VALUES('last_tick_ms',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [now.to_string()],
+    )?;
+    let stuck = stuck_set(conn, now)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
+        params![ESCALATION, now],
+    )?;
+    let mut st =
+        conn.prepare("SELECT name FROM agents WHERE enabled=1 AND role='steward' ORDER BY name")?;
+    let stewards = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut present = Vec::new();
+    for name in stewards {
+        if reachability(conn, &name, now)? != Reach::Absent {
+            present.push(name);
+        }
+    }
+    let (mut created, mut settled) = (Vec::new(), Vec::new());
+    let mut live = std::collections::HashSet::new();
+    for item in &stuck {
+        let subject = format!(
+            "{}:{}",
+            item["subject"].as_str().unwrap_or(""),
+            item["reason"].as_str().unwrap_or("")
+        );
+        live.insert(subject.clone());
+        let to = item["addressee"].as_str().unwrap_or("");
+        let from = item["requester"].as_str().unwrap_or("");
+        let actions = match item["card_id"].as_i64() {
+            Some(id) => format!(
+                "Re-route it with `fray patch {id} --expect {} --assignee NAME`, answer it yourself, or queue it for the owner with `fray ask-owner --card {id} ...`.",
+                item["rev"]
+            ),
+            None => format!(
+                "{to} has not joined this board. Ask them another way, answer it in Mote, or tell {from} (`mote msg send --to {from} ...`)."
+            ),
+        };
+        let why = if item["reason"] == "overdue" {
+            "is past its deadline with no answer from its addressee"
+        } else {
+            "is addressed to someone nothing can wake, who has not seen it"
+        };
+        for steward in present.iter().filter(|s| *s != to && *s != from) {
+            let key = format!("stuck:{subject}:{steward}");
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM escalations WHERE key=?)",
+                [&key],
+                |r| r.get(0),
+            )?;
+            if exists {
+                continue;
+            }
+            let card = create_card(
+                conn,
+                ESCALATION,
+                &json!({"kind":"note","topic":format!("@{steward}"),"priority":1,
+                    "title":clip(&format!("Stuck ({}): {}", item["reason"].as_str().unwrap_or(""), item["title"].as_str().unwrap_or("")), 160),
+                    "summary":clip(&format!("{from}'s request to {to} ({}, {} min old; {to} is {}) {why}. Nothing re-routes it automatically. {actions}", item["subject"].as_str().unwrap_or(""), item["age_min"], item["reachability"].as_str().unwrap_or("?")), 2000),
+                    "tags":["escalation", format!("escalation:{}", item["subject"].as_str().unwrap_or(""))],
+                    "assignee":steward}),
+                json!({"escalation":item}),
+                now,
+            )?;
+            let id = card["card"]["id"].as_i64().unwrap_or(0);
+            conn.execute(
+                "INSERT INTO escalations(key,subject,recipient,card_id) VALUES(?,?,?,?)",
+                params![key, subject, steward, id],
+            )?;
+            created.push(id);
+        }
+    }
+    // Settle escalations whose request is no longer stuck for that reason.
+    let mut st =
+        conn.prepare("SELECT key,subject,card_id FROM escalations WHERE settled_ms IS NULL")?;
+    let open = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (key, subject, card_id) in open {
+        if live.contains(&subject) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE escalations SET settled_ms=? WHERE key=?",
+            params![now, key],
+        )?;
+        let c = get_card(conn, card_id)?;
+        if !c.terminal() {
+            conn.execute(
+                "UPDATE cards SET rev=rev+1,status='resolved',updated_ms=? WHERE id=?",
+                params![now, card_id],
+            )?;
+            emit(
+                conn,
+                ESCALATION,
+                "patch",
+                card_id,
+                json!({"note":"no longer stuck"}),
+                now,
+                true,
+            )?;
+        }
+        settled.push(card_id);
+    }
+    Ok(json!({"stuck":stuck.len(),"created":created,"settled":settled,"stewards":present}))
+}
+
 /// The strict "armed" test: `(enabled, listening, armed)`. A live drive
 /// controller, or a live, unexpired, unfiltered listener whose host wake
 /// mechanism is declared (managed, native-monitor or background-completion).
@@ -4177,6 +4419,33 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         })?;
     let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12,false)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
     out["idle_readiness"] = idle_readiness(conn, actor, now)?;
+    // Stewards see when escalation is pull-only (R3): stuck requests exist
+    // and no runner has ticked recently. Read only; brief never syncs.
+    let steward: bool = conn
+        .query_row(
+            "SELECT role='steward' FROM agents WHERE name=?",
+            [actor],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if steward {
+        let last = conn
+            .query_row("SELECT value FROM meta WHERE key='last_tick_ms'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|v| v.parse::<i64>().ok());
+        if !last.is_some_and(|t| now - t < TICK_STALE_MS) {
+            let stuck = stuck_set(conn, now)?;
+            if !stuck.is_empty() {
+                out["escalation_note"] = json!(format!(
+                    "{} stuck request(s), and no runner is ticking: escalation happens only when someone reads. `fray owner review` lists them; a `fray watch --attention` or `fray drive` keeps escalation running.",
+                    stuck.len()
+                ));
+            }
+        }
+    }
     // The asker's overdue asks (R4), oldest deadline first, at most 5.
     let mut st = conn.prepare(&format!(
         "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 ORDER BY c.id LIMIT 200"

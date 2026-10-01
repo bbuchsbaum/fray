@@ -423,6 +423,9 @@ enum Cmd {
         #[arg(long, conflicts_with = "paths")]
         staged: bool,
     },
+    /// What is stuck: asks nobody can wake for or past their deadline, and
+    /// Mote requests to actors not on the board or not yet synced. Read only.
+    Stuck,
     /// Commit and push hooks that warn when you touch another agent's lane or
     /// Mote reservation. Advisory unless FRAY_GUARD=block.
     Guard {
@@ -991,10 +994,20 @@ fn background_mote_sync(home: &Path, actor: &str) {
     {
         return;
     }
+    // Every board ticks (no-silent-stalls R3): Mote is synced only where it
+    // is paired, and stuck requests are escalated wherever the daemon can.
     let Ok(cwd) = std::env::current_dir() else {
         return;
     };
-    if !matches!(fray::mote::locate(home, &cwd), Ok(Some(_))) {
+    let paired = matches!(fray::mote::locate(home, &cwd), Ok(Some(_)));
+    let escalates = send(home, actor, "ping", json!({}), None, 10)
+        .map(|p| {
+            p["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|x| x == "escalations"))
+        })
+        .unwrap_or(false);
+    if !paired && !escalates {
         return;
     }
     let interval = std::env::var("FRAY_MOTE_SYNC_INTERVAL_MS")
@@ -1017,18 +1030,19 @@ fn background_mote_sync(home: &Path, actor: &str) {
         let mut last_error: Option<std::time::Instant> = None;
         std::thread::sleep(jitter(interval));
         loop {
-            let recent = send(&home, &actor, "mote_binding", json!({}), None, 10)
-                .ok()
-                .and_then(|b| b["binding"]["last_sync_ms"].as_i64())
-                .is_some_and(|t| {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_or(0, |d| d.as_millis() as i64);
-                    // Recent means within the shortest jittered sleep, so a
-                    // lone runner still syncs about once per interval.
-                    now - t < interval.mul_f64(0.75).as_millis() as i64
-                });
-            if !recent {
+            let recent = paired
+                && send(&home, &actor, "mote_binding", json!({}), None, 10)
+                    .ok()
+                    .and_then(|b| b["binding"]["last_sync_ms"].as_i64())
+                    .is_some_and(|t| {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as i64);
+                        // Recent means within the shortest jittered sleep, so a
+                        // lone runner still syncs about once per interval.
+                        now - t < interval.mul_f64(0.75).as_millis() as i64
+                    });
+            if paired && !recent {
                 if let Err(e) = mote_sync(&home, &actor) {
                     if last_error.is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) {
                         eprintln!(
@@ -1038,6 +1052,9 @@ fn background_mote_sync(home: &Path, actor: &str) {
                         last_error = Some(std::time::Instant::now());
                     }
                 }
+            }
+            if escalates {
+                let _ = send(&home, &actor, "escalate_tick", json!({}), None, 10);
             }
             std::thread::sleep(interval.mul_f64(0.75) + jitter(interval / 2));
         }
@@ -1540,6 +1557,146 @@ fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
     Ok(n * scale)
 }
 
+/// What is stuck (no-silent-stalls R3), for `fray stuck` and `fray owner
+/// review`: the stuck requests the board knows, and, so this works with no
+/// runner alive, a read-only look at Mote for open requests older than the
+/// grace period whose addressee nothing here can wake. Writes nothing.
+fn stuck_report(home: &Path, who: &str) -> Result<Value> {
+    let v = send(home, who, "stuck_requests", json!({}), None, 10)?;
+    let known: Vec<String> = v["stuck"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["msg_id"].as_str().map(str::to_owned))
+        .collect();
+    let unseen = mote_unseen_requests(home, who, &known).unwrap_or_default();
+    Ok(
+        json!({"stuck":v["stuck"],"mote_not_on_board":unseen,"ticking":v["ticking"],
+        "last_tick_ms":v["last_tick_ms"]}),
+    )
+}
+
+fn stuck_text(v: &Value) -> String {
+    let mut lines = Vec::new();
+    for s in v["stuck"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  {} {} ({}): {} -> {} ({}), {} min. {}",
+            s["subject"].as_str().unwrap_or(""),
+            s["title"].as_str().unwrap_or(""),
+            s["reason"].as_str().unwrap_or(""),
+            s["requester"].as_str().unwrap_or("?"),
+            s["addressee"].as_str().unwrap_or("?"),
+            s["reachability"].as_str().unwrap_or("?"),
+            s["age_min"],
+            match s["card_id"].as_i64() {
+                Some(id) => format!(
+                    "Re-route: fray patch {id} --expect {} --assignee NAME, or answer it.",
+                    s["rev"]
+                ),
+                None => "Not on this board: answer or redirect it in Mote.".to_owned(),
+            }
+        ));
+    }
+    for m in v["mote_not_on_board"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  mreq:{} Mote request from {} to {} ({}), {} min, not yet on the board. Answer or redirect it in Mote.",
+            m["msg_id"].as_str().unwrap_or(""),
+            m["from"].as_str().unwrap_or("?"),
+            m["to"].as_str().unwrap_or("?"),
+            m["reachability"].as_str().unwrap_or("?"),
+            m["age_min"]
+        ));
+    }
+    if v["ticking"] != true {
+        lines.push("  No runner is ticking: escalation happens only when someone reads. A `fray watch --attention` or `fray drive` keeps it running.".to_owned());
+    }
+    if lines.is_empty() {
+        "Nothing is stuck.\n".to_owned()
+    } else {
+        format!("Stuck requests:\n{}\n", lines.join("\n"))
+    }
+}
+
+/// For `fray owner review`: the stuck list first; failures are only noted.
+fn owner_stuck(home: &Path) {
+    match stuck_report(home, fray::store::OWNER) {
+        Ok(v)
+            if !(v["stuck"].as_array().is_some_and(Vec::is_empty)
+                && v["mote_not_on_board"].as_array().is_some_and(Vec::is_empty)) =>
+        {
+            eprintln!("{}", stuck_text(&v));
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("(stuck requests unavailable: {e})\n"),
+    }
+}
+
+/// Open Mote requests older than 15 minutes whose addressee is not wakeable
+/// here and that the board has not already listed: read only.
+fn mote_unseen_requests(home: &Path, who: &str, known: &[String]) -> Option<Vec<Value>> {
+    use fray::mote;
+    let cwd = std::env::current_dir().ok()?;
+    let path = mote::locate(home, &cwd).ok()??;
+    let store_id = mote::store_id(&path).ok()?;
+    let store = mote::Store { path, store_id };
+    let mote::Outcome::Ok(list) = mote::run(&store, None, &["actor", "list"], mote::read_timeout())
+    else {
+        return None;
+    };
+    let roster = send(home, who, "agents", json!({"all":true}), None, 10).ok();
+    let reach = |name: &str| -> String {
+        roster
+            .as_ref()
+            .and_then(|r| {
+                r["items"]
+                    .as_array()?
+                    .iter()
+                    .find(|a| a["name"] == name)
+                    .and_then(|a| a["reachability"].as_str().map(str::to_owned))
+            })
+            .unwrap_or_else(|| "not on this board".to_owned())
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let mut out = Vec::new();
+    for a in list.as_array().into_iter().flatten().take(50) {
+        let Some(to) = a["actor"].as_str() else {
+            continue;
+        };
+        if a["incoming_open_requests"].as_i64().unwrap_or(0) == 0 || reach(to) == "wakeable" {
+            continue;
+        }
+        let mote::Outcome::Ok(reqs) = mote::run(
+            &store,
+            Some(to),
+            &["msg", "requests", "--state", "open"],
+            mote::read_timeout(),
+        ) else {
+            continue;
+        };
+        for r in reqs.as_array().into_iter().flatten() {
+            if r["msg_kind"] != "request" || r["to"].as_str() != Some(to) {
+                continue;
+            }
+            let msg = r["msg_id"].as_str().unwrap_or("");
+            if known.iter().any(|k| k == msg) {
+                continue;
+            }
+            let age = r["sent_ts"]
+                .as_str()
+                .and_then(mote::parse_ts_ms)
+                .map(|t| (now - t) / 60_000);
+            if age.is_none_or(|m| m < 15) {
+                continue;
+            }
+            out.push(json!({"msg_id":msg,"from":r["from"],"to":to,
+                "reachability":reach(to),"age_min":age}));
+        }
+    }
+    Some(out)
+}
+
 /// Whether `name` is an actor in the Mote store paired with this board. Any
 /// failure means no: this only adds a hint.
 fn mote_knows(home: &Path, name: &str) -> bool {
@@ -1831,6 +1988,8 @@ fn owner(home: &Path, action: OwnerCmd, as_json: bool) -> Result<Option<Value>> 
         }
         OwnerCmd::Queue => Ok(Some(queue()?)),
         OwnerCmd::Review => {
+            // R3: stuck requests first, then the owner queue.
+            owner_stuck(home);
             let open = queue()?;
             let items = open["items"].as_array().cloned().unwrap_or_default();
             if items.is_empty() {
@@ -2607,6 +2766,14 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             LaneCmd::List => ("lanes", json!({})),
         },
         Cmd::Status { text } => ("set_status", json!({"text":text})),
+        Cmd::Stuck => {
+            let v = stuck_report(&home, &actor)?;
+            if !cli.json {
+                print!("{}", stuck_text(&v));
+                return Ok(None);
+            }
+            return Ok(Some(v));
+        }
         Cmd::Guard { action } => {
             let (v, refuse) = match action {
                 GuardCmd::Install => (guard::install()?, false),
