@@ -186,7 +186,7 @@ role you are given wins; you only choose what was left open.
    reachability, Mote candidates waiting on review, ready beads nobody has
    claimed, what is stuck, and the gaps.
 2. With no role given, take the first that fits:
-      - no live steward (`fray team` reports none wakeable or present), and you
+   - no live steward (`fray team` reports none wakeable or present), and you
      are an interactive Claude: steward;
    - a review is waiting that you can give: a Mote candidate naming you as a
      reviewer, or a review whose named reviewer is absent and whose author
@@ -195,7 +195,7 @@ role you are given wins; you only choose what was left open.
    - a seam has one side taken: take the other side, from the other host;
    - otherwise the highest-priority ready, unclaimed bead the Team card
      allows;
-      - nothing fits: say so, stay armed and idle. No busywork.
+   - nothing fits: say so, stay armed and idle. No busywork.
 
    Record the role you chose with `fray join --role ROLE`, so `fray team`
    shows it to the next agent.
@@ -206,7 +206,7 @@ role you are given wins; you only choose what was left open.
 4. Announce with `fray status "ROLE: what you are on"`, so the next agent to
    join sees it.
 5. Arm for your host: an interactive Claude runs what `fray arm` prints
-      through its Monitor. An interactive Codex cannot be woken: work while the
+   through its Monitor. An interactive Codex cannot be woken: work while the
    owner is there; before they leave, run `fray leave` (the drive is refused
    while this session holds the name) and give them the exact
    `fray --as NAME drive -- codex exec -` command to keep this identity

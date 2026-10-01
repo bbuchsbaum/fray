@@ -1596,10 +1596,12 @@ fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
 /// records (#99); otherwise its bound session (`claude:...`, `codex:...`);
 /// "unknown" when neither says.
 fn agent_host(a: &Value) -> String {
-    if let Some(host) = a["controller"]["detail"]["host"]
+    // A live drive's child decides; afterwards the session does, and an
+    // ended drive's record only when the session names no host.
+    let recorded = a["controller"]["detail"]["host"]
         .as_str()
-        .filter(|h| !h.is_empty())
-    {
+        .filter(|h| !h.is_empty());
+    if let Some(host) = recorded.filter(|_| a["controller"]["live"] == true) {
         return host.to_owned();
     }
     let session = a["session"]["bound"]["session"].as_str().unwrap_or("");
@@ -1608,7 +1610,7 @@ fn agent_host(a: &Value) -> String {
     } else if session.starts_with("codex:") {
         "codex".to_owned()
     } else {
-        "unknown".to_owned()
+        recorded.unwrap_or("unknown").to_owned()
     }
 }
 
