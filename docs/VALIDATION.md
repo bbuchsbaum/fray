@@ -3,8 +3,8 @@
 ## No silent stalls (2026-10-01)
 
 `docs/design/no-silent-stalls.md` slices R1 to R5, on branch
-`claude/esc-followup` at 664ae02 (main 63ae3a0 plus R5, R2, R4, R3 as approved
-at a8dabdf, and two follow-up commits). `CARGO_INCREMENTAL=0 cargo
+`claude/esc-followup` (main 63ae3a0 plus R5, R2, R4, R3 as approved at
+a8dabdf, and the follow-up commits through the reviewed SHA). `CARGO_INCREMENTAL=0 cargo
 test` on macOS 14.3 arm64: every test target passes, including those named
 below. The Mote tests ran against the real `mote 0.1.0`; they skip
 themselves when `mote` is not on `PATH`.
@@ -62,7 +62,9 @@ In `tests/mote_sync.rs`, against `mote 0.1.0`:
   command;
 - `one_malformed_mote_request_does_not_stop_the_rest` and
   `the_daemon_skips_an_uncardable_request_and_cards_the_rest`: a request
-  with a NUL in its body is skipped and reported, and the others land (#79);
+  with a NUL in its body is carded with the NUL replaced, and a request Fray
+  cannot card (an over-long message id) is skipped and reported while the
+  others land (#79);
 - `board_agents_requests_are_read_before_mote_only_actors`: many Mote actors
   who never joined cannot crowd out a board agent's requests (#80).
 
@@ -92,7 +94,7 @@ card #26).
 
 ### R3: escalation of stuck requests
 
-`tests/escalation.rs` (12 tests, in-memory store) proves:
+`tests/escalation.rs` (13 tests, in-memory store) proves:
 
 - an unreachable ask creates nothing within the grace period and, after it,
   exactly one card for each of two present stewards, assigned to them and
@@ -106,7 +108,11 @@ card #26).
 - a Mote request to an actor not on the board escalates, says that actor
   has not joined, and settles when `mote_requests_sync` reports it answered;
 - a steward's `brief` says no runner is ticking until a tick happens; a
-  non-steward's does not; `stuck_requests` lists the request either way;
+  non-steward's does not; after a tick, `stuck_requests` lists the request
+  and reports the board as ticking; a steward's text `brief` carries the
+  note too (`a_stewards_text_brief_names_the_no_runner_state`);
+- an addressee's reply ends "unreachable" even if nothing recorded showing it
+  (`a_reply_from_the_addressee_ends_unreachable`);
 - `escalation` (any case) cannot join;
 - re-routing to another addressee who cannot be woken escalates again, and a
   steward who closed their card while the request is still stuck gets
@@ -133,9 +139,10 @@ request to an actor who never joined is stuck, and once it is answered in
 Mote the next real sync re-reads it and `fray stuck` lists nothing (#84).
 
 Not tested: owner review's terminal walk-through (it needs a TTY); a board
-with several runners under real wall-clock time; and the 664ae02 change that
-makes the R5 lapse count only asks the agent has not annotated (only the
-changed arm hint in `tests/phase1.rs` is checked). R3 was approved at
+with several runners under real wall-clock time; and the brief's
+readiness-details trimming at the minimum budget, which the shorter arm hint
+no longer reaches in `tests/phase1.rs`. The R5 lapse counting only
+unanswered asks is tested by `an_answered_ask_no_longer_counts_toward_the_lapse`. R3 was approved at
 a8dabdf by independent review (fray card #26 @453).
 
 ## Git guard (epic child 4, 2026-09-30)

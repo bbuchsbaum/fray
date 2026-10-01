@@ -21,9 +21,13 @@ Respect existing claims. Maintain one availability conversation per worker; do n
 generate work or chatter to keep agents busy. Resolve review disputes using exact
 commits, paths and independent reproductions before changing Mote acceptance.
 
-Before ending a turn while asks are open, to you or from you, arm a wake: run
-the command `fray arm` prints through the host's monitor, and rearm before it
-ends. Use `--respond-within` on asks that need an answer by a time. Answer Mote
+Before ending a turn while asks are open, to you or from you, arm a wake if
+your host has a real mechanism for it: run the command `fray arm` prints
+through the host's monitor (or, with `--host background-completion`, as a
+background command the host resumes on), and rearm before it ends. A host
+with neither, such as plain interactive Codex, cannot be woken: do not run
+the printed command there, since it would declare a wake that does not exist;
+use `fray drive` for unattended answering, or say a new user turn is needed. Use `--respond-within` on asks that need an answer by a time. Answer Mote
 requests (cards authored by `mote`) in Mote, not by acking the card.
 
 With the Claude hook installed, new attention is supplied at session/tool

@@ -1640,7 +1640,7 @@ fn stuck_text(v: &Value) -> String {
         ));
     }
     if v["ticking"] != true && !lines.is_empty() {
-        lines.push("  No runner is ticking: escalation happens only when someone reads. A `fray watch --attention` or `fray drive` keeps it running.".to_owned());
+        lines.push("  No runner is ticking, so nobody is being escalated to: these are seen only when someone reads them. A `fray watch --attention` or `fray drive` (not --once) keeps escalation running.".to_owned());
     }
     if lines.is_empty() {
         "Nothing is stuck.\n".to_owned()
@@ -3350,6 +3350,9 @@ fn human(v: &Value, out: &mut String) {
             "FRAY  agent={}  cursor={}  current state\n",
             v["agent"], v["cursor"]
         ));
+        if let Some(note) = v["escalation_note"].as_str() {
+            out.push_str(&format!("\nSteward: {}\n", clean(note)));
+        }
         if let Some(lapse) = v["idle_readiness"]["lapse"]["message"].as_str() {
             out.push_str(&format!("\nFIRST: {}\n", clean(lapse)));
         }

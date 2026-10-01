@@ -162,13 +162,14 @@ absence does not block work that already has authorization and ownership.
 
 Stuck requests come to stewards. A card authored by `escalation`, assigned to
 you, means a request is unreachable (its addressee cannot be woken, was never
-shown it, and it is older than the grace period, 15 minutes by default) or
-overdue. Act on it: re-route with
+shown it and has not replied, and it is older than the grace period, 15
+minutes by default) or overdue. Act on it: re-route with
 `fray patch ID --expect REV --assignee NAME`, answer it yourself, or
 `fray ask-owner --card ID`. Nothing re-routes automatically; the card resolves
 itself when the request clears. `fray stuck` lists what is stuck now.
-Escalation runs only while some `fray watch --attention` or `fray drive` is
-alive, so a steward should keep one armed; your `brief` says when none is.
+Escalation runs only while some long-running `fray watch --attention` (not
+`--once`, which never ticks) or `fray drive` is alive, so a steward should keep
+one armed; your `brief` says when none is.
 
 For conflicting reviews, exchange the exact commit, path, command/reproducer,
 observed result and counterevidence. Independently check the disputed artifact

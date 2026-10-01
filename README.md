@@ -613,8 +613,8 @@ answer counts. Overdue asks appear at the top of the asker's `brief` and in
 
 A request is stuck when it is open and either:
 
-- **unreachable:** its addressee is not wakeable, has never been shown it,
-  and it is older than the grace period (15 minutes; the daemon reads
+- **unreachable:** its addressee is not wakeable, has never been shown it
+  and has not replied to it, and it is older than the grace period (15 minutes; the daemon reads
   `FRAY_STUCK_GRACE_MS`, 0 to one day). Being shown it by `inbox`, `wait`,
   `thread --unread`, a hook, an attention packet or a drive packet proves it
   arrived, and after that only the deadline applies. Reading `brief` does not
@@ -636,7 +636,7 @@ actions:
 
 ```text
 Stuck (unreachable): Review X please
-asker's request to helper (card:1, 16 min old; helper is present) is addressed
+asker's request to helper (card:1:helper, 16 min old; helper is present) is addressed
 to someone nothing can wake, who has not seen it. Nothing re-routes it
 automatically. Re-route it with `fray patch 1 --expect 1 --assignee NAME`,
 answer it yourself, or queue it for the owner with `fray ask-owner --card 1 ...`.

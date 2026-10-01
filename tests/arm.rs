@@ -37,6 +37,7 @@ impl Board {
             .env_remove("MOTE_ACTOR")
             .env("FRAY_HOME", self.home())
             .env("FRAY_SESSION", format!("test:{actor}"))
+            .env("FRAY_STUCK_GRACE_MS", "0")
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -141,5 +142,23 @@ fn the_printed_command_arms_and_an_unarmed_stop_is_told_first() {
     assert!(
         bg.contains("--once --activation background-completion") && !bg.contains("--reconnect"),
         "{bg}"
+    );
+}
+
+/// Review of b89794d, #88: a steward's text brief says when no runner is
+/// ticking, not only its JSON.
+#[test]
+fn a_stewards_text_brief_names_the_no_runner_state() {
+    let b = Board::new();
+    assert!(b
+        .fray("steward", &["join", "--role", "steward"])
+        .status
+        .success());
+    b.json("alice", &["send", "helper", "Review?", "--ask"]);
+    let out = b.fray("steward", &["brief"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Steward: 1 stuck request(s), and no runner is ticking"),
+        "{text}"
     );
 }

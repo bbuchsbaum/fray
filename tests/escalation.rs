@@ -373,3 +373,24 @@ fn unassigned_asks_without_deadlines_do_not_fill_the_scan() {
     let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
     assert_eq!(t["stuck"], 1, "{t}");
 }
+
+/// Review of b89794d, #87: an addressee who replied has received the
+/// request, even if no inbox or hook ever recorded showing it.
+#[test]
+fn a_reply_from_the_addressee_ends_unreachable() {
+    let mut s = board();
+    let id = ask(&mut s, json!({}));
+    heartbeat(&mut s, NOW + 20 * MIN);
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
+    assert_eq!(t["created"].as_array().unwrap().len(), 2, "{t}");
+    at(
+        &mut s,
+        "helper",
+        "annotate",
+        json!({"id":id,"body":"on it"}),
+        NOW + 21 * MIN,
+    );
+    let t = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 22 * MIN);
+    assert_eq!(t["stuck"], 0, "{t}");
+    assert_eq!(t["settled"].as_array().unwrap().len(), 2, "{t}");
+}

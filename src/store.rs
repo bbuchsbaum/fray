@@ -4295,9 +4295,10 @@ fn card_stuck(conn: &Connection, id: i64, now: i64) -> Result<Vec<Value>> {
     } else if ask_overdue(conn, &c, now)?.is_some() {
         reasons.push("overdue");
     }
-    // Shown to the addressee proves it arrived; then only deadlines apply.
+    // Shown to the addressee, or answered by it, proves it arrived; then only
+    // deadlines apply (#87).
     let shown: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM deliveries WHERE agent=?1 AND card_id=?2 AND shown_at_ms>0) OR EXISTS(SELECT 1 FROM presented_items i JOIN presented_batches b ON b.batch=i.batch WHERE b.agent=?1 AND i.card_id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM deliveries WHERE agent=?1 AND card_id=?2 AND shown_at_ms>0) OR EXISTS(SELECT 1 FROM presented_items i JOIN presented_batches b ON b.batch=i.batch WHERE b.agent=?1 AND i.card_id=?2) OR EXISTS(SELECT 1 FROM events WHERE card_id=?2 AND actor=?1 AND op='annotate')",
         params![to, id],
         |r| r.get(0),
     )?;
@@ -4699,7 +4700,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         let stuck = stuck_set(conn, now)?;
         if !stuck.is_empty() {
             out["escalation_note"] = json!(format!(
-                "{} stuck request(s), and no runner is ticking: escalation happens only when someone reads. `fray owner review` lists them; a `fray watch --attention` or `fray drive` keeps escalation running.",
+                "{} stuck request(s), and no runner is ticking, so nobody is being escalated to: they are seen only when someone reads them. `fray stuck` and `fray owner review` list them; a `fray watch --attention` or `fray drive` (not --once) keeps escalation running.",
                 stuck.len()
             ));
         }

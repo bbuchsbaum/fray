@@ -154,7 +154,8 @@ Core operations: `ping`, `join`, `leave`, `heartbeat`, `brief`, `post`, `send`, 
 `lanes`, `set_status`, `stats`, `friction`, `mote_bind`, `mote_binding`,
 `mote_ingest`, `mote_sync_failed`, `mote_claims`, `mote_requests_sync`,
 `mote_requests_tracked`, `escalate_tick` and `stuck_requests`.
-`escalate_tick` takes no arguments: the daemon decides what is stuck, so a
+`escalate_tick` takes only an optional `interval_ms` (the runner's interval,
+used for the "not ticking" window); the daemon decides what is stuck, so a
 runner can neither forge nor revive an escalation.
 
 `ping` advertises `protocol_version: 2` separately from the package version.
@@ -232,9 +233,12 @@ heads and retains these receipts. It does not replay closed history for newcomer
 
 The default scope is `*`. A worker has no special permissions; a steward has broader
 attention, not write authority. Assignment is routing, not a claim or exclusive
-permission. New questions produced by annotations route to the current owner,
-otherwise assignee, otherwise author, preferring a wakeable party, then a present
-one, and reporting when it passes over the first. Closing the parent does not
+permission. New questions produced by annotations route to the conversation
+partner: the author's question goes to whoever is working the card (live lease
+holder, then assignee, then author); anyone else's goes to a live lease
+holder, then the author, then the assignee; an objection to an owner request
+stays with the owner. Among those, a wakeable party is preferred, then a
+present one, and the result says when it passes over the first. Closing the parent does not
 silently resolve those questions. Generic dependency DAGs and automatic
 re-routing are not implemented; escalation of stuck requests is described below.
 
@@ -261,14 +265,14 @@ questions and escalations are always assigned.
 **Deadlines.** An ask's deadline is the latest `respond_by_ms` its author
 recorded, in the creation event or a later annotation. Whether a card is an ask
 is read from its creation event, so changing kind, tags or assignee hides it
-neither from deadlines nor from escalation. (Moving a deadline with
-`reply --respond-within` does need the current kind to be `question`.) It is
+neither from deadlines nor from escalation, nor stops its asker moving the
+deadline with `reply --respond-within`. It is
 overdue when open, past due, and without an annotation by its current
 addressee (or, with none, by anyone but the asker) after the deadline was set.
 
 **Stuck requests and escalation.** `stuck_set` computes, at read time, open
 asks that are unreachable (addressee not wakeable, never shown them in a
-presented batch or exposure, older than the grace period, default 15 minutes,
+presented batch or exposure and has not replied, older than the grace period, default 15 minutes,
 `FRAY_STUCK_GRACE_MS` in the daemon's environment) or overdue (past deadline;
 for Mote requests, an hour after Mote's `sent_ts`, from which the grace period
 also counts), plus fresh `mote_requests_unknown` rows past the grace period.
