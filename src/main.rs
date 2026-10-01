@@ -1596,19 +1596,30 @@ fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
 /// records (#99); otherwise its bound session (`claude:...`, `codex:...`);
 /// "unknown" when neither says.
 fn agent_host(a: &Value) -> String {
-    if let Some(host) = a["controller"]["detail"]["host"]
+    // A drive records its child's host. That record holds while the drive
+    // runs and afterwards, unless the name was bound to a host session after
+    // the drive last ran (a later interactive join). A drive started inside a
+    // host session inherits that session, so binding time, not liveness,
+    // decides (#100).
+    let recorded = a["controller"]["detail"]["host"]
         .as_str()
-        .filter(|h| !h.is_empty())
-    {
-        return host.to_owned();
-    }
+        .filter(|h| !h.is_empty());
     let session = a["session"]["bound"]["session"].as_str().unwrap_or("");
-    if session.starts_with("claude:") {
-        "claude".to_owned()
+    let bound_since = a["session"]["bound"]["since_ms"].as_i64().unwrap_or(0);
+    let drive_at = a["controller"]["updated_ms"].as_i64().unwrap_or(0);
+    let later_session = bound_since > drive_at && a["controller"]["live"] != true;
+    let from_session = if session.starts_with("claude:") {
+        Some("claude")
     } else if session.starts_with("codex:") {
-        "codex".to_owned()
+        Some("codex")
     } else {
-        "unknown".to_owned()
+        None
+    };
+    match (recorded, from_session) {
+        (Some(_), Some(s)) if later_session => s.to_owned(),
+        (Some(r), _) => r.to_owned(),
+        (None, Some(s)) => s.to_owned(),
+        (None, None) => "unknown".to_owned(),
     }
 }
 
@@ -3967,6 +3978,32 @@ fn hook(
         5,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod host_tests {
+    use serde_json::json;
+    #[test]
+    fn a_drives_recorded_host_holds_until_a_later_session_binds() {
+        // Driven as codex from inside a Claude session; the drive has ended.
+        let ended = json!({"controller":{"live":false,"updated_ms":2000,"detail":{"host":"codex"}},
+            "session":{"bound":{"session":"claude:abc","since_ms":1000}}});
+        assert_eq!(super::agent_host(&ended), "codex");
+        // Live: the drive's child decides.
+        let live = json!({"controller":{"live":true,"updated_ms":2000,"detail":{"host":"codex"}},
+            "session":{"bound":{"session":"claude:abc","since_ms":3000}}});
+        assert_eq!(super::agent_host(&live), "codex");
+        // Bound to a Claude session after the drive ended: that session decides.
+        let later = json!({"controller":{"live":false,"updated_ms":2000,"detail":{"host":"codex"}},
+            "session":{"bound":{"session":"claude:abc","since_ms":3000}}});
+        assert_eq!(super::agent_host(&later), "claude");
+        // No drive: the session; neither: unknown.
+        assert_eq!(
+            super::agent_host(&json!({"session":{"bound":{"session":"codex:x","since_ms":1}}})),
+            "codex"
+        );
+        assert_eq!(super::agent_host(&json!({})), "unknown");
+    }
 }
 
 #[cfg(test)]
