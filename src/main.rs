@@ -163,6 +163,10 @@ enum Cmd {
         /// delivered when that name joins. Without this, unknown names fail.
         #[arg(long)]
         pending: bool,
+        /// Expect an answer within this long (30m, 2h, 1d); with --ask. Past
+        /// it, an unanswered ask is overdue and escalated.
+        #[arg(long, value_parser = parse_duration_ms, requires = "ask")]
+        respond_within: Option<u64>,
     },
     /// Reply in a conversation. Questions and objections open linked questions.
     Reply {
@@ -180,6 +184,9 @@ enum Cmd {
         /// Other cards and newer replies stay pending; failure changes neither.
         #[arg(long)]
         ack_batch: Option<String>,
+        /// On your own ask: a new deadline from now (30m, 2h, 1d).
+        #[arg(long, value_parser = parse_duration_ms)]
+        respond_within: Option<u64>,
     },
     /// Read a conversation's current head, ordered history, and delivery receipts.
     Thread {
@@ -1478,13 +1485,227 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
         }
     }
+    // Requests (no-silent-stalls R2), by state: the addressees with open
+    // requests, plus those with requests carded here and still open (to see
+    // them answered), each listed as that actor; reads write no Mote ops.
+    let mut request_note = Value::Null;
+    let requests_ok = send(home, actor, "ping", json!({}), None, 10)
+        .map(|p| {
+            p["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|x| x == "mote_requests"))
+        })
+        .unwrap_or(false);
+    if requests_ok {
+        match sync_requests(home, actor, &store) {
+            Ok(r) => {
+                created.extend(r["created"].as_array().cloned().unwrap_or_default());
+                for u in r["unknown_recipients"].as_array().into_iter().flatten() {
+                    unknown.push(u["recipient"].clone());
+                }
+                if let Some(n) = r["note"].as_str() {
+                    request_note = json!(n);
+                }
+                if r["settled"].as_array().is_some_and(|s| !s.is_empty()) {
+                    request_note = json!(format!(
+                        "{}settled {} request card(s) answered in Mote",
+                        request_note
+                            .as_str()
+                            .map(|n| format!("{n}; "))
+                            .unwrap_or_default(),
+                        r["settled"].as_array().map_or(0, Vec::len)
+                    ));
+                }
+            }
+            Err(e) => request_note = json!(format!("requests failed: {}: {}", e.code, e.message)),
+        }
+    } else {
+        request_note =
+            json!("request tracking skipped: the daemon predates it; restart it on this build");
+    }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
     Ok(
-        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,
+        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,"request_note":request_note,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
         "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,
         "candidate_note":if candidate_notes.is_empty() { Value::Null } else { json!(candidate_notes.join("; ")) }}}),
+    )
+}
+
+/// A deadline such as 30m, 2h or 1d, in milliseconds: one minute to thirty
+/// days, the daemon's bounds. Never panics (review of 9fbddc4, #82).
+fn parse_duration_ms(text: &str) -> std::result::Result<u64, String> {
+    let bad = || format!("{text:?}: use a number and m, h or d, from 1m to 30d (e.g. 30m)");
+    let unit = text.chars().last().ok_or_else(bad)?;
+    let n: u64 = text[..text.len() - unit.len_utf8()]
+        .parse()
+        .map_err(|_| bad())?;
+    let scale: u64 = match unit {
+        'm' => 60_000,
+        'h' => 3_600_000,
+        'd' => 86_400_000,
+        _ => return Err(bad()),
+    };
+    n.checked_mul(scale)
+        .filter(|ms| (60_000..=30 * 86_400_000).contains(ms))
+        .ok_or_else(bad)
+}
+
+/// Whether `name` is an actor in the Mote store paired with this board. Any
+/// failure means no: this only adds a hint.
+fn mote_knows(home: &Path, name: &str) -> bool {
+    use fray::mote;
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    let Ok(Some(path)) = mote::locate(home, &cwd) else {
+        return false;
+    };
+    let Ok(store_id) = mote::store_id(&path) else {
+        return false;
+    };
+    let store = mote::Store { path, store_id };
+    match mote::run(&store, None, &["actor", "list"], mote::read_timeout()) {
+        mote::Outcome::Ok(list) => list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|a| a["actor"].as_str() == Some(name)),
+        _ => false,
+    }
+}
+
+/// One state pass over Mote requests (no-silent-stalls R2), bounded to 50
+/// addressee reads and about 20 seconds. Requests already carded here, and
+/// board agents' requests, are read first; Mote actors who never joined
+/// (read only so R3 can report them) share what remains, from a random start
+/// so none is starved across ticks (review of 405e671, #80). Only open
+/// requests and those carded here go to the daemon.
+fn sync_requests(home: &Path, actor: &str, store: &fray::mote::Store) -> Result<Value> {
+    use fray::mote;
+    const READS: usize = 50;
+    let budget = std::time::Instant::now() + Duration::from_secs(20);
+    let mut notes: Vec<String> = Vec::new();
+    let mut with_open: Vec<String> = Vec::new();
+    match mote::run(store, Some(actor), &["actor", "list"], mote::read_timeout()) {
+        mote::Outcome::Ok(list) => {
+            for a in list.as_array().into_iter().flatten() {
+                if a["incoming_open_requests"].as_i64().unwrap_or(0) > 0 {
+                    if let Some(name) = a["actor"].as_str() {
+                        with_open.push(name.to_owned());
+                    }
+                }
+            }
+        }
+        other => {
+            return Err(Error::new(
+                "mote_failed",
+                format!("mote actor list: {other:?}"),
+            ))
+        }
+    }
+    let store_id = store.store_id.clone();
+    let tracked = send(
+        home,
+        actor,
+        "mote_requests_tracked",
+        json!({"store_id":store_id}),
+        None,
+        10,
+    )?;
+    let tracked_ids: std::collections::HashSet<String> = tracked["tracked"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["msg_id"].as_str().map(str::to_owned))
+        .collect();
+    let joined: Vec<String> = tracked["joined"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str().map(str::to_owned))
+        .collect();
+    let mut first: Vec<String> = tracked["tracked"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["recipient"].as_str().map(str::to_owned))
+        .chain(with_open.iter().filter(|n| joined.contains(n)).cloned())
+        .collect();
+    first.sort();
+    first.dedup();
+    let mut rest: Vec<String> = with_open
+        .iter()
+        .filter(|n| !first.contains(n))
+        .cloned()
+        .collect();
+    rest.sort();
+    if !rest.is_empty() {
+        let start = fray::model::random_key()
+            .ok()
+            .and_then(|k| usize::from_str_radix(&k[..8], 16).ok())
+            .unwrap_or(0)
+            % rest.len();
+        rest.rotate_left(start);
+    }
+    let total = first.len() + rest.len();
+    let mut who = first;
+    who.extend(rest);
+    if total > READS {
+        notes.push(format!(
+            "{total} addressees; {READS} read this sync, board agents first"
+        ));
+        who.truncate(READS);
+    }
+    let mut items = Vec::new();
+    for to in &who {
+        if std::time::Instant::now() > budget {
+            notes.push("time budget reached; the rest next sync".to_owned());
+            break;
+        }
+        match mote::run(store, Some(to), &["msg", "requests"], mote::read_timeout()) {
+            mote::Outcome::Ok(list) => {
+                items.extend(mote::request_items(&list, to).into_iter().filter(|r| {
+                    r["state"] == "open"
+                        || r["msg_id"]
+                            .as_str()
+                            .is_some_and(|m| tracked_ids.contains(m))
+                }))
+            }
+            other => notes.push(format!("requests for {to} skipped: {other:?}")),
+        }
+    }
+    let (mut created, mut settled, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+    for chunk in items.chunks(500) {
+        let r = send(
+            home,
+            actor,
+            "mote_requests_sync",
+            json!({"store_id":store_id,"requests":chunk}),
+            None,
+            10,
+        )?;
+        created.extend(r["created"].as_array().cloned().unwrap_or_default());
+        settled.extend(r["settled"].as_array().cloned().unwrap_or_default());
+        unknown.extend(
+            r["unknown_recipients"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        );
+        for i in r["invalid"].as_array().into_iter().flatten() {
+            notes.push(format!(
+                "request {} to {} not carded: {}",
+                i["msg_id"].as_str().unwrap_or("?"),
+                i["recipient"].as_str().unwrap_or("?"),
+                i["error"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    Ok(
+        json!({"created":created,"settled":settled,"unknown_recipients":unknown,
+        "note":if notes.is_empty() { Value::Null } else { json!(notes.join("; ")) }}),
     )
 }
 
@@ -2082,6 +2303,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             priority,
             refs,
             pending,
+            respond_within,
         } => {
             let mut a = json!({"to":to,"body":message_body(body,body_file)?,"ask":ask,"priority":priority,"refs":refs});
             if let Some(title) = title {
@@ -2089,6 +2311,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             if pending {
                 a["pending"] = json!(true);
+            }
+            if let Some(ms) = respond_within {
+                a["respond_within_ms"] = json!(ms);
             }
             ("send", a)
         }
@@ -2099,6 +2324,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             kind,
             refs,
             ack_batch,
+            respond_within,
         } => {
             let mut args = json!({"id":id,"body":message_body(body,body_file)?,"kind":kind});
             if !refs.is_empty() {
@@ -2106,6 +2332,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             if let Some(batch) = ack_batch {
                 args["ack_batch"] = json!(batch);
+            }
+            if let Some(ms) = respond_within {
+                args["respond_within_ms"] = json!(ms);
             }
             ("annotate", args)
         }
@@ -2572,7 +2801,22 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(Some(client::rpc(&home, &r, secs)?));
         }
     };
-    let mut value = send(&home, &actor, op, args, key, timeout)?;
+    let to = (op == "send")
+        .then(|| args["to"].as_str().map(str::to_owned))
+        .flatten();
+    let mut value = match send(&home, &actor, op, args, key, timeout) {
+        Err(mut e) if e.code == "unknown_agent" => {
+            // A name only the paired Mote store knows (no-silent-stalls R2):
+            // say so, and how to ask there.
+            if let Some(to) = to.filter(|to| mote_knows(&home, to)) {
+                e.message.push_str(&format!(
+                    " {to} is a Mote actor who has not joined this board; to ask there: mote msg send --to {to} --kind request TEXT"
+                ));
+            }
+            return Err(e);
+        }
+        other => other?,
+    };
     if matches!(op, "inbox" | "wait") {
         let receipts: Vec<Value> = value["items"]
             .as_array()
@@ -2920,6 +3164,21 @@ fn human(v: &Value, out: &mut String) {
         if let Some(lapse) = v["idle_readiness"]["lapse"]["message"].as_str() {
             out.push_str(&format!("\nFIRST: {}\n", clean(lapse)));
         }
+        for o in v["overdue_asks"]["items"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "\nOverdue: your ask #{} ({}) to {} is {} min past its deadline with no answer.",
+                o["id"],
+                clean(o["title"].as_str().unwrap_or("")),
+                clean(o["assignee"].as_str().unwrap_or("?")),
+                o["overdue_min"]
+            ));
+        }
+        if v["overdue_asks"]["more"] == true {
+            out.push_str(&format!(
+                "\nOverdue: {} asks in all; fray friction lists them.",
+                v["overdue_asks"]["total"]
+            ));
+        }
         if let Some(warning) = v["idle_readiness"]["warning"].as_str() {
             out.push_str(&format!(
                 "\nWarning: {}\nArm through your host: {}\n{}\n",
@@ -3254,4 +3513,27 @@ fn hook(
         5,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod duration_tests {
+    #[test]
+    fn deadlines_parse_within_bounds_and_never_panic() {
+        assert_eq!(super::parse_duration_ms("30m"), Ok(1_800_000));
+        assert_eq!(super::parse_duration_ms("2h"), Ok(7_200_000));
+        assert_eq!(super::parse_duration_ms("30d"), Ok(2_592_000_000));
+        for bad in [
+            "0m",
+            "31d",
+            "30s",
+            "99999999999999999d",
+            "30\u{e9}",
+            "",
+            "m",
+            "-1h",
+            "1.5h",
+        ] {
+            assert!(super::parse_duration_ms(bad).is_err(), "{bad}");
+        }
+    }
 }

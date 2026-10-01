@@ -222,6 +222,17 @@ CREATE TABLE IF NOT EXISTS mote_claims(
 -- landability): the last state delivered per recipient. A card goes out
 -- whenever the state differs from the last one delivered, so a return to an
 -- earlier state is reported too (review of 05dfbc2).
+-- Mote requests (msg_kind request) carded for their addressee, tracked by
+-- state (docs/design/no-silent-stalls.md R2): an open request becomes an ask
+-- card once; when Mote shows it answered, that card is settled.
+CREATE TABLE IF NOT EXISTS mote_requests(
+    store_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    card_id INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY(store_id, msg_id, recipient)
+);
 CREATE TABLE IF NOT EXISTS mote_subjects(
     store_id TEXT NOT NULL,
     subject TEXT NOT NULL,

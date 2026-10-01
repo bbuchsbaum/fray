@@ -726,3 +726,31 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
     }
     items
 }
+
+/// Requests from a `mote msg requests --json` listing, in the shape the
+/// daemon's `mote_requests_sync` takes (no-silent-stalls R2): only
+/// `msg_kind: request`, addressed to `to`, with their current state. The
+/// body is clipped; the card points to Mote for the rest.
+pub fn request_items(list: &Value, to: &str) -> Vec<Value> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["msg_kind"] == "request" && r["to"].as_str() == Some(to))
+        .filter_map(|r| {
+            let body: String = r["body"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(1200)
+                .collect();
+            Some(serde_json::json!({
+                "msg_id": r["msg_id"].as_str()?,
+                "recipient": to,
+                "from": r["from"].as_str().unwrap_or("?"),
+                "state": r["request_state"].as_str()?,
+                "body": body,
+                "entity": r["entity"].as_str(),
+            }))
+        })
+        .collect()
+}

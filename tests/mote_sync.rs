@@ -1386,3 +1386,198 @@ fn a_watching_agent_hears_mote_changes_without_anyone_running_sync() {
     let _ = watch.wait();
     assert!(heard.is_some(), "bob's watch never showed the handoff");
 }
+
+/// No silent stalls R2: an open Mote request reaches its Fray addressee as an
+/// ask, once; when it is answered in Mote the card settles; notes are not
+/// carded; a request to an actor not on the board is reported unknown.
+#[test]
+fn a_mote_request_is_carded_once_and_settles_when_answered_in_mote() {
+    let Some(p) = Project::new("mreq") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    let send = |from: &str, to: &str, kind: &str, body: &str| -> String {
+        let out = p.mote(
+            from,
+            &["msg", "send", "--to", to, "--kind", kind, body, "--json"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["msg_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let req = send("alice", "bob", "request", "Review abc123 please");
+    send("alice", "bob", "note", "just so you know");
+    send("alice", "zed", "request", "to someone not on the board");
+    let r = p.sync(&[], "alice").unwrap();
+    assert!(
+        r["unknown_recipients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u == "zed"),
+        "{r}"
+    );
+    let cards = |p: &Project| -> Vec<Value> {
+        let (ok, out) = p.fray(
+            &[],
+            "bob",
+            &["--json", "query", "--all", "--ref", &format!("mote:{req}")],
+        );
+        assert!(ok, "{out}");
+        serde_json::from_str::<Value>(&out).unwrap()["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(r["created"].as_array().map_or(0, Vec::len), 1, "{r}");
+    let found = cards(&p);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let card = &found[0];
+    assert_eq!(card["kind"], "question", "{card}");
+    assert_eq!(card["assignee"], "bob", "{card}");
+    assert_eq!(card["status"], "open", "{card}");
+    assert!(card["summary"]
+        .as_str()
+        .unwrap()
+        .contains("not a Mote answer"));
+    // Notes are not carded.
+    assert!(
+        !p.titles("bob")
+            .iter()
+            .any(|t| t.contains("just so you know")),
+        "{:?}",
+        p.titles("bob")
+    );
+    // A second sync cards nothing new.
+    p.sync(&[], "bob").unwrap();
+    assert_eq!(cards(&p).len(), 1);
+    // bob answers in Mote: the card settles.
+    assert!(p
+        .mote("bob", &["msg", "reply", &req, "looks good"])
+        .status
+        .success());
+    let r = p.sync(&[], "alice").unwrap();
+    assert!(
+        r["request_note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("settled 1"),
+        "{r}"
+    );
+    let found = cards(&p);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["status"], "resolved", "{:?}", found[0]);
+    // A Fray send to zed, known only to Mote, says how to ask there.
+    let (ok, out) = p.fray(&[], "alice", &["send", "zed", "hello", "--ask"]);
+    assert!(!ok);
+    assert!(
+        out.contains("zed is a Mote actor") && out.contains("mote msg send --to zed"),
+        "{out}"
+    );
+}
+
+/// Review of 405e671, #79: a request Fray cannot card as-is (a NUL in its
+/// body) never stops the others.
+#[test]
+fn one_malformed_mote_request_does_not_stop_the_rest() {
+    let Some(p) = Project::new("mreqbad") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    // A NUL cannot go through argv; mote reads it literally from stdin.
+    let mut bad = Command::new("mote")
+        .current_dir(&p.t.0)
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .arg("--store")
+        .arg(p.t.0.join(".mote"))
+        .args([
+            "--actor", "alice", "msg", "send", "--to", "bob", "--kind", "request", "--stdin",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        bad.stdin.take().unwrap().write_all(b"bad\0body").unwrap();
+    }
+    assert!(bad.wait().unwrap().success());
+    let out = p.mote(
+        "alice",
+        &[
+            "msg",
+            "send",
+            "--to",
+            "bob",
+            "--kind",
+            "request",
+            "a normal request",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = p.sync(&[], "alice").unwrap();
+    assert_eq!(r["created"].as_array().map_or(0, Vec::len), 2, "{r}");
+}
+
+/// Review of 405e671, #80: Mote actors who never joined cannot crowd out a
+/// board agent's requests, however many there are.
+#[test]
+fn board_agents_requests_are_read_before_mote_only_actors() {
+    let Some(p) = Project::new("mreqmany") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    for n in 1..=55 {
+        let to = format!("a{n:02}");
+        assert!(p
+            .mote(
+                "alice",
+                &["msg", "send", "--to", &to, "--kind", "request", "x"]
+            )
+            .status
+            .success());
+    }
+    assert!(p
+        .mote(
+            "alice",
+            &["msg", "send", "--to", "bob", "--kind", "request", "for bob"]
+        )
+        .status
+        .success());
+    let r = p.sync(&[], "alice").unwrap();
+    assert_eq!(r["created"].as_array().map_or(0, Vec::len), 1, "{r}");
+    assert!(
+        r["request_note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("56 addressees; 50 read"),
+        "{r}"
+    );
+}
+
+/// #79 at the daemon: an item that cannot be carded is skipped and
+/// reported; the rest of the call still lands.
+#[test]
+fn the_daemon_skips_an_uncardable_request_and_cards_the_rest() {
+    let mut b = board();
+    let r = b.execute_at(&Request::new(
+        "mote_requests_sync",
+        "alice",
+        json!({"store_id":"st-A","requests":[
+            {"msg_id":"x".repeat(300),"recipient":"bob","from":"alice","state":"open","body":"b"},
+            {"msg_id":"msg-ok","recipient":"bob","from":"alice","state":"open","body":"fine"}
+        ]})), NOW)
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(r["created"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["invalid"].as_array().unwrap().len(), 1, "{r}");
+}

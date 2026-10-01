@@ -336,10 +336,19 @@ pub(crate) fn friction(conn: &Connection, now: i64) -> Result<Value> {
             Some(OWNER) | None => None,
             Some(a) => Some(reachable(a)?),
         };
+        // A deadline (R4) if the asker set one, else the soft 24-hour
+        // default, which applies only here.
+        let card = crate::store::get_card_pub(conn, *id)?;
+        let due = crate::store::ask_deadline(conn, *id, &card.author)?.map(|(by, _)| by);
+        let overdue = match due {
+            Some(_) => crate::store::ask_overdue(conn, &card, now)?.is_some(),
+            None => now - h.created_ms > 24 * 3_600_000,
+        };
         unanswered.push(
             json!({"id":id,"title":h.title,"author":h.author,"assignee":h.assignee,
             "age_ms":now-h.created_ms,"assignee_reachable":assignee_reachable,
-            "awaiting_owner":h.assignee.as_deref()==Some(OWNER)}),
+            "awaiting_owner":h.assignee.as_deref()==Some(OWNER),
+            "due_ms":due,"overdue":overdue,"soft_deadline":due.is_none()}),
         );
     }
     let objections: Vec<Value> = open
@@ -506,6 +515,8 @@ pub fn friction_text(v: &Value, clean: fn(&str) -> String) -> String {
                 c(i["assignee"].as_str().unwrap_or("anyone")),
                 if i["awaiting_owner"] == true {
                     ", in the owner queue"
+                } else if i["overdue"] == true {
+                    ", overdue"
                 } else if i["assignee_reachable"] == false {
                     ", unreachable"
                 } else {

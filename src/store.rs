@@ -365,6 +365,7 @@ impl Store {
                 | "mote_bind"
                 | "mote_ingest"
                 | "mote_sync_failed"
+                | "mote_requests_sync"
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
@@ -944,8 +945,21 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "send" => {
             check_fields(
                 a,
-                &["to", "body", "title", "ask", "priority", "refs", "pending"],
+                &[
+                    "to",
+                    "body",
+                    "title",
+                    "ask",
+                    "priority",
+                    "refs",
+                    "pending",
+                    "respond_within_ms",
+                ],
             )?;
+            let respond_by = respond_by(a, now)?;
+            if respond_by.is_some() && !boolean(a, "ask", false)? {
+                return Err(Error::invalid("--respond-within needs --ask"));
+            }
             let target = string(a, "to")?;
             if !valid_name(target) {
                 return Err(Error::invalid("to must be a registered agent name"));
@@ -990,7 +1004,10 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "topic":format!("@{target}"),"title":title,"summary":summary,
                     "assignee":target,"priority":bounded(a,"priority",2,0,3)?,"tags":refs
                 }),
-                json!({"body":body}),
+                match respond_by {
+                    Some(by) => json!({"body":body,"respond_by_ms":by}),
+                    None => json!({"body":body}),
+                },
                 now,
             )?;
             if target != OWNER && target != actor {
@@ -1201,9 +1218,24 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "annotate" => {
             check_fields(
                 a,
-                &["id", "kind", "body", "refs", "ack_batch", "review_verdict"],
+                &[
+                    "id",
+                    "kind",
+                    "body",
+                    "refs",
+                    "ack_batch",
+                    "review_verdict",
+                    "respond_within_ms",
+                ],
             )?;
             let c = get_card(conn, integer(a, "id")?)?;
+            // Only the requester moves its ask's deadline, and only on an ask.
+            let new_deadline = respond_by(a, now)?;
+            if new_deadline.is_some() && (c.kind != "question" || c.author != actor) {
+                return Err(Error::invalid(
+                    "only the author of an ask can set its --respond-within",
+                ));
+            }
             let body = string(a, "body")?;
             text(body, "body", 8000, false)?;
             let verdict = a
@@ -1372,7 +1404,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 actor,
                 "annotate",
                 c.id,
-                json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs,"review":verdict}),
+                {
+                    let mut d = json!({"kind":kind,"body":body,"follow_up_id":follow_up,"refs":refs,"review":verdict});
+                    if let Some(by) = new_deadline {
+                        d["respond_by_ms"] = json!(by);
+                    }
+                    d
+                },
                 now,
                 true,
             )?;
@@ -2281,6 +2319,161 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"raced":raced,"cursor":cursor,"synced_by":actor}),
             )
         }
+        "mote_requests_sync" => {
+            // State, not events (R2): each request is carded once while open,
+            // to its addressee, and settled when Mote shows it answered.
+            // Fray never acts in Mote; acking or closing the card is not a
+            // Mote answer, and the card says so.
+            check_fields(a, &["store_id", "requests"])?;
+            let store_id = string(a, "store_id")?;
+            let bound = mote_binding(conn)?;
+            if bound.is_null() || bound["store_id"] != store_id {
+                return Err(Error::new(
+                    "mote_store_mismatch",
+                    "requests are from a Mote store this board is not bound to; run fray mote status",
+                ));
+            }
+            let requests = a["requests"]
+                .as_array()
+                .ok_or_else(|| Error::invalid("requests must be an array"))?;
+            if requests.len() > 500 {
+                return Err(Error::invalid("at most 500 requests per call"));
+            }
+            let (mut created, mut settled, mut unknown, mut invalid) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            // Cards here are authored by the reserved, never-enabled `mote`
+            // identity, as mote_ingest's are; register it on first use.
+            conn.execute(
+                "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
+                params![MOTE, now],
+            )?;
+            for r in requests {
+                check_fields(
+                    r,
+                    &["msg_id", "recipient", "from", "state", "body", "entity"],
+                )?;
+                let msg_id = string(r, "msg_id")?;
+                let recipient = string(r, "recipient")?;
+                let state = string(r, "state")?;
+                if let Err(e) = text(msg_id, "msg_id", 200, false) {
+                    invalid.push(
+                        json!({"msg_id":clip(msg_id, 60),"recipient":recipient,"error":e.message}),
+                    );
+                    continue;
+                }
+                if !["open", "responded", "declined", "resolved"].contains(&state) {
+                    return Err(Error::invalid("state: open|responded|declined|resolved"));
+                }
+                let row: Option<(i64, String)> = conn
+                    .query_row(
+                        "SELECT card_id,state FROM mote_requests WHERE store_id=? AND msg_id=? AND recipient=?",
+                        params![store_id, msg_id, recipient],
+                        |x| Ok((x.get(0)?, x.get(1)?)),
+                    )
+                    .optional()?;
+                match (row, state) {
+                    // Already carded, or answered before it was ever carded.
+                    (Some((_, ref was)), "open") if was == "open" => {}
+                    (Some((_, ref was)), _) if was != "open" => {}
+                    (None, s) if s != "open" => {}
+                    (None, _) => {
+                        let joined: bool = conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
+                            [recipient],
+                            |x| x.get(0),
+                        )?;
+                        if recipient == MOTE || !joined {
+                            unknown.push(json!({"recipient":recipient,"msg_id":msg_id}));
+                            continue;
+                        }
+                        // Mote text is untrusted input: control characters are
+                        // replaced, over-long refs dropped, and an item that
+                        // still fails is skipped and reported, never allowed to
+                        // stop the rest (mote-adapter.md section 6; #79).
+                        let scrub = |t: &str| -> String {
+                            t.chars()
+                                .map(|ch| {
+                                    if ch.is_control() && ch != '\n' {
+                                        '\u{FFFD}'
+                                    } else {
+                                        ch
+                                    }
+                                })
+                                .collect()
+                        };
+                        let from = scrub(r["from"].as_str().unwrap_or("?"));
+                        let body = scrub(r["body"].as_str().unwrap_or(""));
+                        let mut tags = vec!["mote".to_owned()];
+                        for t in [Some(msg_id), r["entity"].as_str().filter(|e| !e.is_empty())]
+                            .into_iter()
+                            .flatten()
+                        {
+                            let tag = format!("mote:{t}");
+                            if tag.len() <= 80 && !tag.chars().any(char::is_control) {
+                                tags.push(tag);
+                            }
+                        }
+                        // The instructions first, so a long request cannot clip them.
+                        let card = match create_card(
+                            conn,
+                            MOTE,
+                            &json!({"kind":"question","topic":format!("@{recipient}"),
+                                "title":clip(&format!("Mote request from {from}: {}", body.lines().next().unwrap_or("")), 160),
+                                "summary":clip(&format!("{from} asked you this in Mote ({msg_id}). Answer there: `mote msg reply {msg_id} TEXT` (or --kind decline). Acking or closing this card is not a Mote answer; it settles here when Mote shows the request answered.\n\n{body}"), 2000),
+                                "priority":1,"tags":tags,"assignee":recipient}),
+                            json!({"mote_request":msg_id,"from":from}),
+                            now,
+                        ) {
+                            Ok(card) => card,
+                            Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
+                                invalid.push(json!({"msg_id":msg_id,"recipient":recipient,"error":e.message}));
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        };
+                        let id = card["card"]["id"].as_i64().unwrap_or(0);
+                        conn.execute(
+                            "INSERT INTO mote_requests(store_id,msg_id,recipient,card_id,state) VALUES(?,?,?,?,'open')",
+                            params![store_id, msg_id, recipient, id],
+                        )?;
+                        created.push(id);
+                    }
+                    (Some((card_id, _)), answered) => {
+                        // Open here, answered in Mote: settle the card.
+                        conn.execute(
+                            "UPDATE mote_requests SET state=? WHERE store_id=? AND msg_id=? AND recipient=?",
+                            params![answered, store_id, msg_id, recipient],
+                        )?;
+                        let c = get_card(conn, card_id)?;
+                        // Already closed here: recorded, but not counted as
+                        // settled by this sync.
+                        if c.terminal() {
+                            continue;
+                        }
+                        {
+                            conn.execute(
+                                "UPDATE cards SET rev=rev+1,status='resolved',lease_owner=NULL,lease_until_ms=0,fence=fence+1,updated_ms=? WHERE id=?",
+                                params![now, card_id],
+                            )?;
+                            emit(
+                                conn,
+                                MOTE,
+                                "patch",
+                                card_id,
+                                json!({"mote_request":msg_id,"mote_state":answered,
+                                    "note":format!("{answered} in Mote")}),
+                                now,
+                                true,
+                            )?;
+                        }
+                        settled.push(card_id);
+                    }
+                }
+            }
+            Ok(
+                json!({"created":created,"settled":settled,"unknown_recipients":unknown,"invalid":invalid}),
+            )
+        }
         "mote_sync_failed" => {
             // Consecutive timed-out syncs; the client reseeds at the tail after
             // three, and reconciliation covers the gap.
@@ -2438,7 +2631,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -2708,6 +2901,28 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "mote_binding" => {
             check_fields(a, &[])?;
             Ok(json!({"binding":mote_binding(conn)?}))
+        }
+        "mote_requests_tracked" => {
+            // The requests carded and still open here, so a sync can read
+            // their current state from Mote even after they leave its open
+            // listing.
+            check_fields(a, &["store_id"])?;
+            let store_id = string(a, "store_id")?;
+            let mut s = conn.prepare(
+                "SELECT msg_id,recipient FROM mote_requests WHERE store_id=? AND state='open' ORDER BY msg_id LIMIT 500",
+            )?;
+            let rows = s
+                .query_map([store_id], |r| {
+                    Ok(json!({"msg_id":r.get::<_,String>(0)?,"recipient":r.get::<_,String>(1)?}))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // Board agents, so a sync reads their requests before those of
+            // Mote actors who never joined (review of 405e671, #80).
+            let mut s = conn.prepare("SELECT name FROM agents WHERE enabled=1 ORDER BY name")?;
+            let joined = s
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(json!({"tracked":rows,"joined":joined}))
         }
         "mote_claims" => {
             // Every live holder Fray has recorded for a store, for
@@ -3819,6 +4034,76 @@ fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
     }
     Ok(json!({"items":items,"more":more}))
 }
+pub(crate) fn get_card_pub(conn: &Connection, id: i64) -> Result<Card> {
+    get_card(conn, id)
+}
+
+/// `respond_within_ms`, if given, as an absolute deadline on the daemon's
+/// clock (no-silent-stalls R4): one minute to thirty days.
+fn respond_by(a: &Value, now: i64) -> Result<Option<i64>> {
+    a.get("respond_within_ms")
+        .map(|_| bounded(a, "respond_within_ms", 0, 60_000, 30 * 86_400_000).map(|ms| now + ms))
+        .transpose()
+}
+
+/// An ask's deadline: the latest `respond_by_ms` its author recorded, in the
+/// creation event or a later reply, with that event's sequence. Kept in
+/// events, never in tags, so nobody can patch it away; reassignment keeps it.
+pub(crate) fn ask_deadline(
+    conn: &Connection,
+    card: i64,
+    author: &str,
+) -> Result<Option<(i64, i64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT json_extract(payload,'$.detail.respond_by_ms'),seq FROM events WHERE card_id=? AND actor=? AND op IN ('post','annotate') AND json_extract(payload,'$.detail.respond_by_ms') IS NOT NULL ORDER BY seq DESC LIMIT 1",
+            params![card, author],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Whether an open ask is overdue: past its deadline with no answer since
+/// the deadline was set. An answer is an annotation by its addressee; with no
+/// addressee other than the asker, any annotation by someone else. Whether
+/// it is an ask comes from its creation event, so changing the kind, status
+/// (short of closing it) or assignee cannot hide it (review of 9fbddc4, #81).
+pub(crate) fn ask_overdue(conn: &Connection, c: &Card, now: i64) -> Result<Option<i64>> {
+    if c.terminal() {
+        return Ok(None);
+    }
+    let asked: bool = conn
+        .query_row(
+            "SELECT json_extract(payload,'$.card.kind')='question' FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+            [c.id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !asked {
+        return Ok(None);
+    }
+    let Some((by, seq)) = ask_deadline(conn, c.id, &c.author)? else {
+        return Ok(None);
+    };
+    if now < by {
+        return Ok(None);
+    }
+    let answered: bool = match c.assignee.as_deref().filter(|a| *a != c.author) {
+        Some(to) => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=? AND actor=? AND op='annotate' AND seq>?)",
+            params![c.id, to, seq],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=? AND actor<>? AND op='annotate' AND seq>?)",
+            params![c.id, c.author, seq],
+            |r| r.get(0),
+        )?,
+    };
+    Ok((!answered).then_some(by))
+}
+
 /// The strict "armed" test: `(enabled, listening, armed)`. A live drive
 /// controller, or a live, unexpired, unfiltered listener whose host wake
 /// mechanism is declared (managed, native-monitor or background-completion).
@@ -3975,6 +4260,27 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
         })?;
     let mut out = json!({"store_id":store_id,"agent":actor,"cursor":highwater(conn)?,"time_ms":now,"attention":inbox(conn,actor,0,8,false,"all".into(),budget/4,now)?,"context":context,"blockers":blockers,"claimed":claimed,"available":work,"agents":roster(conn,now,12,false)?,"budget_bytes":budget,"budget_truncated":false,"note":"Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work."});
     out["idle_readiness"] = idle_readiness(conn, actor, now)?;
+    // The asker's overdue asks (R4), oldest deadline first, at most 5.
+    let mut st = conn.prepare(&format!(
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author=?1 AND EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=?1 AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL) ORDER BY c.id LIMIT 200"
+    ))?;
+    let ids = st
+        .query_map([actor], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut overdue = Vec::new();
+    for id in ids {
+        let c = get_card(conn, id)?;
+        if let Some(by) = ask_overdue(conn, &c, now)? {
+            overdue.push(json!({"id":id,"title":c.title,"assignee":c.assignee,
+                "due_ms":by,"overdue_min":(now-by)/60_000}));
+        }
+    }
+    overdue.sort_by_key(|o| o["due_ms"].as_i64());
+    if !overdue.is_empty() {
+        let total = overdue.len();
+        overdue.truncate(5);
+        out["overdue_asks"] = json!({"total":total,"more":total > 5,"items":overdue});
+    }
     // The byte budget is hard, not a promise based on an estimated token count.
     while serde_json::to_vec(&out)?.len() > budget {
         let mut removed = false;
@@ -3985,6 +4291,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
             "context",
             "blockers",
             "attention",
+            "overdue_asks",
         ] {
             if let Some(items) = out[key]["items"].as_array_mut() {
                 if items.pop().is_some() {
