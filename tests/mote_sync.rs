@@ -1581,3 +1581,102 @@ fn the_daemon_skips_an_uncardable_request_and_cards_the_rest() {
     assert_eq!(r["created"].as_array().unwrap().len(), 1, "{r}");
     assert_eq!(r["invalid"].as_array().unwrap().len(), 1, "{r}");
 }
+
+/// No silent stalls R3, the incident replayed end to end: a Mote-only
+/// request to an agent nothing can wake. With no runner, `fray stuck` lists
+/// it; with an armed steward's runner alive and no other activity, the
+/// steward's own listener is woken with the escalation.
+#[test]
+fn the_incident_reaches_a_present_steward_and_the_stuck_list() {
+    let Some(p) = Project::new("incident") else {
+        return;
+    };
+    let grace = [("FRAY_STUCK_GRACE_MS", "0")];
+    // The daemon reads the grace from its environment.
+    p.fray(&[], "", &["stop"]);
+    p.fray(&grace, "", &["start"]);
+    p.fray(&[], "helper", &["join"]);
+    p.fray(&[], "steward", &["join", "--role", "steward"]);
+    p.sync(&[], "alice").unwrap();
+    let out = p.mote(
+        "alice",
+        &[
+            "msg",
+            "send",
+            "--to",
+            "helper",
+            "--kind",
+            "request",
+            "SHA-bound review of 1a2b3c?",
+        ],
+    );
+    assert!(out.status.success());
+    // No runner alive: the stuck list still finds it, straight from Mote.
+    let (ok, out) = p.fray(&grace, "", &["--json", "stuck"]);
+    assert!(ok, "{out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ticking"], false, "{v}");
+    let unseen = v["mote_not_on_board"].as_array().unwrap();
+    assert!(
+        unseen
+            .iter()
+            .any(|m| m["to"] == "helper" && m["from"] == "alice"),
+        "{v}"
+    );
+    // The steward arms an involved listener; its runner syncs and ticks.
+    let mut watch = Command::new(env!("CARGO_BIN_EXE_fray"))
+        .current_dir(&p.t.0)
+        .env_remove("FRAY_AGENT")
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .env("FRAY_SESSION", "test:steward")
+        .env("FRAY_MOTE_SYNC_INTERVAL_MS", "300")
+        .env("FRAY_STUCK_GRACE_MS", "0")
+        .args([
+            "--home",
+            p.t.0.join(".fray").to_str().unwrap(),
+            "--as",
+            "steward",
+        ])
+        .args([
+            "watch",
+            "--attention",
+            "--notification",
+            "--selection",
+            "involved",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = watch.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut heard = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            if line.contains("Stuck (unreachable): Mote request from alice") {
+                heard = Some(line);
+                break;
+            }
+        }
+    }
+    let _ = watch.kill();
+    let _ = watch.wait();
+    if heard.is_none() {
+        let rest: Vec<String> = rx.try_iter().collect();
+        let (_, stuck) = p.fray(&grace, "", &["--json", "stuck"]);
+        let (_, inbox) = p.fray(&[], "steward", &["--json", "inbox", "--selection", "all"]);
+        panic!("the steward's listener never heard the escalation; lines {rest:?}; stuck {stuck}; inbox {inbox}");
+    }
+}

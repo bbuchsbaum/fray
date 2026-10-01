@@ -4157,7 +4157,15 @@ pub(crate) fn ask_overdue(conn: &Connection, c: &Card, now: i64) -> Result<Optio
 /// request counts as stuck; a Mote request is overdue after Mote's own
 /// default request horizon; an unknown-recipient row unseen this long is gone;
 /// a board with no tick this long is "not ticking".
-const STUCK_GRACE_MS: i64 = 15 * 60_000;
+/// The grace period; FRAY_STUCK_GRACE_MS (0 to one day) overrides the
+/// 15-minute default, for tuning and tests.
+pub fn stuck_grace_ms() -> i64 {
+    std::env::var("FRAY_STUCK_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| (0..=86_400_000).contains(v))
+        .unwrap_or(15 * 60_000)
+}
 const MOTE_HORIZON_MS: i64 = 60 * 60_000;
 const UNKNOWN_FRESH_MS: i64 = 2 * 60 * 60_000;
 pub(crate) const TICK_STALE_MS: i64 = 5 * 60_000;
@@ -4169,17 +4177,41 @@ pub(crate) const TICK_STALE_MS: i64 = 5 * 60_000;
 pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let mut s = conn.prepare(&format!(
-        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.status IN ('open','active') AND c.assignee IS NOT NULL AND c.assignee<>?1 AND c.author<>?2 ORDER BY c.id DESC LIMIT 500"
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND (c.kind='question' OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id DESC LIMIT 500"
     ))?;
     let ids = s
         .query_map(params![OWNER, ESCALATION], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
         let c = get_card(conn, id)?;
-        let Some(to) = c.assignee.clone() else {
+        if c.terminal() {
             continue;
+        }
+        // Overdue applies with or without an addressee (R4); unreachable
+        // needs someone other than the asker to be unreachable.
+        let to = c
+            .assignee
+            .clone()
+            .filter(|a| *a != c.author)
+            .unwrap_or_default();
+        let reach = if to.is_empty() {
+            Reach::Absent
+        } else {
+            reachability(conn, &to, now)?
         };
-        let reach = reachability(conn, &to, now)?;
+        // A Mote request card is authored by `mote`; its asker is the sender.
+        let requester = if c.author == MOTE {
+            conn.query_row(
+                "SELECT json_extract(payload,'$.detail.from') FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or_else(|| MOTE.to_owned())
+        } else {
+            c.author.clone()
+        };
         let mut reasons = Vec::new();
         if c.author == MOTE {
             if now - c.created_ms >= MOTE_HORIZON_MS {
@@ -4194,13 +4226,18 @@ pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
             params![to, id],
             |r| r.get(0),
         )?;
-        if reach != Reach::Wakeable && !shown && now - c.created_ms >= STUCK_GRACE_MS {
+        if !to.is_empty()
+            && c.kind == "question"
+            && reach != Reach::Wakeable
+            && !shown
+            && now - c.created_ms >= stuck_grace_ms()
+        {
             reasons.push("unreachable");
         }
         for reason in reasons {
             out.push(
                 json!({"subject":format!("card:{id}"),"card_id":id,"reason":reason,
-                "addressee":to,"requester":c.author,"title":c.title,"rev":c.rev,
+                "addressee":if to.is_empty() { "nobody" } else { to.as_str() },"requester":requester,"title":c.title,"rev":c.rev,
                 "reachability":reach.as_str(),"age_min":(now-c.created_ms)/60_000}),
             );
         }
@@ -4209,14 +4246,17 @@ pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
         "SELECT msg_id,recipient,sender,first_seen_ms FROM mote_requests_unknown WHERE last_seen_ms>? AND first_seen_ms<=? ORDER BY first_seen_ms LIMIT 200",
     )?;
     let rows = s
-        .query_map(params![now - UNKNOWN_FRESH_MS, now - STUCK_GRACE_MS], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })?
+        .query_map(
+            params![now - UNKNOWN_FRESH_MS, now - stuck_grace_ms()],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (msg, to, from, first) in rows {
         out.push(
@@ -4456,7 +4496,7 @@ fn brief(conn: &Connection, actor: &str, budget: usize, now: i64) -> Result<Valu
             })
             .optional()?
             .and_then(|v| v.parse::<i64>().ok());
-        if !last.is_some_and(|t| now - t < TICK_STALE_MS) {
+        if last.is_none_or(|t| now - t >= TICK_STALE_MS) {
             let stuck = stuck_set(conn, now)?;
             if !stuck.is_empty() {
                 out["escalation_note"] = json!(format!(

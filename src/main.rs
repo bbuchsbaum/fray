@@ -1000,16 +1000,6 @@ fn background_mote_sync(home: &Path, actor: &str) {
         return;
     };
     let paired = matches!(fray::mote::locate(home, &cwd), Ok(Some(_)));
-    let escalates = send(home, actor, "ping", json!({}), None, 10)
-        .map(|p| {
-            p["capabilities"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|x| x == "escalations"))
-        })
-        .unwrap_or(false);
-    if !paired && !escalates {
-        return;
-    }
     let interval = std::env::var("FRAY_MOTE_SYNC_INTERVAL_MS")
         .ok()
         .and_then(|ms| ms.parse::<u64>().ok())
@@ -1029,6 +1019,19 @@ fn background_mote_sync(home: &Path, actor: &str) {
     std::thread::spawn(move || {
         let mut last_error: Option<std::time::Instant> = None;
         std::thread::sleep(jitter(interval));
+        // Asked here, not before the runner starts: nothing extra happens
+        // on the way to its first wait. A daemon without escalations, on a
+        // board without Mote, leaves nothing to do.
+        let escalates = send(&home, &actor, "ping", json!({}), None, 10)
+            .map(|p| {
+                p["capabilities"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|x| x == "escalations"))
+            })
+            .unwrap_or(false);
+        if !paired && !escalates {
+            return;
+        }
         loop {
             let recent = paired
                 && send(&home, &actor, "mote_binding", json!({}), None, 10)
@@ -1630,7 +1633,7 @@ fn owner_stuck(home: &Path) {
     }
 }
 
-/// Open Mote requests older than 15 minutes whose addressee is not wakeable
+/// Open Mote requests older than the grace period whose addressee is not wakeable
 /// here and that the board has not already listed: read only.
 fn mote_unseen_requests(home: &Path, who: &str, known: &[String]) -> Option<Vec<Value>> {
     use fray::mote;
@@ -1686,7 +1689,7 @@ fn mote_unseen_requests(home: &Path, who: &str, known: &[String]) -> Option<Vec<
                 .as_str()
                 .and_then(mote::parse_ts_ms)
                 .map(|t| (now - t) / 60_000);
-            if age.is_none_or(|m| m < 15) {
+            if age.is_none_or(|m| m * 60_000 < fray::store::stuck_grace_ms()) {
                 continue;
             }
             out.push(json!({"msg_id":msg,"from":r["from"],"to":to,

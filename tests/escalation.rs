@@ -51,7 +51,13 @@ fn shown(s: &mut Store, who: &str, now: i64) {
         .iter()
         .map(|i| i["receipt"].clone())
         .collect();
-    at(s, who, "present", json!({"source":"inbox","receipts":receipts}), now);
+    at(
+        s,
+        who,
+        "present",
+        json!({"source":"inbox","receipts":receipts}),
+        now,
+    );
 }
 fn escalations(s: &mut Store, who: &str, now: i64) -> Vec<Value> {
     at(s, who, "inbox", json!({"selection":"involved"}), now)["items"]
