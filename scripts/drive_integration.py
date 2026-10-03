@@ -15,6 +15,8 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import integration as base  # noqa: E402
+# The keepalive's end-to-end tests (stub hosts) run with this gate.
+from keepalive_integration import Keepalive  # noqa: E402,F401
 
 BINARY, AGENT = base.BINARY, base.AGENT
 

@@ -238,6 +238,9 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
                 Some(("mote_requests", "Mote request tracking"))
             }
             "present" | "batch" => Some(("read_batches", "immutable read batches")),
+            "keepalive_start" | "keepalive_stop" | "keepalive_status" | "keepalive_usage" => {
+                Some(("keepalive", "fray keepalive"))
+            }
             "ack" if req.args.get("last").is_some() => Some(("ack_last", "ack --last")),
             "owner_decide" | "owner_answer" => Some(("owner_channel", "fray owner")),
             "lane_take" | "lane_release" | "lanes" | "set_status" => {

@@ -345,6 +345,13 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     return Ok(());
                 }
             }
+            "keepalive_start" => {
+                let response = match keepalive_start(shared, &req) {
+                    Ok(v) => success(v),
+                    Err(e) => failure(e),
+                };
+                write_frame(&mut stream, &response)?;
+            }
             "shutdown" => {
                 if let Err(error) = check_fields(&req.args, &[]) {
                     write_frame(&mut stream, &failure(error))?;
@@ -368,18 +375,36 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                         && (store.highwater()? > before
                             || matches!(
                                 req.op.as_str(),
-                                "join" | "leave" | "follow" | "unfollow" | "mute" | "unmute"
+                                "join"
+                                    | "leave"
+                                    | "follow"
+                                    | "unfollow"
+                                    | "mute"
+                                    | "unmute"
+                                    | "keepalive_stop"
                             ))
                     {
                         shared.changed.notify_all();
                     }
                     match result {
                         Ok(mut v) => {
+                            // The daemon keeps the drive's pid, so a keepalive
+                            // whose process is gone can be named.
+                            if req.op == "keepalive_status" {
+                                if let Some(pid) = v["pid"].as_i64() {
+                                    v["pid_alive"] = json!(crate::keepalive::pid_alive(pid));
+                                }
+                            }
                             if req.op == "ping" {
                                 v["capabilities"]
                                     .as_array_mut()
                                     .unwrap()
                                     .push(json!("listener_activation"));
+                                // The daemon itself starts keepalive drives.
+                                v["capabilities"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(json!("keepalive"));
                                 v["capacity"] = json!({"clients":shared.clients.load(Ordering::SeqCst),"long_lived":shared.long_clients.load(Ordering::SeqCst),"client_limit":shared.limits.clients,"long_limit":shared.limits.long,"short_reserved":shared.limits.clients-shared.limits.long,"descriptor_limit":shared.limits.descriptors});
                             }
                             success(v)
@@ -393,6 +418,75 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
         }
     }
     Ok(())
+}
+/// `keepalive_start`: the daemon, not the agent, starts the keepalive's drive,
+/// so the drive never inherits a sandbox from the agent's tool call
+/// (docs/design/keepalive.md). The request supplies only the terminal's
+/// directory; the host and conversation come from its bound session.
+fn keepalive_start(shared: &Shared, req: &Request) -> Result<Value> {
+    check_fields(&req.args, &["cwd"])?;
+    let cwd = string(&req.args, "cwd")?;
+    text(cwd, "cwd", 4096, false)?;
+    if crate::keepalive::sandboxed() {
+        return Err(Error::new(
+            "sandboxed",
+            "this daemon runs inside a sandbox (it was started from inside a sandboxed tool call), so a keepalive it started would inherit it; stop it (fray stop) and start it again from the owner's own shell (fray start), then retry",
+        ));
+    }
+    let home = shared
+        .socket
+        .parent()
+        .ok_or_else(|| Error::new("internal", "socket has no home directory"))?;
+    let cwd = crate::keepalive::repository_dir(home, Path::new(cwd))?;
+    let cwd_text = cwd
+        .to_str()
+        .ok_or_else(|| Error::invalid("cwd must be valid UTF-8"))?;
+    let budget = std::env::var(crate::keepalive::BUDGET_ENV)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(crate::keepalive::DAILY_TOKENS);
+    let log = crate::keepalive::file(home, &req.actor, "log");
+    let begun = {
+        let mut store = shared.store.lock().map_err(|_| poisoned())?;
+        let begun =
+            store.keepalive_begin(req, cwd_text, &log.to_string_lossy(), budget, now_ms())?;
+        shared.changed.notify_all();
+        begun
+    };
+    if begun["already_running"] == true {
+        return Ok(begun);
+    }
+    let session = string(&begun, "session")?;
+    let mut child = match crate::keepalive::spawn(home, &req.actor, session, &cwd, &log) {
+        Ok(child) => child,
+        Err(e) => {
+            let store = shared.store.lock().map_err(|_| poisoned())?;
+            store.keepalive_abort(&req.actor, now_ms())?;
+            return Err(Error::new(
+                "spawn_failed",
+                format!("could not start the keepalive's drive: {e}"),
+            ));
+        }
+    };
+    let pid = child.id();
+    // Reap the drive when it exits; it reports its own final state.
+    let actor = req.actor.clone();
+    thread::spawn(move || {
+        if let Ok(status) = child.wait() {
+            eprintln!("keepalive drive for {actor:?} (pid {pid}) exited {status}");
+        }
+    });
+    let store = shared.store.lock().map_err(|_| poisoned())?;
+    store.keepalive_spawned(&req.actor, pid)?;
+    let mut status = crate::keepalive::status(&store.conn, &req.actor, now_ms())?;
+    status["started"] = json!(true);
+    status["command"] = json!([
+        "fray",
+        crate::keepalive::DRIVE_ARGS[0],
+        crate::keepalive::DRIVE_ARGS[1]
+    ]);
+    Ok(status)
 }
 /// A wait error that ends the connection, and every indefinite wait.
 fn wait_terminal(indefinite: bool, result: &Result<Value>) -> bool {
@@ -582,6 +676,18 @@ fn wait_body(
                 "unavailable",
                 "wait cancelled or daemon stopped",
             ));
+        }
+        // A keepalive's drive waits until asked to stop, then exits at once.
+        if let Some(session) = req
+            .session
+            .as_deref()
+            .filter(|s| crate::keepalive::is_session(Some(s)))
+        {
+            if store.keepalive_stop_requested(&req.actor, session)? {
+                return Ok(
+                    json!({"items":[],"total":0,"store_id":store.identity()?,"timed_out":false,"stop_requested":true}),
+                );
+            }
         }
         let mut page = store.filtered_attention(
             &req.actor,

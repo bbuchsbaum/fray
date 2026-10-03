@@ -110,6 +110,7 @@ next start (`CREATE TABLE IF NOT EXISTS`) and its existing rows are untouched:
 | `lanes`, `agent_status`, `peer_generations`, `peer_seen` | advisory lanes, status lines, peer notices |
 | `review_subjects`, `review_verdicts` | versioned review references |
 | `mote_events`, `mote_claims`, `mote_subjects`, `mote_requests`, `mote_requests_unknown` | the Mote adapter's exactly-once and last-state records |
+| `keepalives` | keepalives the daemon started: companion session, stop request, daily input tokens |
 | `escalations` | escalation cards per stuck request, addressee, reason and steward |
 
 `wake_waits` has one row per unfiltered `wait` in progress (no card, kind,
@@ -375,6 +376,20 @@ stops the turn instead. It does not steer a model mid-inference or manage host s
 Fray hooks detect the runner's `FRAY_DRIVE=1` and emit empty context, preserving the
 packet budget. Stderr JSON records prompt bytes, receipts, duration and exit reason;
 provider usage is unknown/null, not estimated from prompt length.
+
+Keepalive is experimental and not yet announced (docs/design/keepalive.md, slice
+K1). `fray keepalive` asks the daemon, which must not itself be sandboxed, to start
+a detached `fray drive --keepalive` for an interactive Claude Code or Codex agent:
+the host and conversation come from the request's bound session, the directory must
+be the board's repository or one of its worktrees, and the command shape is fixed.
+The drive binds `keepalive:CONVERSATION` beside the terminal's session (the only
+pair `bind_session` allows), forks the conversation once and resumes the fork, runs
+each turn read-only with a pinned tool set, and applies the turn's structured output
+itself: replies on packet cards only, acknowledgment of exactly the handled
+receipts; a card that reaches it only as a pointer is never acknowledged or paid
+for, and is left for the terminal. Stop requests and a daily input-token budget are
+recorded in `keepalives` (Claude reports each invocation's input; Codex 0.160 reports
+its thread's running total, so the rise is charged).
 
 The optional experimental `integrations/codex-wake` adapter attaches to an existing
 App Server thread. It retains the expected active turn ID for `turn/steer` and uses

@@ -503,6 +503,19 @@ enum Cmd {
         #[arg(long, default_value = "claude", value_parser = ["claude", "codex"])]
         host: String,
     },
+    /// Keep this interactive Claude Code or Codex agent answerable after its
+    /// turn ends: the daemon starts a background drive that answers asks from
+    /// a read-only fork of this conversation (experimental, not yet announced;
+    /// docs/design/keepalive.md).
+    #[command(hide = true)]
+    Keepalive {
+        /// Stop it: a turn in progress finishes first.
+        #[arg(long, conflicts_with = "status")]
+        stop: bool,
+        /// What it is doing, and why not, if it is not.
+        #[arg(long)]
+        status: bool,
+    },
     /// Run a noninteractive agent only for selected attention (or explicit --bootstrap).
     Drive {
         #[command(flatten)]
@@ -1636,7 +1649,7 @@ fn team_report(home: &Path, actor: &str) -> Result<Value> {
         members.push(
             json!({"name":a["name"],"role":a["role"],"host":agent_host(a),
             "reachability":a["reachability"],"driven":driven,"status":a["status"],
-            "lanes":a["lanes"]}),
+            "lanes":a["lanes"],"keepalive":a["keepalive"]}),
         );
     }
     if roster["more"] == true {
@@ -1793,6 +1806,72 @@ fn team_mote(home: &Path, actor: &str) -> (Value, Value, Vec<String>) {
     )
 }
 
+/// `fray keepalive` for a person: what it is doing, and why not.
+fn keepalive_text(v: &Value) -> String {
+    let name = clean(v["agent"].as_str().unwrap_or(""));
+    let state = v["state"].as_str().unwrap_or("off");
+    if state == "off" {
+        return format!("No keepalive for {name}.\n");
+    }
+    let doing = match state {
+        "keepalive" if v["turn"] == "running" => {
+            "answering (a background turn is running)".to_owned()
+        }
+        "keepalive" => "answering (waiting for asks)".to_owned(),
+        "paused" => "paused (budget): no turns until the day's input tokens reset".to_owned(),
+        "deferred" => "deferred (terminal busy)".to_owned(),
+        "stopping" => "stopping (a turn in progress finishes first)".to_owned(),
+        "starting" => "starting".to_owned(),
+        other => match v["reason"].as_str() {
+            Some(reason) => format!("{other} ({})", clean(reason)),
+            None => other.to_owned(),
+        },
+    };
+    let mut out = format!("Keepalive for {name}: {doing}\n");
+    if v["already_running"] == true {
+        out.push_str("  (already running; nothing new was started)\n");
+    }
+    if v["started"] == true {
+        out.push_str(&format!("  started: pid {}\n", v["pid"]));
+    }
+    out.push_str(&format!(
+        "  serves: {} ({})\n  fork: {}\n  turns: {}   input tokens today: {} of {}\n  log: {}\n",
+        // Session and conversation ids clipped, as elsewhere; --json has them whole.
+        clean(&clip(v["companion"].as_str().unwrap_or(""), 20)),
+        clean(v["host"].as_str().unwrap_or("")),
+        v["fork"].as_str().map_or_else(
+            || "none yet (the first turn forks)".to_owned(),
+            |fork| clean(&clip(fork, 20))
+        ),
+        v["turns"].as_i64().unwrap_or(0),
+        v["usage"]["input_tokens"],
+        v["usage"]["budget"],
+        clean(v["log"].as_str().unwrap_or(""))
+    ));
+    if let Some(summary) = v["summary"].as_str() {
+        out.push_str(&format!("  last turn: {}\n", clean(summary)));
+    }
+    if let Some(ids) = v["oversized"].as_array().filter(|ids| !ids.is_empty()) {
+        let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+        out.push_str(&format!(
+            "  left unread (too large for a background turn): {}; handle them in the terminal\n",
+            ids.join(", ")
+        ));
+    }
+    if v["pid_alive"] == false
+        && matches!(
+            state,
+            "keepalive" | "paused" | "deferred" | "stopping" | "starting"
+        )
+    {
+        out.push_str(&format!(
+            "  warning: its process (pid {}) is gone\n",
+            v["pid"]
+        ));
+    }
+    out
+}
+
 fn team_text(v: &Value) -> String {
     let t = &v["team"];
     let mut out = String::from("FRAY TEAM\n");
@@ -1802,13 +1881,23 @@ fn team_text(v: &Value) -> String {
     }
     out.push_str("\nMembers:\n");
     for m in t["members"].as_array().into_iter().flatten() {
+        // A keepalive is a drive too; say which, and why it may not answer.
+        let driven = match m["keepalive"]["state"].as_str() {
+            Some("paused") => " keepalive paused (budget)",
+            Some("deferred") => " keepalive deferred (terminal busy)",
+            Some("stopping") => " keepalive stopping",
+            Some("starting") => " keepalive starting",
+            Some(_) => " keepalive",
+            None if m["driven"] == true => " driven",
+            None => "",
+        };
         out.push_str(&format!(
             "  {:<34} {:<9} {:<8} {:<9}{}{}\n",
             m["name"].as_str().unwrap_or(""),
             m["role"].as_str().unwrap_or(""),
             m["host"].as_str().unwrap_or(""),
             m["reachability"].as_str().unwrap_or(""),
-            if m["driven"] == true { " driven" } else { "" },
+            driven,
             m["status"]
                 .as_str()
                 .map(|s| format!("  \"{s}\""))
@@ -3231,6 +3320,26 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Hook { host } => {
             hook(&home, &actor, cli.session.as_deref(), &host)?;
             return Ok(None);
+        }
+        Cmd::Keepalive { stop, status } => {
+            let (op, args) = if stop {
+                ("keepalive_stop", json!({}))
+            } else if status {
+                ("keepalive_status", json!({}))
+            } else {
+                // Only the directory: the daemon takes the host and
+                // conversation from this terminal's bound session.
+                (
+                    "keepalive_start",
+                    json!({"cwd":std::env::current_dir()?.to_string_lossy()}),
+                )
+            };
+            let v = send(&home, &actor, op, args, None, 10)?;
+            if !cli.json {
+                print!("{}", keepalive_text(&v));
+                return Ok(None);
+            }
+            return Ok(Some(v));
         }
         Cmd::Drive { options } => {
             driver::run(&home, &actor, &options, || {

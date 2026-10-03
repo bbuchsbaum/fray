@@ -267,4 +267,22 @@ CREATE TABLE IF NOT EXISTS mote_subjects(
     final INTEGER NOT NULL DEFAULT 0 CHECK(final IN (0,1)),
     PRIMARY KEY(store_id, subject, recipient)
 );
+-- Keepalives the daemon started (docs/design/keepalive.md): one per name.
+-- Its session may bind beside the name's interactive session (`companion`).
+-- Usage is the day's input tokens (UTC days since the epoch) against budget.
+-- Additive, so older boards gain it.
+CREATE TABLE IF NOT EXISTS keepalives(
+    agent TEXT PRIMARY KEY REFERENCES agents(name),
+    session TEXT NOT NULL,
+    companion TEXT NOT NULL,
+    host TEXT NOT NULL CHECK(host IN ('claude','codex')),
+    cwd TEXT NOT NULL,
+    log TEXT NOT NULL,
+    pid INTEGER,
+    budget INTEGER NOT NULL,
+    usage_day INTEGER NOT NULL DEFAULT 0,
+    usage_tokens INTEGER NOT NULL DEFAULT 0,
+    stop_requested INTEGER NOT NULL DEFAULT 0 CHECK(stop_requested IN (0,1)),
+    started_ms INTEGER NOT NULL
+);
 PRAGMA user_version = 3;
