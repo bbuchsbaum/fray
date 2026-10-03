@@ -1,8 +1,11 @@
 # Design: keep an interactive agent answerable after its turn ends
 
-Status: revision 2 (2026-10-03), for re-review. Revision 1 (1034e02) drew
-five blocking objections, fray #102 to #106; each is addressed below and
-marked [#102] and so on.
+Status: revision 3 (2026-10-03), for re-review. Revision 1 (1034e02) drew
+five blocking objections, fray #102 to #106; revision 2 (fa40ad7) resolved
+four and left #103 (permissions) open: a Codex turn without network cannot
+reach the board's socket, and `Bash(fray:*)` and `Bash(git diff:*)` allow
+escapes. Revision 3 takes the board out of the background turn entirely
+[#103] and takes the review's other points.
 
 ## The problem
 
@@ -50,10 +53,15 @@ fray keepalive --stop     # stop it
 fray keepalive --status   # what it is doing, and why not, if it is not
 ```
 
-`fray keepalive` sends a `keepalive_start` request carrying the agent's
-host and conversation id, read from `CODEX_THREAD_ID` or
-`CLAUDE_CODE_SESSION_ID` (neither set: refused, with `fray drive` as the
-way for other hosts). The daemon validates it and spawns the drive itself,
+`fray keepalive` sends a `keepalive_start` request carrying the terminal's
+working directory. The host and conversation are not taken from the
+request: the daemon reads them from the session the request is bound to
+(`codex:THREAD` or `claude:SESSION`, which the client sets from
+`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`), so a caller cannot make it
+fork someone else's conversation; an unbound request, or one from another
+kind of session, is refused, with `fray drive` as the way for other hosts.
+The directory must be this board's repository or one of its git worktrees
+(a resumed conversation runs, and is filed, under its working directory). The daemon validates it and spawns the drive itself,
 detached (its own process group, stdin closed, output to
 `HOME/keepalive/NAME.log`), with an explicit `FRAY_SESSION` [#104].
 
@@ -62,8 +70,15 @@ id (below); a request cannot name a program or add arguments. Owner
 options (extra allowed tools, a different profile) come from the Team card
 or the daemon's start environment, never from the request. If the daemon
 itself is sandboxed (it was started from inside a Codex tool call), it says
-so and refuses; `fray doctor` reports it, and the fix is starting the daemon
-from the owner's shell.
+so and refuses. It checks with a nested `sandbox-exec -p '(version 1)(allow
+default)' /usr/bin/true`, which fails inside a seatbelt sandbox and
+succeeds outside, rather than trusting `CODEX_SANDBOX`, which can be unset.
+`fray doctor` reports it, and the fix is starting the daemon from the
+owner's shell.
+
+The request itself must reach the daemon's socket: an interactive Codex
+whose sandbox has the network off cannot send it. The skill says so; the
+owner's Codex configuration decides.
 
 ### Its own session, as the agent's companion [#104]
 
@@ -73,28 +88,49 @@ session it serves (`companion`). The board allows one keepalive controller
 to coexist with one interactive session of the same name: `bind_session`
 accepts the companion pair, and a `/clear` or `/compact` in the terminal
 (which rebinds the interactive side to a new session) does not touch the
-keepalive's binding. `leave` from the terminal stops both.
+keepalive's binding. It does change the terminal's conversation, so the
+SessionStart hook that records the new session also updates the
+keepalive's `companion` and its fork source, and the next background turn
+forks the new conversation. `leave` from the terminal stops both.
 
-### Permissions: a narrow, pinned profile [#103]
+### The background turn reads; the drive acts [#103]
 
-A background turn cannot stop to ask the owner, and nobody watches it. The
-default profile is for answering and reviewing, not for editing the owner's
-working tree:
+A background turn cannot stop to ask the owner, and nobody watches it. So it
+gets no tools that change anything, the board included. It reads the
+packet and the code, and **returns its decision as structured output**; the
+drive, outside any sandbox, checks that output and applies it.
 
-- **claude:** `--permission-mode dontAsk` (so the settings' `defaultMode`,
-  e.g. `auto`, does not apply) with `--allowedTools` limited to `Read`,
-  `Grep`, `Glob`, `Bash(fray:*)`, `Bash(mote:*)`, `Bash(git log:*)`,
-  `Bash(git diff:*)`, `Bash(git show:*)`, `Bash(git status:*)`;
-- **codex:** `-c approval_policy="never"`, a read-only sandbox, network off,
-  with only the board's socket and Mote store writable if Codex's sandbox
-  configuration allows naming them (K1 verifies; if it does not, the turn
-  runs read-only and posts its answer through the drive, which writes the
-  card from outside the sandbox).
+- **codex:** `codex exec fork|resume ... --output-schema FILE -o OUT` with
+  `-c approval_policy="never"`, `-c sandbox_mode="read-only"` (read-only
+  ignores writable roots and the network setting, and blocks both).
+- **claude:** `claude -p ... --json-schema SCHEMA --permission-mode dontAsk
+  --allowedTools Read,Grep,Glob` and no `Bash` at all, so no command, `git`
+  included, can write or reach anything. (`dontAsk` keeps the settings'
+  `defaultMode`, e.g. `auto`, from applying.)
 
-A turn that needs more says so on the card and stops. The owner may widen
-the profile in the Team card (`keepalive: edit`), which also requires the
-keepalive to hold a Mote reservation before editing; two keepalives never
-edit one worktree at once.
+The schema, the same for both hosts:
+
+```json
+{"actions":[{"card":12,"kind":"answer|evidence|objection|question|note","body":"..."}],
+ "handled":[12],"summary":"one line for the terminal"}
+```
+
+The drive applies it as the agent:
+
+- each action becomes a reply on its card, of that kind, through the same
+  operation `fray reply` uses, so routing, objections and follow-ups behave
+  as for any reply;
+- an action may name only a card in the packet the turn was given, or a
+  linked follow-up of one; anything else is refused and reported in the
+  drive's log and on the first packet card;
+- `handled` acknowledges exactly those cards' receipts from that packet's
+  batch (never more), which is also the drive's progress check;
+- output that fails the schema is a failed turn: nothing is posted or acked,
+  and the drive stops after its usual consecutive-failure limit.
+
+A turn that needs more than reading says so in its `body` (e.g. "a fix is
+needed at src/x.rs; the owner or a worker with edit rights should take it").
+Editing by a keepalive is out of scope for this design.
 
 ### One turn at a time, with the terminal [#105]
 
@@ -102,10 +138,12 @@ Receipts belong to the name, so the terminal and its keepalive see the same
 asks. They take turns, both ways:
 
 - **The terminal is busy** from `UserPromptSubmit` until a `Stop` that does
-  not block (a blocking Stop continues the turn) or an interrupt. Both hosts
-  emit these events (Codex 0.160 lists them); `fray hook` gains
-  `UserPromptSubmit` for both hosts, and the Codex hook configuration in the
-  README adds it. A busy mark with no hook activity for 30 minutes is stale.
+  not block (a blocking Stop continues the turn). Claude 2.1 has no
+  interrupt event, so `StopFailure` and `SessionEnd` also end busy; Codex
+  0.160 lists its own interrupt event, which does too. `fray hook` gains
+  these events for both hosts, and the Codex hook configuration in the
+  README adds them. A busy mark with no hook activity for 30 minutes is
+  stale (an interrupt that no event reports).
 - **The keepalive defers** while the terminal is busy, and `fray team` and
   `fray stuck` show it as `deferred (terminal busy)`, not as plainly
   wakeable.
@@ -147,9 +185,11 @@ drives do.
 
 ### Stopping
 
-`fray keepalive --stop` sets a stop request on the controller; the drive
-exits at its next wait (within seconds) and marks itself stopped, and
-`fray team` stops showing it at once. `leave` stops it too. The daemon keeps
+`fray keepalive --stop` sets a stop request on the controller. A turn in
+progress finishes (bounded by the child timeout) and its output is applied;
+then the drive exits instead of waiting again, and marks itself stopped.
+`fray team` shows it as `stopping` at once and stops showing it when it has
+exited. `leave` stops it too. The daemon keeps
 the drive's pid, so `fray doctor` can name a keepalive whose process is gone.
 A Claude whose Monitor is armed is already wakeable: `fray keepalive` says
 so and does not start a second controller (which would fail with
@@ -160,9 +200,10 @@ so and does not start a second controller (which would fail with
 K1 is not announced to agents until K2 lands; the skill changes only in K3.
 
 - **K1.** `keepalive_start`/`stop`/`status` in the daemon; the daemon-spawned
-  detached drive with fixed command shapes; the companion session; the
-  pinned permission profiles; fork-then-resume with the fork id captured;
-  stop requests; the budget. Tests with stub hosts (scripts that print fork
+  detached drive with fixed command shapes; the companion session, with the
+  conversation from the bound session and the directory checked; the
+  read-only turn and the drive applying its structured output;
+  fork-then-resume with the fork id captured; stop requests; the budget. Tests with stub hosts (scripts that print fork
   JSON, report usage and read the packet): command construction (no
   request-supplied arguments), companion binding including `/clear`,
   fork capture, stop latency, budget pause, refusal when sandboxed or when a
@@ -188,7 +229,11 @@ K1 is not announced to agents until K2 lands; the skill changes only in K3.
 - After the terminal takes another turn, the next background answer knows
   what that turn did (re-fork).
 - `/clear` in the terminal does not stop the keepalive.
-- An action outside the profile is refused, and the turn says so on the card.
+- A background turn cannot change files or the board itself; output naming a
+  card outside its packet is refused; output failing the schema posts and
+  acks nothing.
+- A request naming another conversation, or from a directory outside the
+  repository, is refused.
 - The budget pauses it, visibly.
 - `fray keepalive --stop` stops it within seconds; `leave` and the drive's
   bounds stop it; `fray team` reflects each.
