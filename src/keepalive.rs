@@ -325,7 +325,7 @@ pub fn status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
         "host":k.host,"companion":k.companion,"session":k.session,"cwd":k.cwd,"log":k.log,
         "pid":k.pid,"started_ms":k.started,"stop_requested":k.stop,
         "fork":keep["fork"],"turns":detail["turn"],"paused":keep["paused"],"deferred":keep["deferred"],
-        "summary":keep["summary"],"failures":keep["failures"],
+        "summary":keep["summary"],"failures":keep["failures"],"oversized":keep["oversized"],
         "reason":if live {None} else {ours.and_then(|c| c.2.clone())},
         "usage":{"day":today(now),"input_tokens":used,"budget":k.budget,"over_budget":used>=k.budget},
     }))
@@ -339,7 +339,8 @@ pub(crate) fn brief(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
         if matches!(s["state"].as_str(), Some("off" | "stopped" | "failed")) {
             Value::Null
         } else {
-            json!({"state":s["state"],"host":s["host"],"companion":s["companion"],"paused":s["paused"],"deferred":s["deferred"],"pid":s["pid"]})
+            // Session ids are clipped for display, as everywhere in the roster.
+            json!({"state":s["state"],"host":s["host"],"companion":clip(s["companion"].as_str().unwrap_or(""), 20),"paused":s["paused"],"deferred":s["deferred"],"pid":s["pid"]})
         },
     )
 }

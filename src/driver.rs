@@ -90,7 +90,7 @@ impl Options {
             idle_timeout: 86400,
             debounce_ms: 100,
             bootstrap: false,
-            budget: 32000,
+            budget: keepalive_budget(),
             selection: "involved".into(),
             child_timeout: 900,
             on_urgent: "queue".into(),
@@ -99,6 +99,19 @@ impl Options {
             command: Vec::new(),
         }
     }
+}
+
+/// A keepalive's packet budget in bytes. Tests make it small so a card is
+/// cut to a pointer; release builds never read the override.
+fn keepalive_budget() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(budget) = std::env::var("FRAY_TEST_KEEPALIVE_BUDGET")
+        .ok()
+        .and_then(|b| b.parse().ok())
+    {
+        return budget;
+    }
+    32000
 }
 
 /// Consecutive keepalive turns without progress (a failed turn, invalid
@@ -181,8 +194,14 @@ fn turn_command(
             argv.push(schema.to_string_lossy().into_owned());
             argv.push("-o".into());
             argv.push(last.to_string_lossy().into_owned());
+            // Without the user's configuration the repository is untrusted, so
+            // its own `.codex` configuration and hooks do not load either
+            // (verified on codex 0.160); hooks and rules are off regardless.
             for setting in [
                 "--ignore-user-config",
+                "--ignore-rules",
+                "-c",
+                "features.hooks=false",
                 "-c",
                 r#"approval_policy="never""#,
                 "-c",
@@ -280,7 +299,25 @@ struct Reading {
     decision: std::result::Result<Decision, String>,
     /// The conversation the turn ran in, as the host reported it.
     conversation: Option<String>,
+    /// As the host reports it: Claude's is this invocation's own input
+    /// (verified: a resumed turn's cache writes were smaller than the fork's,
+    /// so it is not cumulative); Codex's is the thread's running total.
     input_tokens: i64,
+}
+
+/// The input tokens a turn adds to the day's count. Claude reports each
+/// invocation's own. Codex reports its thread's running total, which a
+/// resume continues: charge the rise since the last total seen for that
+/// thread. A fork's first total also counts the parent conversation's
+/// history; with no earlier total for it, all of it is charged (an
+/// overcount, so the budget errs toward pausing).
+fn charge(host: Host, reading: &Reading, previous: Option<&(String, i64)>) -> i64 {
+    match (host, reading.conversation.as_deref(), previous) {
+        (Host::Codex, Some(thread), Some((seen, total))) if thread == seen => {
+            (reading.input_tokens - total).max(0)
+        }
+        _ => reading.input_tokens,
+    }
 }
 
 fn tokens(usage: &Value, keys: &[&str]) -> i64 {
@@ -339,8 +376,9 @@ fn read_claude(out: &[u8]) -> Reading {
 }
 
 /// Codex's `--json` event stream: the thread from `thread.started`, input
-/// tokens from each `turn.completed`, and the decision from the `-o` file or
-/// else the last agent message.
+/// tokens from the last `turn.completed` (codex 0.160 reports the thread's
+/// running total there), and the decision from the `-o` file or else the
+/// last agent message.
 fn read_codex(out: &[u8], last: Option<&str>) -> Reading {
     let mut conversation = None;
     let mut message = None;
@@ -357,7 +395,8 @@ fn read_codex(out: &[u8], last: Option<&str>) -> Reading {
             Some("item.completed") if event["item"]["type"] == "agent_message" => {
                 message = event["item"]["text"].as_str().map(str::to_owned);
             }
-            Some("turn.completed") => input_tokens += tokens(&event["usage"], &["input_tokens"]),
+            // The thread's running total (see `charge`), not this turn's.
+            Some("turn.completed") => input_tokens = tokens(&event["usage"], &["input_tokens"]),
             Some("turn.failed" | "error") => {
                 failed = Some(clip_bytes(&event.to_string(), 200));
             }
@@ -425,6 +464,12 @@ struct Keep {
     schema: PathBuf,
     last: PathBuf,
     failures: Cell<u32>,
+    /// The last running total a Codex thread reported: (thread, tokens).
+    reported: RefCell<Option<(String, i64)>>,
+    /// Receipts that reached a packet only as pointers: (card, through_seq).
+    /// A turn cannot read them, so they are left for the terminal, the owner
+    /// or escalation, until new activity changes their version.
+    oversized: RefCell<Vec<(i64, i64)>>,
 }
 
 /// Whether any process remains in a process group.
@@ -645,13 +690,36 @@ impl Run<'_> {
         }
     }
     fn inbox(&self) -> Result<Value> {
-        self.call(
+        let Some(keep) = &self.keep else {
+            return self.call(
+                "inbox",
+                json!({"selection":self.options.selection,"limit":8}),
+                10,
+            );
+        };
+        // A keepalive leaves out what it cannot read in full; page past it.
+        let oversized = keep.oversized.borrow();
+        let mut page = self.call(
             "inbox",
-            json!({"selection":self.options.selection,"limit":8}),
+            json!({"selection":self.options.selection,"limit":(8 + oversized.len()).min(100)}),
             10,
-        )
+        )?;
+        let total = page["total"].as_u64().unwrap_or(0);
+        if let Some(items) = page["items"].as_array_mut() {
+            let before = items.len();
+            items.retain(|item| {
+                let version = (item["card"]["id"].as_i64(), item["through_seq"].as_i64());
+                !oversized
+                    .iter()
+                    .any(|&(id, seq)| version == (Some(id), Some(seq)))
+            });
+            let left = total.saturating_sub((before - items.len()) as u64);
+            page["total"] = json!(left);
+        }
+        Ok(page)
     }
-    fn wait(&self) -> Result<bool> {
+    /// Wait for selected attention after `after` (0: any pending).
+    fn wait(&self, after: i64) -> Result<bool> {
         let deadline = Instant::now() + Duration::from_secs(self.options.idle_timeout);
         loop {
             self.state("waiting", false, None)?;
@@ -662,7 +730,7 @@ impl Run<'_> {
             let secs = remaining.as_secs().saturating_add(1).min(HEARTBEAT_SECS);
             let page = self.call(
                 "wait",
-                json!({"selection":self.options.selection,"limit":1,"timeout":secs}),
+                json!({"selection":self.options.selection,"limit":1,"timeout":secs,"after":after}),
                 secs + 5,
             )?;
             if page["stop_requested"] == true {
@@ -710,7 +778,13 @@ impl Run<'_> {
             ),
         ))
     }
-    fn packet(&self, attention: Value, bootstrap: bool) -> Result<(String, Vec<Value>)> {
+    /// The prompt, every receipt it presents, and those it presents only as
+    /// pointers (not readable in full).
+    fn packet(
+        &self,
+        attention: Value,
+        bootstrap: bool,
+    ) -> Result<(String, Vec<Value>, Vec<Value>)> {
         let mut state = if bootstrap {
             self.call("brief", json!({"budget":self.options.budget}), 10)?
         } else {
@@ -725,13 +799,19 @@ impl Run<'_> {
         loop {
             let prompt = format!("{intro}{}\n", serde_json::to_string(&state)?);
             if prompt.len() <= self.options.budget {
-                let receipts = state["attention"]["items"]
-                    .as_array()
+                let items = state["attention"]["items"].as_array();
+                let receipts = items
                     .into_iter()
                     .flatten()
                     .map(|v| v["receipt"].clone())
                     .collect();
-                return Ok((prompt, receipts));
+                let pointers = items
+                    .into_iter()
+                    .flatten()
+                    .filter(|v| v["omitted"] == true)
+                    .map(|v| v["receipt"].clone())
+                    .collect();
+                return Ok((prompt, receipts, pointers));
             }
             state["budget_truncated"] = json!(true);
             // Optional bootstrap context yields to receipts. Never send an empty packet
@@ -1012,7 +1092,15 @@ impl Run<'_> {
             let mut page = self.inbox()?;
             let bootstrap = self.options.bootstrap && turn == 0;
             if page["total"] == 0 && !bootstrap {
-                if !self.wait()? {
+                // With receipts left aside as unreadable still pending, a
+                // keepalive waits only for newer activity.
+                let after = match &self.keep {
+                    Some(keep) if !keep.oversized.borrow().is_empty() => {
+                        page["cursor"].as_i64().unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                if !self.wait(after)? {
                     return Ok(if self.stop.get() { "stopped" } else { "idle" });
                 }
                 thread::sleep(Duration::from_millis(self.options.debounce_ms));
@@ -1022,14 +1110,26 @@ impl Run<'_> {
                 }
             }
             let cursor = page["cursor"].as_i64().unwrap_or(i64::MAX);
-            let (prompt, receipts) = self.packet(page, bootstrap)?;
-            turn += 1;
-            self.detail.borrow_mut()["turn"] = json!(turn);
+            let (prompt, receipts, pointers) = self.packet(page, bootstrap)?;
             let mut preempted = false;
             if let Some(keep) = &self.keep {
+                // Only what the turn receives in full can be handled; a packet
+                // of pointers alone is never worth a paid turn.
+                let whole: Vec<Value> = receipts
+                    .into_iter()
+                    .filter(|r| !pointers.contains(r))
+                    .collect();
+                if !pointers.is_empty() {
+                    self.set_aside(keep, &pointers);
+                }
+                if whole.is_empty() {
+                    continue;
+                }
+                turn += 1;
+                self.detail.borrow_mut()["turn"] = json!(turn);
                 // A keepalive acknowledges what its turn handled itself, so
                 // progress is known here; a turn without any is a failure.
-                let failures = if self.keepalive_turn(keep, turn, &prompt, &receipts, cursor)? {
+                let failures = if self.keepalive_turn(keep, turn, &prompt, &whole, cursor)? {
                     0
                 } else {
                     keep.failures.get() + 1
@@ -1046,6 +1146,8 @@ impl Run<'_> {
                     return Ok("stopped");
                 }
             } else {
+                turn += 1;
+                self.detail.borrow_mut()["turn"] = json!(turn);
                 let started = Instant::now();
                 let child = self.child(&self.options.command, false, &prompt, &receipts, cursor);
                 let detail = self.detail.borrow().clone();
@@ -1084,6 +1186,31 @@ impl Run<'_> {
                 thread::sleep(Duration::from_millis(self.options.debounce_ms));
             }
         }
+    }
+    /// Leave receipts the turn could only see as pointers for the terminal,
+    /// the owner or escalation: never acknowledged, never answered here, and
+    /// left out of later packets until new activity changes them. Reported
+    /// in the log and in `fray keepalive --status`, not on the card, where a
+    /// reply would read as an answer and hold off escalation.
+    fn set_aside(&self, keep: &Keep, pointers: &[Value]) {
+        let mut oversized = keep.oversized.borrow_mut();
+        for pointer in pointers {
+            let (Some(id), Some(seq)) = (pointer["id"].as_i64(), pointer["through_seq"].as_i64())
+            else {
+                continue;
+            };
+            oversized.retain(|&(card, _)| card != id);
+            oversized.push((id, seq));
+        }
+        // Bounded: the oldest fall out and are offered again.
+        let excess = oversized.len().saturating_sub(50);
+        oversized.drain(..excess);
+        let ids: Vec<i64> = oversized.iter().map(|&(id, _)| id).collect();
+        eprintln!(
+            "fray drive: {}",
+            json!({"run_id":self.id,"keepalive_set_aside":pointers,"reason":"larger than a background turn's packet; left for the terminal, the owner or escalation"})
+        );
+        self.detail.borrow_mut()["keepalive"]["oversized"] = json!(ids);
     }
     /// Wait out `pause` unless a stop request arrives first (true).
     fn rest(&self, pause: Duration) -> Result<bool> {
@@ -1179,12 +1306,16 @@ impl Run<'_> {
             }
         }
         // Tokens spent count against the budget whatever the outcome.
-        if reading.input_tokens > 0 {
-            match self.call(
-                "keepalive_usage",
-                json!({"input_tokens":reading.input_tokens}),
-                10,
-            ) {
+        let charged = charge(keep.host, &reading, keep.reported.borrow().as_ref());
+        if let (Host::Codex, Some(thread)) = (keep.host, reading.conversation.as_deref()) {
+            if reading.input_tokens > 0 {
+                *keep.reported.borrow_mut() = Some((thread.to_owned(), reading.input_tokens));
+                self.detail.borrow_mut()["keepalive"]["reported"] =
+                    json!({"conversation":thread,"input_tokens":reading.input_tokens});
+            }
+        }
+        if charged > 0 {
+            match self.call("keepalive_usage", json!({"input_tokens":charged}), 10) {
                 Ok(usage) => self.detail.borrow_mut()["keepalive"]["usage"] = usage,
                 Err(e) => eprintln!("fray drive: keepalive usage not recorded: {e}"),
             }
@@ -1204,7 +1335,7 @@ impl Run<'_> {
         };
         eprintln!(
             "fray drive: {}",
-            json!({"run_id":self.id,"turn":turn,"keepalive":format!("{:?}", keep.host).to_lowercase(),"forked":fork.is_none(),"conversation":keep.fork.borrow().clone(),"prompt_bytes":prompt.len(),"receipts":receipts,"elapsed_ms":started.elapsed().as_millis(),"input_tokens":reading.input_tokens,"child":self.detail.borrow()["child"],"applied":applied})
+            json!({"run_id":self.id,"turn":turn,"keepalive":format!("{:?}", keep.host).to_lowercase(),"forked":fork.is_none(),"conversation":keep.fork.borrow().clone(),"prompt_bytes":prompt.len(),"receipts":receipts,"elapsed_ms":started.elapsed().as_millis(),"input_tokens":reading.input_tokens,"charged_tokens":charged,"child":self.detail.borrow()["child"],"applied":applied})
         );
         Ok(progress)
     }
@@ -1239,7 +1370,7 @@ impl Run<'_> {
         if let (false, Some(first)) = (refused.is_empty(), packet.first()) {
             let ids: Vec<String> = refused.iter().map(|id| format!("#{id}")).collect();
             let note = format!(
-                "Keepalive refused part of its background turn's output: it named {}, outside the packet it was given (cards {}). Nothing was posted there.",
+                "Keepalive refused part of its background turn's output: it named {}, which the turn was not given in full (it was given cards {}). Nothing was posted there.",
                 ids.join(", "),
                 packet.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ")
             );
@@ -1346,6 +1477,8 @@ fn keep_for(home: &Path, actor: &str) -> Result<(Keep, Value)> {
             schema,
             last: keepalive::file(home, actor, "last.json"),
             failures: Cell::new(0),
+            reported: RefCell::new(None),
+            oversized: RefCell::new(Vec::new()),
         },
         status,
     ))
@@ -1509,6 +1642,9 @@ mod keepalive_tests {
             "-o",
             "/h/k/a.last.json",
             "--ignore-user-config",
+            "--ignore-rules",
+            "-c",
+            "features.hooks=false",
             "-c",
             r#"approval_policy="never""#,
             "-c",
@@ -1622,6 +1758,12 @@ mod keepalive_tests {
         assert_eq!(reading.decision.unwrap().handled, vec![5]);
         assert_eq!(reading.conversation.as_deref(), Some("t-1"));
         assert_eq!(reading.input_tokens, 51948);
+        // A running total: the last turn.completed, never a sum.
+        let twice = format!(
+            "{stream}\n{}",
+            json!({"type":"turn.completed","usage":{"input_tokens":60000}})
+        );
+        assert_eq!(read_codex(twice.as_bytes(), None).input_tokens, 60000);
         // The -o file wins over the stream's message.
         let file = r#"{"actions":[],"handled":[6],"summary":"s"}"#;
         assert_eq!(
@@ -1640,5 +1782,26 @@ mod keepalive_tests {
         );
         assert!(read_codex(failed.as_bytes(), None).decision.is_err());
         assert!(read_codex(b"", None).decision.is_err());
+    }
+
+    #[test]
+    fn codex_is_charged_the_rise_in_its_threads_running_total() {
+        let reading = |thread: &str, total: i64| Reading {
+            decision: Err(String::new()),
+            conversation: Some(thread.to_owned()),
+            input_tokens: total,
+        };
+        // The smoke log's two turns on one fork: 372,260 then 468,885.
+        let first = reading("t-1", 372_260);
+        assert_eq!(charge(Host::Codex, &first, None), 372_260);
+        let seen = ("t-1".to_owned(), 372_260);
+        let second = reading("t-1", 468_885);
+        assert_eq!(charge(Host::Codex, &second, Some(&seen)), 96_625);
+        // A new thread starts its own count.
+        assert_eq!(charge(Host::Codex, &reading("t-2", 50), Some(&seen)), 50);
+        // A total that went down charges nothing, never a negative.
+        assert_eq!(charge(Host::Codex, &reading("t-1", 10), Some(&seen)), 0);
+        // Claude reports each invocation's own input.
+        assert_eq!(charge(Host::Claude, &second, Some(&seen)), 468_885);
     }
 }

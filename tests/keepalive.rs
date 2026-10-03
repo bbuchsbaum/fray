@@ -475,3 +475,55 @@ fn a_keepalive_that_never_began_stops_counting_as_starting() {
     s.keepalive_abort("alice", NOW + 60_002).unwrap();
     assert_eq!(status(&mut s, "alice", NOW + 60_003)["state"], "stopped");
 }
+
+#[test]
+fn a_stopping_keepalive_is_not_wakeable() {
+    let mut s = board();
+    begin(&mut s, "alice", Some("claude:c1"), NOW + 1).unwrap();
+    drive_begins(&mut s, NOW + 2);
+    assert_eq!(
+        roster_entry(&mut s, "alice", NOW + 3)["reachability"],
+        "wakeable"
+    );
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "keepalive_stop",
+        json!({}),
+        NOW + 4,
+    );
+    assert_ne!(
+        roster_entry(&mut s, "alice", NOW + 5)["reachability"],
+        "wakeable"
+    );
+}
+
+#[test]
+fn the_keepalives_waits_leave_the_terminals_wait_row_alone() {
+    let mut s = board();
+    begin(&mut s, "alice", Some("claude:c1"), NOW + 1).unwrap();
+    drive_begins(&mut s, NOW + 2);
+    s.touch("alice", Some("claude:c1"), None, NOW + 3).unwrap();
+    s.touch("alice", Some("keepalive:c1"), Some("w1"), NOW + 4)
+        .unwrap();
+    let held: String = s
+        .conn
+        .query_row(
+            "SELECT session FROM agent_waits WHERE agent='alice'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, "claude:c1");
+    // Its wake row still makes the agent wakeable while it waits.
+    let woken: i64 = s
+        .conn
+        .query_row(
+            "SELECT count(*) FROM wake_waits WHERE agent='alice'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(woken, 1);
+}

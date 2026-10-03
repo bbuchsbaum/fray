@@ -386,7 +386,10 @@ The drive binds `keepalive:CONVERSATION` beside the terminal's session (the only
 pair `bind_session` allows), forks the conversation once and resumes the fork, runs
 each turn read-only with a pinned tool set, and applies the turn's structured output
 itself: replies on packet cards only, acknowledgment of exactly the handled
-receipts. Stop requests and a daily input-token budget are recorded in `keepalives`.
+receipts; a card that reaches it only as a pointer is never acknowledged or paid
+for, and is left for the terminal. Stop requests and a daily input-token budget are
+recorded in `keepalives` (Claude reports each invocation's input; Codex 0.160 reports
+its thread's running total, so the rise is charged).
 
 The optional experimental `integrations/codex-wake` adapter attaches to an existing
 App Server thread. It retains the expected active turn ID for `turn/steer` and uses

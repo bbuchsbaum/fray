@@ -28,7 +28,9 @@ BINARY = base.BINARY
 # One stub for both hosts; it tells them apart by its own name. The `mode`
 # file in its directory picks a behaviour: answer (default), outside (also
 # names a card outside the packet), invalid (output failing the schema),
-# slow:SECONDS (a long turn).
+# slow:SECONDS (a long turn). Like codex 0.160, the codex stub reports its
+# thread's running input total, and a fork's first total includes the
+# parent's (the `parent` file).
 STUB = r"""#!/usr/bin/env python3
 import json, os, pathlib, sys, time, uuid
 host = pathlib.Path(sys.argv[0]).name
@@ -61,7 +63,11 @@ else:
     text = 'not json at all' if mode == 'invalid' else json.dumps(decision)
     pathlib.Path(argv[argv.index('-o') + 1]).write_text(text)
     print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': text}}))
-    print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': tokens, 'cached_input_tokens': 0, 'output_tokens': 5}}))
+    totals = json.loads((d / 'totals.json').read_text()) if (d / 'totals.json').exists() else {}
+    parent = int((d / 'parent').read_text()) if (d / 'parent').exists() else 0
+    totals[thread] = totals.get(thread, parent) + tokens
+    (d / 'totals.json').write_text(json.dumps(totals))
+    print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': totals[thread], 'cached_input_tokens': 0, 'output_tokens': 5}}))
 """
 
 PINNED_CLAUDE = [
@@ -358,6 +364,8 @@ class Keepalive(unittest.TestCase):
         self,
     ):
         self.mode("outside")
+        # The fork's first running total includes the parent's history.
+        (self.stub / "parent").write_text("1000")
         self.start("carol", "codex:0193-ab")
         first = self.ask("carol", "Status of the build?")
         self.await_reply(first, "carol")
@@ -371,9 +379,12 @@ class Keepalive(unittest.TestCase):
         )
         self.assertEqual(argv[5], "-o")
         self.assertEqual(
-            argv[7:14],
+            argv[7:17],
             [
                 "--ignore-user-config",
+                "--ignore-rules",
+                "-c",
+                "features.hooks=false",
                 "-c",
                 'approval_policy="never"',
                 "-c",
@@ -383,7 +394,7 @@ class Keepalive(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            argv[14:-2],
+            argv[17:-2],
             [x for f in CODEX_FEATURES for x in ("-c", f"features.{f}=false")],
         )
         self.assertEqual(argv[-2:], ["0193-ab", "-"])
@@ -402,6 +413,7 @@ class Keepalive(unittest.TestCase):
         self.assertTrue(any("#999999" in n for n in notes), notes)
         self.assertIn('"refused":[999999]', self.drive_log("carol"))
         self.assertEqual(self.pending("carol"), 0)
+        self.assertEqual(status["usage"]["input_tokens"], 1010)
         # Output failing the schema posts and acknowledges nothing; the
         # keepalive rests before trying again, and a stop ends the rest.
         self.mode("invalid")
@@ -416,6 +428,8 @@ class Keepalive(unittest.TestCase):
         self.assertEqual(self.replies(second, "carol"), [])
         self.assertEqual(self.pending("carol"), 1)
         self.assertIn("final message is not JSON", self.drive_log("carol"))
+        # The resumed thread reported 1020 in all: charged the rise, 10.
+        self.assertEqual(failed["usage"]["input_tokens"], 1020)
         asked = time.monotonic()
         self.fray("keepalive", "--stop", actor="carol", session="codex:0193-ab")
         self.await_status(
@@ -426,15 +440,29 @@ class Keepalive(unittest.TestCase):
 
     def test_stop_lets_a_running_turn_finish_then_exits(self):
         self.mode("slow:2")
-        self.start("dave", "claude:d00d-1")
+        session = "claude:0193a1b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b"
+        self.start("dave", session)
         card = self.ask("dave", "Long question")
         self.await_status("dave", lambda s: s["turn"] == "running", "ran a turn")
         self.assertEqual(
-            self.fray("keepalive", "--stop", actor="dave", session="claude:d00d-1")[
-                "state"
-            ],
+            self.fray("keepalive", "--stop", actor="dave", session=session)["state"],
             "stopping",
         )
+        # Stopping takes no further turns, so it no longer counts as wakeable.
+        roster = next(
+            a for a in self.rpc("agents")["data"]["items"] if a["name"] == "dave"
+        )
+        self.assertNotEqual(roster["reachability"], "wakeable")
+        self.assertEqual(roster["keepalive"]["companion"], "claude:0193a1b2-7c3d…")
+        text = subprocess.run(
+            [str(BINARY), "--home", self.home, "--as", "dave", "keepalive", "--status"],
+            env=self.env,
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        ).stdout
+        self.assertIn("serves: claude:0193a1b2-7c3d… (claude)", text)
         team = subprocess.run(
             [str(BINARY), "--home", self.home, "--as", "bob", "team"],
             env=self.env,
@@ -453,6 +481,51 @@ class Keepalive(unittest.TestCase):
         self.assertFalse(
             alive(self.status("dave")["pid"]) and self.status("dave")["pid_alive"]
         )
+
+    def test_cards_too_large_for_the_packet_are_never_acked_or_paid_for(self):
+        self.shutdown()
+        self.launch(FRAY_TEST_KEEPALIVE_BUDGET="3000")
+        self.fray("join", actor="ivy", session="claude:i1")
+        big = self.ask("ivy", "Large: " + "x" * 2500)
+        small = self.ask("ivy", "Small question")
+        self.start("ivy", "claude:i1")
+        self.await_reply(small, "ivy")
+        # The turn saw the large card only as a pointer, and the stub listed it
+        # in actions and handled anyway: refused, and its receipt not acked.
+        first = self.calls()[0]
+        self.assertEqual(sorted(first["cards"]), sorted([big, small]))
+        self.assertEqual(self.replies(big, "ivy"), [])
+        status = self.await_status(
+            "ivy", lambda s: s["oversized"] == [big], "set the large card aside"
+        )
+        self.assertEqual((status["state"], status["failures"]), ("keepalive", 0))
+        self.assertEqual(self.pending("ivy"), 1)
+        # A packet of pointers alone costs no turn, and burns no failures.
+        bigger = self.ask("ivy", "Larger: " + "y" * 2500)
+        status = self.await_status(
+            "ivy",
+            lambda s: s["oversized"] == [big, bigger],
+            "set the second large card aside",
+        )
+        time.sleep(0.5)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual((status["state"], status["failures"]), ("keepalive", 0))
+        self.assertEqual(self.pending("ivy"), 2)
+        # It keeps answering what it can read, without the set-aside cards.
+        later = self.ask("ivy", "Another small one")
+        self.await_reply(later, "ivy")
+        self.assertEqual(self.calls()[1]["cards"], [later])
+        self.assertEqual(self.pending("ivy"), 2)
+        self.assertIn("keepalive_set_aside", self.drive_log("ivy"))
+        text = subprocess.run(
+            [str(BINARY), "--home", self.home, "--as", "ivy", "keepalive", "--status"],
+            env=self.env,
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        ).stdout
+        self.assertIn(f"left unread (too large for a background turn): #{big}, #{bigger}", text)
 
     def test_budget_pauses_visibly_and_takes_no_turns(self):
         self.shutdown()

@@ -1836,12 +1836,12 @@ fn keepalive_text(v: &Value) -> String {
     }
     out.push_str(&format!(
         "  serves: {} ({})\n  fork: {}\n  turns: {}   input tokens today: {} of {}\n  log: {}\n",
-        clean(v["companion"].as_str().unwrap_or("")),
+        // Session and conversation ids clipped, as elsewhere; --json has them whole.
+        clean(&clip(v["companion"].as_str().unwrap_or(""), 20)),
         clean(v["host"].as_str().unwrap_or("")),
-        clean(
-            v["fork"]
-                .as_str()
-                .unwrap_or("none yet (the first turn forks)")
+        v["fork"].as_str().map_or_else(
+            || "none yet (the first turn forks)".to_owned(),
+            |fork| clean(&clip(fork, 20))
         ),
         v["turns"].as_i64().unwrap_or(0),
         v["usage"]["input_tokens"],
@@ -1850,6 +1850,13 @@ fn keepalive_text(v: &Value) -> String {
     ));
     if let Some(summary) = v["summary"].as_str() {
         out.push_str(&format!("  last turn: {}\n", clean(summary)));
+    }
+    if let Some(ids) = v["oversized"].as_array().filter(|ids| !ids.is_empty()) {
+        let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+        out.push_str(&format!(
+            "  left unread (too large for a background turn): {}; handle them in the terminal\n",
+            ids.join(", ")
+        ));
     }
     if v["pid_alive"] == false
         && matches!(

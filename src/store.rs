@@ -302,10 +302,15 @@ impl Store {
         wake: Option<&str>,
         now: i64,
     ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO agent_waits(agent,session,refreshed_ms) SELECT name,?2,?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET session=excluded.session,refreshed_ms=excluded.refreshed_ms",
-            params![actor, session, now],
-        )?;
+        // One row per agent, which speaks for its interactive session: a
+        // keepalive's waits must not overwrite the terminal's (its wake row
+        // below still makes the agent wakeable).
+        if !crate::keepalive::is_session(session) {
+            self.conn.execute(
+                "INSERT INTO agent_waits(agent,session,refreshed_ms) SELECT name,?2,?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET session=excluded.session,refreshed_ms=excluded.refreshed_ms",
+                params![actor, session, now],
+            )?;
+        }
         if let Some(id) = wake {
             self.conn.execute(
                 "INSERT INTO wake_waits(wait_id,agent,refreshed_ms) SELECT ?1,name,?3 FROM agents WHERE name=?2 AND enabled=1 ON CONFLICT(wait_id) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
@@ -4627,8 +4632,9 @@ fn wake_state(conn: &Connection, actor: &str, now: i64) -> Result<(bool, Value, 
         })
         .optional()?
         .unwrap_or(false);
-    // A keepalive paused by its budget takes no turns: it does not wake.
-    let controller = conn.query_row("SELECT c.state,c.updated_ms FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=? AND json_extract(d.detail,'$.keepalive.paused') IS NULL", [actor], |r| {
+    // A keepalive paused by its budget, or asked to stop, takes no further
+    // turns: it does not wake.
+    let controller = conn.query_row("SELECT c.state,c.updated_ms FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=?1 AND json_extract(d.detail,'$.keepalive.paused') IS NULL AND NOT EXISTS(SELECT 1 FROM keepalives k WHERE k.agent=c.agent AND k.stop_requested=1 AND k.session=json_extract(d.detail,'$.keepalive.session'))", [actor], |r| {
         let state: String = r.get(0)?;
         let updated: i64 = r.get(1)?;
         Ok(json!({"state":state,"live":enabled && matches!(state.as_str(),"waiting"|"running") && now-updated<120000}))
