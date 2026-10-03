@@ -1,6 +1,12 @@
 # Design: keep an interactive agent answerable after its turn ends
 
-Status: revision 3 (2026-10-03), for re-review. Revision 1 (1034e02) drew
+Status: revision 4 (2026-10-03), for re-review. Revision 3 (85c3fc9) left
+#103 open once more: its flags only govern tools that would prompt, so the
+user's own settings (here `Write(*)`, `Edit(*)`, `Bash(timeout:*)`, web
+tools) and Codex's MCP servers and built-in tools still reached the turn.
+Revision 4 pins the turn's tool set itself, with the evidence below.
+
+Earlier history: revision 3 (85c3fc9), for re-review. Revision 1 (1034e02) drew
 five blocking objections, fray #102 to #106; revision 2 (fa40ad7) resolved
 four and left #103 (permissions) open: a Codex turn without network cannot
 reach the board's socket, and `Bash(fray:*)` and `Bash(git diff:*)` allow
@@ -100,13 +106,35 @@ gets no tools that change anything, the board included. It reads the
 packet and the code, and **returns its decision as structured output**; the
 drive, outside any sandbox, checks that output and applies it.
 
-- **codex:** `codex exec fork|resume ... --output-schema FILE -o OUT` with
-  `-c approval_policy="never"`, `-c sandbox_mode="read-only"` (read-only
-  ignores writable roots and the network setting, and blocks both).
-- **claude:** `claude -p ... --json-schema SCHEMA --permission-mode dontAsk
-  --allowedTools Read,Grep,Glob` and no `Bash` at all, so no command, `git`
-  included, can write or reach anything. (`dontAsk` keeps the settings'
-  `defaultMode`, e.g. `auto`, from applying.)
+- **claude:** `claude -p ... --json-schema SCHEMA --output-format json
+  --tools Read,Grep,Glob --restricted --strict-mcp-config --permission-mode
+  dontAsk`. `--tools` sets the tool set itself (not allow rules, which the
+  settings files would extend); `--restricted` ignores the user, project and
+  local settings files and confines the file tools to the working
+  directories; `--strict-mcp-config` loads no MCP servers. Verified: with
+  allow rules alone a turn wrote a file because the user's settings allow
+  `Write(*)`; with `--tools Read,Grep,Glob --strict-mcp-config` Write was
+  unavailable and nothing was written. The structured result is the
+  top-level `structured_output`; a missing one, or `is_error: true`, is a
+  failed turn.
+- **codex:** `codex exec fork|resume ... --json --output-schema FILE
+  --ignore-user-config -c approval_policy="never" -c sandbox_mode="read-only"
+  -c web_search="disabled"` and `-c features.NAME=false` for `multi_agent`,
+  `apps`, `browser_use`, `browser_use_external`,
+  `browser_use_full_cdp_access`, `computer_use`, `image_generation`,
+  `plugins`, `remote_plugin`, `in_app_browser`, `in_app_local_automation`
+  and `skill_mcp_dependency_install`. `--ignore-user-config` drops the
+  user's MCP servers (auth still comes from `CODEX_HOME`). Verified on a
+  fork: it remembered the conversation; a write was refused by the
+  read-only sandbox; the turn listed no MCP servers and no web, image,
+  browser or app tools. What remains is shell execution and `apply_patch`
+  under the read-only, no-network sandbox, clock and goal tools, and
+  `collaboration.spawn_agent`, which `multi_agent=false` did not remove.
+  K1 must show that spawned agents inherit the same sandbox and settings
+  (or find the key that removes them) before the keepalive is announced;
+  the drive's child timeout bounds their cost either way. Without the
+  user's configuration the model is the one the forked conversation
+  recorded, or the Team card's `keepalive model:`.
 
 The schema, the same for both hosts:
 
@@ -229,9 +257,11 @@ K1 is not announced to agents until K2 lands; the skill changes only in K3.
 - After the terminal takes another turn, the next background answer knows
   what that turn did (re-fork).
 - `/clear` in the terminal does not stop the keepalive.
-- A background turn cannot change files or the board itself; output naming a
-  card outside its packet is refused; output failing the schema posts and
-  acks nothing.
+- A background turn cannot change files or the board itself, on a machine
+  whose settings allow Write, Edit, any Bash and MCP tools: asked to write a
+  file, run a command or use an MCP tool, it cannot. Output naming a card
+  outside its packet is refused; output failing the schema posts and acks
+  nothing. A Codex sub-agent spawned by the turn has the same limits.
 - A request naming another conversation, or from a directory outside the
   repository, is refused.
 - The budget pauses it, visibly.
