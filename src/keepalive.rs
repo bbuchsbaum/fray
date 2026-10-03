@@ -1,0 +1,517 @@
+//! Keepalive (docs/design/keepalive.md, slice K1): the daemon keeps an
+//! interactive agent answerable after its turn ends by starting a detached
+//! `fray drive --keepalive` under the agent's name. This is the board's side:
+//! the record of what was started for whom, the companion session it may
+//! bind, stop requests, the daily input-token budget, and the fixed spawn.
+//!
+//! Experimental and not yet announced to agents (K3 changes the skill).
+use crate::model::*;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
+use std::{
+    fs::{self, OpenOptions},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        process::CommandExt,
+    },
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+};
+
+/// The session label a keepalive drive speaks with: `keepalive:CONVERSATION`.
+pub const PREFIX: &str = "keepalive:";
+/// Daily input tokens when the daemon's start environment sets none.
+pub const DAILY_TOKENS: i64 = 2_000_000;
+/// The owner's override, read from the daemon's start environment only.
+pub const BUDGET_ENV: &str = "FRAY_KEEPALIVE_DAILY_TOKENS";
+/// How long a started keepalive counts as starting before its drive begins.
+const STARTING_MS: i64 = 20_000;
+/// A controller not refreshed for this long is not live (as for drives).
+const CONTROLLER_TTL_MS: i64 = 120_000;
+const DAY_MS: i64 = 86_400_000;
+/// The only command the daemon runs, after its own executable. Nothing in a
+/// request reaches it: the name, home and session go in the environment.
+pub const DRIVE_ARGS: [&str; 2] = ["drive", "--keepalive"];
+
+pub fn is_session(session: Option<&str>) -> bool {
+    session.is_some_and(|s| s.starts_with(PREFIX))
+}
+
+/// An id a host gave a conversation, safe to pass as one argument: ASCII
+/// letters, digits and '-', starting with a letter or digit (never a flag).
+pub fn conversation_id(id: &str) -> bool {
+    (1..=100).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && id.as_bytes()[0].is_ascii_alphanumeric()
+}
+
+/// The host and conversation of an interactive terminal's session.
+pub fn companion(session: &str) -> Result<(&str, &str)> {
+    let (host, id) = session
+        .split_once(':')
+        .filter(|(host, _)| matches!(*host, "claude" | "codex"))
+        .ok_or_else(|| {
+            Error::new(
+                "keepalive_host",
+                "a keepalive serves an interactive Claude Code or Codex session (claude:ID or codex:ID, from CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID); for other hosts run `fray drive`",
+            )
+        })?;
+    if !conversation_id(id) {
+        return Err(Error::invalid(
+            "the session's conversation id must be 1..100 ASCII letters, digits or '-', starting with a letter or digit",
+        ));
+    }
+    Ok((host, id))
+}
+
+/// Where a keepalive's drive writes its output: `HOME/keepalive/NAME.log`.
+/// Agent names may contain '/', which cannot appear in a file name.
+pub fn file(home: &Path, agent: &str, extension: &str) -> PathBuf {
+    home.join("keepalive")
+        .join(format!("{}.{extension}", agent.replace('/', "%2F")))
+}
+
+fn today(now: i64) -> i64 {
+    now.div_euclid(DAY_MS)
+}
+
+/// Whether this daemon runs inside a seatbelt sandbox: a nested sandbox is
+/// refused there and allowed outside. `CODEX_SANDBOX` is not trusted (it can
+/// be unset). Without sandbox-exec (not macOS) there is no seatbelt.
+pub fn sandboxed() -> bool {
+    // Tests force either answer; release builds never read this.
+    #[cfg(debug_assertions)]
+    if let Ok(forced) = std::env::var("FRAY_TEST_SANDBOXED") {
+        return forced == "1";
+    }
+    let probe = Path::new("/usr/bin/sandbox-exec");
+    if !probe.exists() {
+        return false;
+    }
+    !Command::new(probe)
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-common-dir"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    fs::canonicalize(if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    })
+    .ok()
+}
+
+/// The terminal's directory, canonical, if it is this board's repository or
+/// one of its git worktrees (they share the repository's common directory).
+/// A resumed conversation runs, and is filed, under its working directory.
+pub fn repository_dir(home: &Path, cwd: &Path) -> Result<PathBuf> {
+    let outside = || {
+        Error::new(
+            "outside_repository",
+            format!(
+                "{} is not this board's repository or one of its git worktrees; run fray keepalive from the terminal's own working directory",
+                cwd.display()
+            ),
+        )
+    };
+    if !cwd.is_absolute() {
+        return Err(Error::invalid("cwd must be an absolute directory"));
+    }
+    let cwd = fs::canonicalize(cwd).map_err(|_| outside())?;
+    if !cwd.is_dir() {
+        return Err(outside());
+    }
+    let board = home
+        .parent()
+        .and_then(git_common_dir)
+        .ok_or_else(|| {
+            Error::new(
+                "outside_repository",
+                "this board's home is not inside a git repository, so no directory can be checked against it",
+            )
+        })?;
+    match git_common_dir(&cwd) {
+        Some(common) if common == board => Ok(cwd),
+        _ => Err(outside()),
+    }
+}
+
+/// Whether a process exists (signal 0 through the shell's `kill`, keeping
+/// the crate free of unsafe code).
+pub fn pid_alive(pid: i64) -> bool {
+    pid > 0
+        && Command::new("/bin/sh")
+            .args([
+                "-c",
+                r#"kill -0 "$1" 2>/dev/null"#,
+                "fray",
+                &pid.to_string(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
+/// Start the keepalive's drive, detached: its own process group, stdin
+/// closed, output appended to its log, and an explicit `FRAY_SESSION`. The
+/// command is fixed; only the environment names whom it serves.
+pub fn spawn(home: &Path, agent: &str, session: &str, cwd: &Path, log: &Path) -> Result<Child> {
+    if let Some(dir) = log.parent() {
+        fs::create_dir_all(dir)?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    let out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(log)?;
+    Ok(Command::new(std::env::current_exe()?)
+        .args(DRIVE_ARGS)
+        .env("FRAY_HOME", home)
+        .env("FRAY_AGENT", agent)
+        .env("FRAY_SESSION", session)
+        // The daemon may have been started inside a host session; the drive
+        // speaks only as its keepalive session.
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out.try_clone()?))
+        .stderr(Stdio::from(out))
+        .process_group(0)
+        .spawn()?)
+}
+
+struct Record {
+    session: String,
+    companion: String,
+    host: String,
+    cwd: String,
+    log: String,
+    pid: Option<i64>,
+    budget: i64,
+    usage_day: i64,
+    usage_tokens: i64,
+    stop: bool,
+    started: i64,
+}
+
+fn record(conn: &Connection, agent: &str) -> Result<Option<Record>> {
+    Ok(conn
+        .query_row(
+            "SELECT session,companion,host,cwd,log,pid,budget,usage_day,usage_tokens,stop_requested,started_ms FROM keepalives WHERE agent=?",
+            [agent],
+            |r| {
+                Ok(Record {
+                    session: r.get(0)?,
+                    companion: r.get(1)?,
+                    host: r.get(2)?,
+                    cwd: r.get(3)?,
+                    log: r.get(4)?,
+                    pid: r.get(5)?,
+                    budget: r.get(6)?,
+                    usage_day: r.get(7)?,
+                    usage_tokens: r.get(8)?,
+                    stop: r.get(9)?,
+                    started: r.get(10)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Whether `session` is the keepalive session the daemon started for
+/// `agent`: only that one may bind beside the agent's interactive session.
+pub(crate) fn authorized(conn: &Connection, agent: &str, session: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM keepalives WHERE agent=? AND session=?)",
+        params![agent, session],
+        |r| r.get(0),
+    )?)
+}
+
+pub(crate) fn stop_requested(conn: &Connection, agent: &str, session: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT stop_requested FROM keepalives WHERE agent=? AND session=?",
+            params![agent, session],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// What the keepalive for `agent` is doing, and why not, if it is not.
+pub fn status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
+    let Some(k) = record(conn, agent)? else {
+        return Ok(json!({"agent":agent,"state":"off"}));
+    };
+    let controller: Option<(String, i64, Option<String>, Option<Value>)> = conn
+        .query_row(
+            "SELECT c.state,c.updated_ms,c.reason,d.detail FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=?",
+            [agent],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get::<_, Option<String>>(3)?
+                        .and_then(|d| serde_json::from_str(&d).ok()),
+                ))
+            },
+        )
+        .optional()?;
+    // The controller is this keepalive's when its run began after the start
+    // and its detail names this keepalive session.
+    let ours = controller.as_ref().filter(|(_, updated, _, detail)| {
+        *updated >= k.started
+            && detail
+                .as_ref()
+                .is_some_and(|d| d["keepalive"]["session"] == k.session.as_str())
+    });
+    let detail = ours.and_then(|c| c.3.clone()).unwrap_or(Value::Null);
+    let keep = &detail["keepalive"];
+    let live = ours.is_some_and(|(state, updated, _, _)| {
+        matches!(state.as_str(), "waiting" | "running") && now - updated < CONTROLLER_TTL_MS
+    });
+    let state = if live {
+        if k.stop {
+            "stopping"
+        } else if !keep["paused"].is_null() {
+            "paused"
+        } else if !keep["deferred"].is_null() {
+            // Set by K2 while the terminal is busy.
+            "deferred"
+        } else {
+            "keepalive"
+        }
+    } else if ours.is_none() && !k.stop && now - k.started < STARTING_MS {
+        "starting"
+    } else if ours.is_some_and(|c| c.0 == "failed") {
+        "failed"
+    } else {
+        "stopped"
+    };
+    let used = if k.usage_day == today(now) {
+        k.usage_tokens
+    } else {
+        0
+    };
+    Ok(json!({
+        "agent":agent,"state":state,
+        "turn":if live {ours.map(|c| c.0.clone())} else {None},
+        "host":k.host,"companion":k.companion,"session":k.session,"cwd":k.cwd,"log":k.log,
+        "pid":k.pid,"started_ms":k.started,"stop_requested":k.stop,
+        "fork":keep["fork"],"turns":detail["turn"],"paused":keep["paused"],"deferred":keep["deferred"],
+        "summary":keep["summary"],"failures":keep["failures"],
+        "reason":if live {None} else {ours.and_then(|c| c.2.clone())},
+        "usage":{"day":today(now),"input_tokens":used,"budget":k.budget,"over_budget":used>=k.budget},
+    }))
+}
+
+/// The roster's view: present only while a keepalive is starting, running,
+/// stopping, paused or deferred.
+pub(crate) fn brief(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
+    let s = status(conn, agent, now)?;
+    Ok(
+        if matches!(s["state"].as_str(), Some("off" | "stopped" | "failed")) {
+            Value::Null
+        } else {
+            json!({"state":s["state"],"host":s["host"],"companion":s["companion"],"paused":s["paused"],"deferred":s["deferred"],"pid":s["pid"]})
+        },
+    )
+}
+
+/// Validate a start request (bound and checked by the caller) and record it.
+/// The host and conversation come from the request's bound session, never
+/// from its fields. Returns the status, with `already_running` when a
+/// keepalive already serves this name.
+pub(crate) fn begin(
+    conn: &Connection,
+    req: &Request,
+    cwd: &str,
+    log: &str,
+    budget: i64,
+    now: i64,
+) -> Result<Value> {
+    let agent = req.actor.as_str();
+    let session = req.session.as_deref().ok_or_else(|| {
+        Error::new(
+            "session_required",
+            "fray keepalive needs the terminal's host session (CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID); for other hosts run `fray drive`",
+        )
+    })?;
+    if is_session(Some(session)) {
+        return Err(Error::new(
+            "keepalive_host",
+            "a keepalive cannot start another keepalive",
+        ));
+    }
+    let (host, conversation) = companion(session)?;
+    let current = status(conn, agent, now)?;
+    match current["state"].as_str() {
+        Some("starting" | "keepalive" | "paused" | "deferred") => {
+            let mut current = current;
+            current["already_running"] = json!(true);
+            return Ok(current);
+        }
+        Some("stopping") => {
+            return Err(Error::new(
+                "keepalive_stopping",
+                "this name's keepalive is stopping (its turn in progress finishes first); start it again once fray keepalive --status says stopped",
+            ))
+        }
+        _ => {}
+    }
+    // A live listener or controller already owns this identity's wake. A
+    // Claude whose Monitor is armed is wakeable already; a second controller
+    // would fail with controller_busy.
+    let listener: Option<String> = conn
+        .query_row(
+            "SELECT selection FROM listeners WHERE agent=? AND connected=1 AND updated_ms>?",
+            params![agent, now - crate::attention::LISTENER_TTL_MS],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(selection) = listener {
+        let selection: Value = serde_json::from_str(&selection).unwrap_or(Value::Null);
+        if selection["activation"]["mode"] == "native-monitor" {
+            return Err(Error::new(
+                "monitor_armed",
+                format!("{agent:?} has an armed Monitor, so it is already wakeable; a keepalive would be a second controller (controller_busy). Keep the Monitor, or stop it before fray keepalive"),
+            ));
+        }
+        return Err(Error::new(
+            "controller_busy",
+            "a live listener already owns this identity's wake; stop it before fray keepalive",
+        ));
+    }
+    let driven: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM controllers WHERE agent=? AND state IN ('waiting','running') AND updated_ms>?)",
+        params![agent, now - CONTROLLER_TTL_MS],
+        |r| r.get(0),
+    )?;
+    if driven {
+        return Err(Error::new(
+            "controller_busy",
+            "a live drive already owns this identity; a keepalive would be a second controller",
+        ));
+    }
+    let label = format!("{PREFIX}{conversation}");
+    // A restart keeps the day's usage: the budget is per name and day.
+    conn.execute(
+        "INSERT INTO keepalives(agent,session,companion,host,cwd,log,pid,budget,stop_requested,started_ms) VALUES(?1,?2,?3,?4,?5,?6,NULL,?7,0,?8) ON CONFLICT(agent) DO UPDATE SET session=excluded.session,companion=excluded.companion,host=excluded.host,cwd=excluded.cwd,log=excluded.log,pid=NULL,budget=excluded.budget,stop_requested=0,started_ms=excluded.started_ms",
+        params![agent, label, session, host, cwd, log, budget, now],
+    )?;
+    status(conn, agent, now)
+}
+
+pub(crate) fn spawned(conn: &Connection, agent: &str, pid: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE keepalives SET pid=? WHERE agent=?",
+        params![pid, agent],
+    )?;
+    Ok(())
+}
+
+/// The drive could not be started: the record no longer counts as starting.
+pub(crate) fn abort(conn: &Connection, agent: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE keepalives SET stop_requested=1,started_ms=min(started_ms,?) WHERE agent=?",
+        params![now - STARTING_MS, agent],
+    )?;
+    Ok(())
+}
+
+/// A stop request on the keepalive: a turn in progress finishes, then the
+/// drive exits instead of waiting again.
+pub(crate) fn stop(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    check_fields(&req.args, &[])?;
+    let changed = conn.execute(
+        "UPDATE keepalives SET stop_requested=1 WHERE agent=?",
+        [&req.actor],
+    )?;
+    if changed == 0 {
+        return Err(Error::new(
+            "not_found",
+            format!("{:?} has no keepalive", req.actor),
+        ));
+    }
+    status(conn, &req.actor, now)
+}
+
+/// Input tokens a keepalive turn read, as its host reported them, added to
+/// the day's count. Only the keepalive's own session reports usage.
+pub(crate) fn usage(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    check_fields(&req.args, &["input_tokens"])?;
+    let tokens = bounded(&req.args, "input_tokens", 0, 0, 1_000_000_000)?;
+    let session = req.session.as_deref().unwrap_or("");
+    if !is_session(Some(session)) || !authorized(conn, &req.actor, session)? {
+        return Err(Error::new(
+            "keepalive_session",
+            "only the keepalive's own drive reports its usage",
+        ));
+    }
+    conn.execute(
+        "UPDATE keepalives SET usage_tokens=CASE WHEN usage_day=?1 THEN usage_tokens+?2 ELSE ?2 END,usage_day=?1 WHERE agent=?3",
+        params![today(now), tokens, req.actor],
+    )?;
+    Ok(status(conn, &req.actor, now)?["usage"].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_conversation_id_is_one_safe_argument() {
+        assert!(conversation_id("0193a1b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b"));
+        assert!(!conversation_id("-x"));
+        assert!(!conversation_id("--dangerously-skip-permissions"));
+        assert!(!conversation_id("a b"));
+        assert!(!conversation_id("a;b"));
+        assert!(!conversation_id(""));
+        assert!(!conversation_id(&"a".repeat(101)));
+    }
+
+    #[test]
+    fn only_claude_and_codex_sessions_have_companions() {
+        assert_eq!(companion("claude:abc-1").unwrap(), ("claude", "abc-1"));
+        assert_eq!(companion("codex:t-2").unwrap(), ("codex", "t-2"));
+        assert_eq!(companion("fray:k").unwrap_err().code, "keepalive_host");
+        assert_eq!(companion("test:w").unwrap_err().code, "keepalive_host");
+        assert_eq!(companion("claude:-p").unwrap_err().code, "invalid");
+    }
+
+    #[test]
+    fn a_log_name_never_leaves_the_keepalive_directory() {
+        let home = Path::new("/h");
+        assert_eq!(
+            file(home, "a/../b", "log"),
+            Path::new("/h/keepalive/a%2F..%2Fb.log")
+        );
+        assert_eq!(file(home, "..", "log"), Path::new("/h/keepalive/...log"));
+    }
+}

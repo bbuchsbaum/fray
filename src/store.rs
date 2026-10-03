@@ -272,7 +272,7 @@ impl Store {
         })?;
         conn.execute_batch("BEGIN IMMEDIATE")?;
         conn.execute_batch(include_str!("schema.sql"))?;
-        conn.execute("INSERT OR IGNORE INTO peer_generations(agent,generation,session,joined_ms) SELECT name,1,(SELECT session FROM sessions WHERE agent=agents.name AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1),joined_ms FROM agents WHERE enabled=1",[])?;
+        conn.execute("INSERT OR IGNORE INTO peer_generations(agent,generation,session,joined_ms) SELECT name,1,(SELECT session FROM sessions WHERE agent=agents.name AND ended_ms IS NULL AND session NOT GLOB 'keepalive:*' ORDER BY last_seen_ms DESC LIMIT 1),joined_ms FROM agents WHERE enabled=1",[])?;
         if version == 1 {
             // Preserve every receipt. Reconstruct deliberate participation, not old fan-out.
             conn.execute_batch("INSERT OR IGNORE INTO participants(agent,card_id) SELECT DISTINCT e.actor,e.card_id FROM events e JOIN agents a ON a.name=e.actor;")?;
@@ -326,6 +326,40 @@ impl Store {
             .execute("DELETE FROM wake_waits WHERE wait_id=?", [wake])?;
         Ok(())
     }
+    /// Record a keepalive start for the request's bound session (see
+    /// `keepalive::begin`); `cwd` was already checked against the repository.
+    /// The daemon spawns the drive only after this commits.
+    pub fn keepalive_begin(
+        &mut self,
+        req: &Request,
+        cwd: &str,
+        log: &str,
+        budget: i64,
+        now: i64,
+    ) -> Result<Value> {
+        if !valid_name(&req.actor) || req.actor == OWNER {
+            return Err(Error::invalid(
+                "set --as/FRAY_AGENT to the terminal's own identity",
+            ));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        registered(&tx, &req.actor)?;
+        bind_session(&tx, req, now)?;
+        let result = crate::keepalive::begin(&tx, req, cwd, log, budget, now)?;
+        tx.commit()?;
+        Ok(result)
+    }
+    pub fn keepalive_spawned(&self, agent: &str, pid: u32) -> Result<()> {
+        crate::keepalive::spawned(&self.conn, agent, pid)
+    }
+    pub fn keepalive_abort(&self, agent: &str, now: i64) -> Result<()> {
+        crate::keepalive::abort(&self.conn, agent, now)
+    }
+    pub fn keepalive_stop_requested(&self, agent: &str, session: &str) -> Result<bool> {
+        crate::keepalive::stop_requested(&self.conn, agent, session)
+    }
     pub fn identity(&self) -> Result<String> {
         Ok(self
             .conn
@@ -373,6 +407,8 @@ impl Store {
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
+                | "keepalive_stop"
+                | "keepalive_usage"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -465,7 +501,10 @@ impl Store {
         }
         let replaced = bind_session(&tx, req, now)?;
         let mut result = mutate(&tx, req, now)?;
+        // A keepalive speaks beside its terminal, not as a new arrival: its
+        // session never renews the name's peer generation.
         if req.session.is_some()
+            && !crate::keepalive::is_session(req.session.as_deref())
             && !matches!(
                 req.op.as_str(),
                 "join" | "leave" | "present" | "expose" | "peer_present"
@@ -481,6 +520,11 @@ impl Store {
             tx.execute(
                 "UPDATE sessions SET ended_ms=?,ended_reason='left' WHERE agent=? AND ended_ms IS NULL AND (?3 IS NULL OR session=?3)",
                 params![now, req.actor, req.session],
+            )?;
+            // `leave` from the terminal stops its keepalive too.
+            tx.execute(
+                "UPDATE keepalives SET stop_requested=1 WHERE agent=?",
+                [&req.actor],
             )?;
         }
         // A listener registering what it displayed is not the agent acting;
@@ -819,7 +863,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             crate::presence::joined(
                 conn,
                 actor,
-                req.session.as_deref(),
+                req.session
+                    .as_deref()
+                    .filter(|s| !crate::keepalive::is_session(Some(s))),
                 existing.as_ref().is_some_and(|e| e.2),
                 now,
             )?;
@@ -931,8 +977,20 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             if let Some(detail) = detail {
                 conn.execute("INSERT INTO controller_details(agent,run_id,detail) VALUES(?,?,?) ON CONFLICT(agent) DO UPDATE SET run_id=excluded.run_id,detail=excluded.detail",params![actor,run_id,detail])?;
             }
-            Ok(json!({"run_id":run_id,"state":state,"updated_ms":now}))
+            let mut result = json!({"run_id":run_id,"state":state,"updated_ms":now});
+            // A keepalive's drive learns of a stop request here.
+            if let Some(session) = req
+                .session
+                .as_deref()
+                .filter(|s| crate::keepalive::is_session(Some(s)))
+            {
+                result["stop_requested"] =
+                    json!(crate::keepalive::stop_requested(conn, actor, session)?);
+            }
+            Ok(result)
         }
+        "keepalive_stop" => crate::keepalive::stop(conn, req, now),
+        "keepalive_usage" => crate::keepalive::usage(conn, req, now),
         "follow" | "unfollow" => {
             check_fields(a, &["id"])?;
             let id = integer(a, "id")?;
@@ -2714,6 +2772,15 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             )
         }
         "query" => query(conn, a, actor, now),
+        "keepalive_status" => {
+            check_fields(a, &["agent"])?;
+            let agent = a
+                .get("agent")
+                .map(|_| string(a, "agent"))
+                .transpose()?
+                .unwrap_or(actor);
+            crate::keepalive::status(conn, agent, now)
+        }
         "peers" => crate::presence::delta(conn, req, now),
         "show" => {
             check_fields(
@@ -3217,6 +3284,11 @@ fn session_label(session: &str) -> String {
 /// never silently share a name: the second is refused unless it joins with
 /// `takeover`, which ends the first visibly. A stale binding yields.
 /// Returns what was replaced, if anything. Legacy (session-less) requests pass.
+///
+/// The one exception is a companion pair: the keepalive session the daemon
+/// started for this name binds beside its interactive session, in a slot of
+/// its own. Neither displaces the other, so a `/clear` takeover in the
+/// terminal leaves the keepalive bound (docs/design/keepalive.md).
 fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Value>> {
     let Some(session) = req.session.as_deref() else {
         return Ok(None);
@@ -3232,6 +3304,25 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
         ));
     }
     let actor = &req.actor;
+    if crate::keepalive::is_session(Some(session)) {
+        if !crate::keepalive::authorized(conn, actor, session)? {
+            return Err(Error::new(
+                "keepalive_session",
+                format!("{session:?} is not a keepalive the daemon started for {actor:?}; only `fray keepalive` starts one"),
+            ));
+        }
+        // Only the daemon's current keepalive is authorized, so any other
+        // open keepalive binding of this name is an earlier one.
+        conn.execute(
+            "UPDATE sessions SET ended_ms=?,ended_reason='keepalive replaced' WHERE agent=? AND ended_ms IS NULL AND session GLOB 'keepalive:*' AND session<>?",
+            params![now, actor, session],
+        )?;
+        conn.execute(
+            "INSERT INTO sessions(session,agent,started_ms,last_seen_ms) VALUES(?,?,?,?) ON CONFLICT(session,agent) DO UPDATE SET last_seen_ms=excluded.last_seen_ms,ended_ms=NULL,ended_reason=NULL",
+            params![session, actor, now, now],
+        )?;
+        return Ok(None);
+    }
     let takeover = req.op == "join" && boolean(&req.args, "takeover", false)?;
     // Set by the host hook when a new session continues the same window
     // (Claude Code's /clear): recorded as such, not as a hostile takeover.
@@ -3246,7 +3337,7 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
     };
     let bound: Option<(String, i64)> = conn
         .query_row(
-            "SELECT session,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1",
+            "SELECT session,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL AND session NOT GLOB 'keepalive:*' ORDER BY last_seen_ms DESC LIMIT 1",
             [actor],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -3316,7 +3407,7 @@ fn session_seen(conn: &Connection, agent: &str, session: &str, seen: i64, now: i
 fn session_status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
     let bound = conn
         .query_row(
-            "SELECT session,started_ms,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL ORDER BY last_seen_ms DESC LIMIT 1",
+            "SELECT session,started_ms,last_seen_ms FROM sessions WHERE agent=? AND ended_ms IS NULL AND session NOT GLOB 'keepalive:*' ORDER BY last_seen_ms DESC LIMIT 1",
             [agent],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
         )
@@ -4124,7 +4215,7 @@ fn roster(conn: &Connection, now: i64, limit: i64, all: bool) -> Result<Value> {
             Ok(json!({"run_id":r.get::<_,String>(0)?,"state":if active && now-updated>=120000 {"stale"} else {&state},"last_state":state,"live":enabled && active && now-updated<120000,"updated_ms":updated,"reason":r.get::<_,Option<String>>(3)?,"detail":detail}))
         }).optional()?;
         let listener = crate::attention::listener_status(conn, &name, enabled, now)?;
-        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && (now-last<120000 || agent_waiting(conn,&name,now)?),"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?,"reachability":reachability(conn,&name,now)?.as_str()}));
+        items.push(json!({"name":name,"role":role,"topics":serde_json::from_str::<Value>(&topics)?,"enabled":enabled,"recently_seen":enabled && (now-last<120000 || agent_waiting(conn,&name,now)?),"pending":!enabled && last==0,"last_seen_ms":last,"controller":controller,"listener":listener,"session":session_status(conn,&name,now)?,"status":agent_status_text(conn,&name)?,"lanes":held_lane_paths(conn,&name)?,"reachability":reachability(conn,&name,now)?.as_str(),"keepalive":crate::keepalive::brief(conn,&name,now)?}));
     }
     Ok(json!({"items":items,"more":more}))
 }
@@ -4536,7 +4627,8 @@ fn wake_state(conn: &Connection, actor: &str, now: i64) -> Result<(bool, Value, 
         })
         .optional()?
         .unwrap_or(false);
-    let controller = conn.query_row("SELECT state,updated_ms FROM controllers WHERE agent=?", [actor], |r| {
+    // A keepalive paused by its budget takes no turns: it does not wake.
+    let controller = conn.query_row("SELECT c.state,c.updated_ms FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=? AND json_extract(d.detail,'$.keepalive.paused') IS NULL", [actor], |r| {
         let state: String = r.get(0)?;
         let updated: i64 = r.get(1)?;
         Ok(json!({"state":state,"live":enabled && matches!(state.as_str(),"waiting"|"running") && now-updated<120000}))
