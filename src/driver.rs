@@ -156,6 +156,7 @@ enum Host {
 /// resume `fork`. Nothing here comes from a request.
 fn turn_command(
     host: Host,
+    model: &str,
     base: &str,
     fork: Option<&str>,
     new_id: &str,
@@ -167,6 +168,7 @@ fn turn_command(
     match host {
         Host::Claude => {
             push(&["claude", "-p"]);
+            push(&["--model", model]);
             match fork {
                 Some(fork) => push(&["--resume", fork]),
                 None => push(&["--resume", base, "--fork-session", "--session-id", new_id]),
@@ -194,6 +196,10 @@ fn turn_command(
             argv.push(schema.to_string_lossy().into_owned());
             argv.push("-o".into());
             argv.push(last.to_string_lossy().into_owned());
+            // `--output-schema` takes its path as the next argv value. Keep
+            // the explicitly pinned model separate so it cannot become that
+            // path when Codex parses this fixed command.
+            argv.extend(["--model".to_owned(), model.to_owned()]);
             // Without the user's configuration the repository is untrusted, so
             // its own `.codex` configuration and hooks do not load either
             // (verified on codex 0.160); hooks and rules are off regardless.
@@ -457,8 +463,9 @@ fn soft_failure(e: &Error) -> bool {
 /// A keepalive's fixed identity for this run.
 struct Keep {
     host: Host,
+    model: String,
     /// The terminal's conversation, which the first turn forks.
-    base: String,
+    base: RefCell<String>,
     /// The fork later turns resume, once a host has reported it.
     fork: RefCell<Option<String>>,
     schema: PathBuf,
@@ -466,10 +473,39 @@ struct Keep {
     failures: Cell<u32>,
     /// The last running total a Codex thread reported: (thread, tokens).
     reported: RefCell<Option<(String, i64)>>,
+    parent_total: RefCell<Option<i64>>,
+    fork_prompt: RefCell<Option<(String, i64)>>,
     /// Receipts that reached a packet only as pointers: (card, through_seq).
     /// A turn cannot read them, so they are left for the terminal, the owner
     /// or escalation, until new activity changes their version.
     oversized: RefCell<Vec<(i64, i64)>>,
+}
+
+/// Read only a Codex transcript's cumulative input count. Its content never
+/// enters a prompt or log.
+fn codex_parent_total(path: Option<&str>) -> Option<i64> {
+    let text = fs::read_to_string(path?).ok()?;
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["type"] == "turn.completed")
+        .filter_map(|event| event["usage"]["input_tokens"].as_i64())
+        .max()
+}
+
+/// Read only the selected model field from synthetic/live Codex JSONL; never
+/// retain or print transcript messages.
+fn recorded_model(path: Option<&str>) -> Option<String> {
+    let text = fs::read_to_string(path?).ok()?;
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| {
+            event["model"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| event["metadata"]["model"].as_str().map(str::to_owned))
+        })
+        .next_back()
+        .filter(|m| !m.is_empty())
 }
 
 /// Whether any process remains in a process group.
@@ -1075,7 +1111,7 @@ impl Run<'_> {
         let mut turn = 0;
         loop {
             self.state("waiting", false, None)?;
-            if self.keep.is_some() {
+            if let Some(keep) = &self.keep {
                 if self.stop.get() {
                     return Ok("stopped");
                 }
@@ -1085,9 +1121,12 @@ impl Run<'_> {
                     }
                     continue;
                 }
-                // K2: while the terminal is busy, defer here (record
-                // `keepalive.deferred`, which `fray team` shows, and wait
-                // for the terminal's turn to end).
+                if !self.terminal_ready(keep)? {
+                    if !self.wait(0)? {
+                        return Ok(if self.stop.get() { "stopped" } else { "idle" });
+                    }
+                    continue;
+                }
             }
             let mut page = self.inbox()?;
             let bootstrap = self.options.bootstrap && turn == 0;
@@ -1232,6 +1271,36 @@ impl Run<'_> {
         self.detail.borrow_mut()["keepalive"]["usage"] = status["usage"].clone();
         Ok(status["usage"]["over_budget"] != true)
     }
+    fn terminal_ready(&self, keep: &Keep) -> Result<bool> {
+        let status = self.call("keepalive_status", json!({}), 10)?;
+        if status["stop_requested"] == true {
+            self.stop.set(true);
+        }
+        if status["terminal"]["busy"] == true {
+            self.detail.borrow_mut()["keepalive"]["deferred"] = json!("terminal busy");
+            return Ok(false);
+        }
+        self.detail.borrow_mut()["keepalive"]["deferred"] = Value::Null;
+        let companion = status["companion"].as_str().unwrap_or("");
+        let (_, base) = keepalive::companion(companion)?;
+        let prompts = status["terminal"]["prompts"].as_i64().unwrap_or(0);
+        if keep
+            .fork_prompt
+            .borrow()
+            .as_ref()
+            .is_some_and(|(old, seen)| old != companion || prompts > *seen)
+        {
+            *keep.fork.borrow_mut() = None;
+            *keep.reported.borrow_mut() = None;
+            *keep.parent_total.borrow_mut() =
+                codex_parent_total(status["terminal"]["transcript"].as_str());
+        }
+        *keep.base.borrow_mut() = base.to_owned();
+        if keep.fork.borrow().is_none() {
+            *keep.fork_prompt.borrow_mut() = Some((companion.to_owned(), prompts));
+        }
+        Ok(true)
+    }
     /// Over budget: take no turns, visibly (`paused`), until the day's count
     /// resets, a stop request, or the idle bound. None means resume.
     fn pause(&self) -> Result<Option<&'static str>> {
@@ -1278,9 +1347,11 @@ impl Run<'_> {
     ) -> Result<bool> {
         let started = Instant::now();
         let fork = keep.fork.borrow().clone();
+        let base = keep.base.borrow().clone();
         let command = turn_command(
             keep.host,
-            &keep.base,
+            &keep.model,
+            &base,
             fork.as_deref(),
             &uuid()?,
             &keep.schema,
@@ -1298,7 +1369,7 @@ impl Run<'_> {
         if let Some(id) = reading
             .conversation
             .as_deref()
-            .filter(|id| keepalive::conversation_id(id) && *id != keep.base)
+            .filter(|id| keepalive::conversation_id(id) && *id != base)
         {
             if fork.as_deref() != Some(id) {
                 *keep.fork.borrow_mut() = Some(id.to_owned());
@@ -1306,7 +1377,19 @@ impl Run<'_> {
             }
         }
         // Tokens spent count against the budget whatever the outcome.
-        let charged = charge(keep.host, &reading, keep.reported.borrow().as_ref());
+        let baseline = if fork.is_none() {
+            keep.parent_total.borrow_mut().take()
+        } else {
+            None
+        };
+        let charged = if matches!(keep.host, Host::Codex) {
+            baseline.map_or_else(
+                || charge(keep.host, &reading, keep.reported.borrow().as_ref()),
+                |n| (reading.input_tokens - n).max(0),
+            )
+        } else {
+            charge(keep.host, &reading, keep.reported.borrow().as_ref())
+        };
         if let (Host::Codex, Some(thread)) = (keep.host, reading.conversation.as_deref()) {
             if reading.input_tokens > 0 {
                 *keep.reported.borrow_mut() = Some((thread.to_owned(), reading.input_tokens));
@@ -1459,6 +1542,9 @@ fn keep_for(home: &Path, actor: &str) -> Result<(Keep, Value)> {
         _ => return Err(Error::new("keepalive_host", "keepalive host: claude|codex")),
     };
     let (_, base) = keepalive::companion(string(&status, "companion")?)?;
+    let model = status["model"].as_str().map(str::to_owned)
+        .or_else(|| recorded_model(status["terminal"]["transcript"].as_str()))
+        .ok_or_else(|| Error::new("keepalive_model", "no pinned owner keepalive model and no recorded source-conversation model; set `keepalive model: MODEL` on the pinned owner Team card"))?;
     let schema = keepalive::file(home, actor, "schema.json");
     if host == Host::Codex {
         let mut file = OpenOptions::new()
@@ -1472,12 +1558,17 @@ fn keep_for(home: &Path, actor: &str) -> Result<(Keep, Value)> {
     Ok((
         Keep {
             host,
-            base: base.to_owned(),
+            model,
+            base: RefCell::new(base.to_owned()),
             fork: RefCell::new(None),
             schema,
             last: keepalive::file(home, actor, "last.json"),
             failures: Cell::new(0),
             reported: RefCell::new(None),
+            parent_total: RefCell::new(codex_parent_total(
+                status["terminal"]["transcript"].as_str(),
+            )),
+            fork_prompt: RefCell::new(None),
             oversized: RefCell::new(Vec::new()),
         },
         status,
@@ -1519,7 +1610,7 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         // What `fray keepalive --status` and `fray team` read: whom it
         // serves (`companion`), the fork, and why it is not answering.
         detail["keepalive"] = json!({"session":status["session"],"companion":status["companion"],
-            "base":keep.base,"fork":null,"paused":null,"deferred":null,"summary":null,"failures":0,"usage":status["usage"]});
+            "base":keep.base.borrow().clone(),"fork":null,"paused":null,"deferred":null,"summary":null,"failures":0,"usage":status["usage"]});
         keep
     });
     let runner = Run {
@@ -1587,7 +1678,15 @@ mod keepalive_tests {
     #[test]
     fn a_claude_turn_forks_into_an_id_chosen_up_front_then_resumes_it() {
         let (schema, last) = paths();
-        let first = turn_command(Host::Claude, "base-1", None, "new-2", &schema, &last);
+        let first = turn_command(
+            Host::Claude,
+            "model",
+            "base-1",
+            None,
+            "new-2",
+            &schema,
+            &last,
+        );
         let pinned = [
             "--tools",
             "Read,Grep,Glob",
@@ -1603,6 +1702,8 @@ mod keepalive_tests {
         let expected: Vec<&str> = [
             "claude",
             "-p",
+            "--model",
+            "model",
             "--resume",
             "base-1",
             "--fork-session",
@@ -1615,13 +1716,14 @@ mod keepalive_tests {
         assert_eq!(first, expected);
         let later = turn_command(
             Host::Claude,
+            "model",
             "base-1",
             Some("new-2"),
             "unused",
             &schema,
             &last,
         );
-        let expected: Vec<&str> = ["claude", "-p", "--resume", "new-2"]
+        let expected: Vec<&str> = ["claude", "-p", "--model", "model", "--resume", "new-2"]
             .into_iter()
             .chain(pinned)
             .collect();
@@ -1631,7 +1733,15 @@ mod keepalive_tests {
     #[test]
     fn a_codex_turn_is_read_only_without_user_config_or_extra_tools() {
         let (schema, last) = paths();
-        let first = turn_command(Host::Codex, "base-1", None, "unused", &schema, &last);
+        let first = turn_command(
+            Host::Codex,
+            "model",
+            "base-1",
+            None,
+            "unused",
+            &schema,
+            &last,
+        );
         let mut expected = vec![
             "codex",
             "exec",
@@ -1641,6 +1751,8 @@ mod keepalive_tests {
             "/h/k/a.schema.json",
             "-o",
             "/h/k/a.last.json",
+            "--model",
+            "model",
             "--ignore-user-config",
             "--ignore-rules",
             "-c",
@@ -1663,6 +1775,7 @@ mod keepalive_tests {
         assert_eq!(first[expected.len()..], ["base-1", "-"]);
         let later = turn_command(
             Host::Codex,
+            "model",
             "base-1",
             Some("thread-9"),
             "unused",
@@ -1671,6 +1784,22 @@ mod keepalive_tests {
         );
         assert_eq!(later[2], "resume");
         assert_eq!(later[later.len() - 2..], ["thread-9", "-"]);
+    }
+
+    #[test]
+    fn recorded_model_reads_only_the_latest_selected_model_from_jsonl() {
+        let path = std::env::temp_dir().join(format!("fray-model-{}.jsonl", uuid().unwrap()));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":7}}\n",
+                "{\"type\":\"session\",\"model\":\"first-model\"}\n",
+                "{\"type\":\"session\",\"metadata\":{\"model\":\"latest-model\"}}\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(recorded_model(path.to_str()), Some("latest-model".into()));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

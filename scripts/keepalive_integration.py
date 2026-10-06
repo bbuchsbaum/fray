@@ -135,6 +135,7 @@ class Keepalive(unittest.TestCase):
             env,
             PATH=f"{self.stub}:{os.environ['PATH']}",
             KEEPALIVE_STUB=str(self.stub),
+            FRAY_KEEPALIVE_MODEL="synthetic-model",
             FRAY_TEST_SANDBOXED="0",
         )
         self.server = None
@@ -239,6 +240,10 @@ class Keepalive(unittest.TestCase):
 
     def start(self, actor, session, cwd=None):
         self.fray("join", actor=actor, session=session)
+        # Synthetic UserPromptSubmit followed by a completed Stop: K2 refuses
+        # to start unless the terminal's hooks can establish turn ownership.
+        self.rpc("terminal_turn", actor, {"turn": "begin"}, session=session)
+        self.rpc("terminal_turn", actor, {"turn": "end"}, session=session)
         started = self.fray("keepalive", actor=actor, session=session, cwd=cwd)
         self.assertTrue(started["started"], started)
         self.await_status(actor, lambda s: s["state"] == "keepalive", "began waiting")
@@ -293,13 +298,13 @@ class Keepalive(unittest.TestCase):
         call = self.calls()[0]
         fork = call["argv"][call["argv"].index("--session-id") + 1]
         self.assertEqual(
-            call["argv"][:6],
-            ["-p", "--resume", "c0ffee-1", "--fork-session", "--session-id", fork],
+            call["argv"][:8],
+            ["-p", "--model", "synthetic-model", "--resume", "c0ffee-1", "--fork-session", "--session-id", fork],
         )
-        self.assertEqual(call["argv"][6:13], PINNED_CLAUDE)
+        self.assertEqual(call["argv"][8:15], PINNED_CLAUDE)
         self.assertEqual(call["argv"][-2:], ["--output-format", "json"])
         self.assertEqual(
-            json.loads(call["argv"][13])["required"], ["actions", "handled", "summary"]
+            json.loads(call["argv"][15])["required"], ["actions", "handled", "summary"]
         )
         # The turn gets no board identity, and runs in the terminal's directory.
         self.assertEqual(
@@ -329,7 +334,7 @@ class Keepalive(unittest.TestCase):
         second = self.ask("alice", "And the lexer?")
         self.await_reply(second, "alice")
         later = self.calls()[1]
-        self.assertEqual(later["argv"][:3], ["-p", "--resume", fork])
+        self.assertEqual(later["argv"][:5], ["-p", "--model", "synthetic-model", "--resume", fork])
         self.assertNotIn("--fork-session", later["argv"])
         roster = next(
             a for a in self.rpc("agents")["data"]["items"] if a["name"] == "alice"
@@ -378,8 +383,9 @@ class Keepalive(unittest.TestCase):
             json.loads(pathlib.Path(argv[4]).read_text())["additionalProperties"], False
         )
         self.assertEqual(argv[5], "-o")
+        self.assertEqual(argv[7:9], ["--model", "synthetic-model"])
         self.assertEqual(
-            argv[7:17],
+            argv[9:19],
             [
                 "--ignore-user-config",
                 "--ignore-rules",
@@ -394,7 +400,7 @@ class Keepalive(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            argv[17:-2],
+            argv[19:-2],
             [x for f in CODEX_FEATURES for x in ("-c", f"features.{f}=false")],
         )
         self.assertEqual(argv[-2:], ["0193-ab", "-"])

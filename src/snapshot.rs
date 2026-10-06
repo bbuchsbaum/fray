@@ -1,5 +1,8 @@
 //! Bounded, best-effort worktree snapshots.  This is deliberately not an
 //! adversary-resistant or filesystem-atomic snapshot primitive.
+#[path = "sha256.rs"]
+mod sha256;
+
 use crate::model::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,7 +12,7 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 const VERSION: u32 = 1;
@@ -17,6 +20,7 @@ const MAX_FILES: usize = 16_384;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+const FLUSH_WORKERS: usize = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,32 +158,16 @@ fn reject_source_symlink_traversal(root: &Path, relative: &str) -> Result<()> {
 }
 
 fn hash_reader<R: Read>(mut input: R) -> Result<String> {
-    let mut child = Command::new("shasum")
-        .arg("-a")
-        .arg("256")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| err("hash", e.to_string()))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| err("hash", "cannot open shasum stdin"))?;
-    std::io::copy(&mut input, &mut stdin)?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|e| err("hash", e.to_string()))?;
-    if !output.status.success() {
-        return Err(err("hash", "shasum failed"));
+    let mut hasher = sha256::Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
     }
-    let text = std::str::from_utf8(&output.stdout)
-        .map_err(|_| err("hash", "shasum returned invalid output"))?;
-    text.split_whitespace()
-        .next()
-        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .map(str::to_owned)
-        .ok_or_else(|| err("hash", "shasum returned no SHA-256 digest"))
+    Ok(sha256::hex(hasher.finalize()))
 }
 fn hash_file(path: &Path) -> Result<String> {
     hash_reader(File::open(path)?)
@@ -201,6 +189,7 @@ fn copy_and_hash(source: &Path, destination: &Path, meta: &SourceMeta) -> Result
         .write(true)
         .create_new(true)
         .open(destination)?;
+    let mut hasher = sha256::Sha256::new();
     let mut bytes = 0u64;
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -210,8 +199,8 @@ fn copy_and_hash(source: &Path, destination: &Path, meta: &SourceMeta) -> Result
         }
         bytes += n as u64;
         out.write_all(&buf[..n])?;
+        hasher.update(&buf[..n]);
     }
-    out.sync_all()?;
     if bytes != meta.len || source_meta(source)? != *meta {
         return Err(err(
             "snapshot_changed",
@@ -222,7 +211,27 @@ fn copy_and_hash(source: &Path, destination: &Path, meta: &SourceMeta) -> Result
         destination,
         fs::Permissions::from_mode(if meta.executable { 0o755 } else { 0o644 }),
     )?;
-    hash_file(destination)
+    Ok(sha256::hex(hasher.finalize()))
+}
+
+fn flush_copied_files(paths: &[PathBuf]) -> Result<()> {
+    let workers = FLUSH_WORKERS.min(paths.len());
+    std::thread::scope(|scope| {
+        let mut joins = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            joins.push(scope.spawn(move || -> Result<()> {
+                for path in paths.iter().skip(worker).step_by(workers) {
+                    File::open(path)?.sync_all()?;
+                }
+                Ok(())
+            }));
+        }
+        for join in joins {
+            join.join()
+                .map_err(|_| err("snapshot", "snapshot flush worker panicked"))??;
+        }
+        Ok(())
+    })
 }
 
 fn git_state(root: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -392,6 +401,7 @@ fn create_inner(
     let stage = staging(&out)?;
     let result = (|| {
         let mut entries = Vec::new();
+        let mut copied_files = Vec::new();
         let mut total = 0u64;
         for path in &inventory {
             let source = root.join(path);
@@ -410,6 +420,7 @@ fn create_inner(
                         fs::create_dir_all(parent)?;
                     }
                     let digest = copy_and_hash(&source, &target, &meta)?;
+                    copied_files.push(target);
                     entries.push(Entry {
                         path: path.clone(),
                         state: "file".into(),
@@ -426,6 +437,7 @@ fn create_inner(
                 Err(e) => return Err(e.into()),
             }
         }
+        flush_copied_files(&copied_files)?;
         let manifest = Manifest {
             version: VERSION,
             base_head: base_head.clone(),

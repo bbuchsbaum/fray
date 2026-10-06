@@ -89,6 +89,41 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
     report["registration"] =
         json!({"enabled":agent["enabled"],"recently_seen":agent["recently_seen"]});
     report["listening"] = listening(agent, now_ms());
+    // Read-only K2 visibility: terminal hook coverage and the keepalive's
+    // durable state are reported without starting, stopping or rearming it.
+    match client::rpc(home, &Request::new("keepalive_status", actor, json!({})), 3) {
+        Ok(keepalive) => {
+            report["keepalive"] = keepalive.clone();
+            report["terminal_hooks"] = keepalive["terminal"].clone();
+            if keepalive["daemon_sandboxed"] == true {
+                add(
+                    &mut report,
+                    "keepalive_daemon_sandboxed",
+                    "error",
+                    sandbox_recovery(),
+                );
+            }
+            if matches!(
+                keepalive["state"].as_str(),
+                Some("deferred" | "paused" | "stopping")
+            ) {
+                add(
+                    &mut report,
+                    "keepalive_waiting",
+                    "warning",
+                    &format!(
+                        "Keepalive is {}: {}",
+                        keepalive["state"].as_str().unwrap_or("unknown"),
+                        keepalive["deferred"]
+                            .as_str()
+                            .or_else(|| keepalive["paused"].as_str())
+                            .unwrap_or("turn in progress")
+                    ),
+                );
+            }
+        }
+        Err(error) => report["keepalive_error"] = json!(error),
+    }
     if agent["enabled"] != true {
         add(&mut report, "identity_left", "warning", "Identity has left. An old listener or registration does not authorize automatic rejoin.");
     } else {
@@ -119,6 +154,10 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
         }
     }
     Ok(finish(report))
+}
+
+fn sandbox_recovery() -> &'static str {
+    "The daemon is sandboxed and cannot start a usable keepalive. From the owner's own shell, run `fray stop`, then `fray start`; retry `fray keepalive` after the daemon is reachable."
 }
 
 pub fn listening(agent: &Value, now: i64) -> Value {
@@ -165,5 +204,19 @@ pub fn build_check(daemon: Option<&str>, client: &str) -> Option<(&'static str, 
             "daemon_build_unknown",
             "The daemon predates build reporting; it is older than this client. Install the main build on PATH, then restart the daemon after announcing it on the board.",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sandbox_recovery;
+
+    #[test]
+    fn sandbox_recovery_is_an_owner_shell_command() {
+        let message = sandbox_recovery();
+        assert!(message.contains("owner's own shell"));
+        assert!(message.contains("`fray stop`"));
+        assert!(message.contains("`fray start`"));
+        assert!(message.contains("`fray keepalive`"));
     }
 }

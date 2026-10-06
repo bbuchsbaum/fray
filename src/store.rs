@@ -272,6 +272,7 @@ impl Store {
         })?;
         conn.execute_batch("BEGIN IMMEDIATE")?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        conn.execute("INSERT OR IGNORE INTO delivery_routes(agent,card_id,routed_at_ms) SELECT agent,card_id,NULL FROM deliveries", [])?;
         conn.execute("INSERT OR IGNORE INTO peer_generations(agent,generation,session,joined_ms) SELECT name,1,(SELECT session FROM sessions WHERE agent=agents.name AND ended_ms IS NULL AND session NOT GLOB 'keepalive:*' ORDER BY last_seen_ms DESC LIMIT 1),joined_ms FROM agents WHERE enabled=1",[])?;
         if version == 1 {
             // Preserve every receipt. Reconstruct deliberate participation, not old fan-out.
@@ -302,15 +303,20 @@ impl Store {
         wake: Option<&str>,
         now: i64,
     ) -> Result<()> {
-        // One row per agent, which speaks for its interactive session: a
-        // keepalive's waits must not overwrite the terminal's (its wake row
-        // below still makes the agent wakeable).
-        if !crate::keepalive::is_session(session) {
-            self.conn.execute(
-                "INSERT INTO agent_waits(agent,session,refreshed_ms) SELECT name,?2,?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent) DO UPDATE SET session=excluded.session,refreshed_ms=excluded.refreshed_ms",
-                params![actor, session, now],
-            )?;
-        }
+        // One row per name and session, so a keepalive's waits never
+        // overwrite its terminal's.
+        self.conn.execute(
+            "INSERT INTO session_waits(agent,session,refreshed_ms) SELECT name,coalesce(?2,''),?3 FROM agents WHERE name=?1 AND enabled=1 ON CONFLICT(agent,session) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
+            params![actor, session, now],
+        )?;
+        self.conn.execute(
+            "DELETE FROM session_waits WHERE refreshed_ms<=?",
+            [now - WAIT_FRESH_MS],
+        )?;
+        // A keepalive is wakeable through its live controller alone, which
+        // knows when it is paused, stopping or deferred to a busy terminal;
+        // a wake row would outlast those.
+        let wake = wake.filter(|_| !crate::keepalive::is_session(session));
         if let Some(id) = wake {
             self.conn.execute(
                 "INSERT INTO wake_waits(wait_id,agent,refreshed_ms) SELECT ?1,name,?3 FROM agents WHERE name=?2 AND enabled=1 ON CONFLICT(wait_id) DO UPDATE SET refreshed_ms=excluded.refreshed_ms",
@@ -414,6 +420,7 @@ impl Store {
                 | "review_subject"
                 | "keepalive_stop"
                 | "keepalive_usage"
+                | "terminal_turn"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -505,14 +512,29 @@ impl Store {
             registered(&tx, &req.actor)?;
         }
         let replaced = bind_session(&tx, req, now)?;
+        // A transaction-local clock lets the insert trigger record first
+        // routing without scanning the entire deliveries table on each write.
+        tx.execute("INSERT INTO meta(key,value) VALUES('routing_clock_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [now.to_string()])?;
         let mut result = mutate(&tx, req, now)?;
+        tx.execute("DELETE FROM meta WHERE key='routing_clock_ms'", [])?;
+        crate::keepalive::acted(&tx, req, &result)?;
+        // The terminal's /clear or compaction moves its keepalive along.
+        if let (true, Some(session), Some("clear" | "compact")) = (
+            req.op == "join",
+            req.session.as_deref(),
+            req.args.get("continued").and_then(Value::as_str),
+        ) {
+            if !crate::keepalive::is_session(Some(session)) {
+                crate::keepalive::rebind(&tx, &req.actor, session)?;
+            }
+        }
         // A keepalive speaks beside its terminal, not as a new arrival: its
         // session never renews the name's peer generation.
         if req.session.is_some()
             && !crate::keepalive::is_session(req.session.as_deref())
             && !matches!(
                 req.op.as_str(),
-                "join" | "leave" | "present" | "expose" | "peer_present"
+                "join" | "leave" | "present" | "expose" | "peer_present" | "terminal_turn"
             )
             && req.actor != OWNER
         {
@@ -532,9 +554,13 @@ impl Store {
                 [&req.actor],
             )?;
         }
-        // A listener registering what it displayed is not the agent acting;
-        // keep presence tied to deliberate activity.
-        if !matches!(req.op.as_str(), "present" | "peer_present") {
+        // A listener registering what it displayed is not the agent acting,
+        // nor is a hook's turn bookkeeping; keep presence tied to deliberate
+        // activity.
+        if !matches!(
+            req.op.as_str(),
+            "present" | "peer_present" | "terminal_turn"
+        ) {
             tx.execute(
                 "UPDATE agents SET last_seen_ms=? WHERE name=?",
                 params![now, req.actor],
@@ -924,7 +950,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 params![req.op != "leave", now, actor],
             )?;
             if req.op == "leave" {
-                conn.execute("DELETE FROM agent_waits WHERE agent=?", [actor])?;
+                conn.execute("DELETE FROM session_waits WHERE agent=?", [actor])?;
                 conn.execute("DELETE FROM wake_waits WHERE agent=?", [actor])?;
                 conn.execute("UPDATE controllers SET state='stopped',updated_ms=?,reason='left' WHERE agent=?", params![now,actor])?;
                 conn.execute("UPDATE listeners SET connected=0 WHERE agent=?", [actor])?;
@@ -996,6 +1022,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         }
         "keepalive_stop" => crate::keepalive::stop(conn, req, now),
         "keepalive_usage" => crate::keepalive::usage(conn, req, now),
+        "terminal_turn" => crate::keepalive::mark(conn, req, now),
         "follow" | "unfollow" => {
             check_fields(a, &["id"])?;
             let id = integer(a, "id")?;
@@ -1251,7 +1278,15 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "owner cards and owner-decided requests can only be changed by the owner; reply instead",
                 ));
             }
-            if c.lease_owner.is_some() {
+            let closing_objection = matches!(
+                a["status"].as_str(),
+                Some("resolved" | "superseded" | "withdrawn")
+            ) && !c.terminal()
+                && objection_origin(conn, c.id)?.is_some();
+            if closing_objection && actor != c.author && actor != OWNER {
+                return Err(Error::new("objection_authority", "only the objector or owner may close this objection; reply with evidence or ask them to resolve it"));
+            }
+            if c.lease_owner.is_some() && !closing_objection {
                 check_lease(&c, actor, integer(a, "fence")?, now, false)?;
             }
             if a.as_object().map_or(0, |x| {
@@ -1294,7 +1329,47 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 c.fence += 1;
             }
             conn.execute("UPDATE cards SET rev=rev+1,kind=?,topic=?,title=?,summary=?,status=?,priority=?,pinned=?,tags=?,assignee=?,lease_owner=?,lease_until_ms=?,fence=?,updated_ms=? WHERE id=?",params![c.kind,c.topic,c.title,c.summary,c.status,c.priority,c.pinned,serde_json::to_string(&c.tags)?,c.assignee,c.lease_owner,c.lease_until_ms,c.fence,now,c.id])?;
-            emit(conn, actor, "patch", c.id, detail, now, true)
+            let override_ids = detail["open_objections"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if closing_objection {
+                detail["objection_resolved_by"] = json!(actor);
+            }
+            let result = emit(conn, actor, "patch", c.id, detail, now, true)?;
+            let seq = integer(&result, "event_seq")?;
+            if closing_objection {
+                force_delivery(conn, &c.author, c.id, seq, now)?;
+                objection_notice(conn, actor, &c.author, c.id, "Objection resolved", &format!("{} closed objection #{} as {}. Read `fray thread {} --bodies` for the evidence.", actor, c.id, c.status, c.id), now)?;
+            }
+            if !override_ids.is_empty() {
+                force_delivery(conn, OWNER, c.id, seq, now)?;
+                let text = format!(
+                    "{actor} resolved #{} over open objections {:?}. Reason: {}",
+                    c.id,
+                    override_ids,
+                    a["over_objection"].as_str().unwrap_or("")
+                );
+                let mut recipients = std::collections::BTreeSet::from([OWNER.to_owned()]);
+                for child in override_ids.iter().filter_map(Value::as_i64) {
+                    if let Some((objector, _)) = objection_origin(conn, child)? {
+                        force_delivery(conn, &objector, c.id, seq, now)?;
+                        recipients.insert(objector);
+                    }
+                }
+                for recipient in recipients {
+                    objection_notice(
+                        conn,
+                        actor,
+                        &recipient,
+                        c.id,
+                        "Resolved over objection",
+                        &text,
+                        now,
+                    )?;
+                }
+            }
+            Ok(result)
         }
         "annotate" => {
             check_fields(
@@ -2806,6 +2881,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             }
             v["full_text"] = json!(full_text(conn, &c)?);
             open_follow_ups(conn, c.id, &mut v)?;
+            objection_presentation(conn, c.id, &mut v)?;
             if boolean(a, "unread", false)? {
                 // Unread = this reader's delivered-but-unacknowledged range. The
                 // receipt never reaches past the events actually returned.
@@ -3159,8 +3235,14 @@ fn select_page(
     let cards = s
         .query_map(params_from_iter(values.iter()), row_card)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items = Vec::new();
+    for card in &cards {
+        let mut item = card.compact(now);
+        objection_presentation(conn, card.id, &mut item)?;
+        items.push(item);
+    }
     Ok(
-        json!({"items":cards.iter().map(|c|c.compact(now)).collect::<Vec<_>>(),"total":total,"more":offset+(cards.len() as i64)<total,"next_offset":offset+cards.len() as i64,"cursor":highwater(conn)?}),
+        json!({"items":items,"total":total,"more":offset+(cards.len() as i64)<total,"next_offset":offset+cards.len() as i64,"cursor":highwater(conn)?}),
     )
 }
 fn query(conn: &Connection, a: &Value, actor: &str, now: i64) -> Result<Value> {
@@ -3396,7 +3478,7 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
 fn session_seen(conn: &Connection, agent: &str, session: &str, seen: i64, now: i64) -> Result<i64> {
     let waiting: Option<i64> = conn
         .query_row(
-            "SELECT refreshed_ms FROM agent_waits WHERE agent=? AND session=? AND refreshed_ms>?",
+            "SELECT refreshed_ms FROM session_waits WHERE agent=? AND session=? AND refreshed_ms>?",
             params![agent, session, now - WAIT_FRESH_MS],
             |r| r.get(0),
         )
@@ -3543,8 +3625,10 @@ fn last_active(conn: &Connection, agent: &str) -> Result<Option<i64>> {
 /// Whether something is armed to hear the agent's mail right now: a connected
 /// listener or a wait in progress.
 pub(crate) fn agent_waiting(conn: &Connection, agent: &str, now: i64) -> Result<bool> {
+    // The interactive side's waits, as agent_waits held them: a keepalive
+    // speaks for itself through its controller.
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM listeners WHERE agent=?1 AND connected=1) OR EXISTS(SELECT 1 FROM agent_waits WHERE agent=?1 AND refreshed_ms>?2)",
+        "SELECT EXISTS(SELECT 1 FROM listeners WHERE agent=?1 AND connected=1) OR EXISTS(SELECT 1 FROM session_waits WHERE agent=?1 AND session NOT GLOB 'keepalive:*' AND refreshed_ms>?2)",
         params![agent, now - WAIT_FRESH_MS],
         |r| r.get(0),
     )?)
@@ -3936,6 +4020,7 @@ fn compact_event(e: &Value, previous: Option<&Value>) -> Value {
         "parent_card",
         "over_objection",
         "open_objections",
+        "objection_resolved_by",
     ] {
         if !detail[key].is_null() && detail[key] != json!([]) {
             out[key] = detail[key].clone();
@@ -3978,6 +4063,67 @@ fn compact_events(events: &[Value]) -> Vec<Value> {
 }
 
 const FOLLOW_UP_LIMIT: usize = 50;
+
+fn objection_origin(conn: &Connection, id: i64) -> Result<Option<(String, i64)>> {
+    Ok(conn.query_row("SELECT parent.actor,parent.card_id FROM events child JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE child.card_id=? AND child.op='post' AND parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection' ORDER BY child.seq LIMIT 1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+}
+
+fn force_delivery(conn: &Connection, to: &str, card: i64, seq: i64, now: i64) -> Result<()> {
+    conn.execute("INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)", params![to,now])?;
+    conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq) VALUES(?,?,?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(pending_seq,excluded.pending_seq)", params![to,card,seq])?;
+    Ok(())
+}
+
+/// A fresh addressed notice guarantees visibility even if the source card
+/// was muted. The mute remains intact, and absent recipients retain the
+/// notice for their next join. Request-key replay deduplicates the transaction.
+fn objection_notice(
+    conn: &Connection,
+    actor: &str,
+    to: &str,
+    id: i64,
+    title: &str,
+    body: &str,
+    now: i64,
+) -> Result<()> {
+    force_delivery(conn, to, id, get_card(conn, id)?.last_seq, now)?;
+    let notice = create_card(
+        conn,
+        actor,
+        &json!({"kind":"note","topic":format!("@{to}"),"title":format!("{title}: #{id}"),"summary":clip(body,1900),"priority":1,"assignee":to,"tags":["objection-notice",format!("objection-source:{id}")]}),
+        Value::Null,
+        now,
+    )?;
+    force_delivery(
+        conn,
+        to,
+        integer(&notice["card"], "id")?,
+        integer(&notice, "event_seq")?,
+        now,
+    )
+}
+
+/// Compact, bounded current objection state; immutable origins cannot be
+/// erased by editing a title, kind or routing tag.
+fn objection_presentation(conn: &Connection, id: i64, value: &mut Value) -> Result<()> {
+    let mut query = conn.prepare("SELECT c.id,c.status,parent.actor,(SELECT e.actor FROM events e WHERE e.card_id=c.id AND json_extract(e.payload,'$.detail.objection_resolved_by') IS NOT NULL ORDER BY e.seq DESC LIMIT 1) FROM events child JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') JOIN cards c ON c.id=child.card_id WHERE child.op='post' AND parent.card_id=? AND json_extract(parent.payload,'$.detail.kind')='objection' ORDER BY c.id LIMIT 6")?;
+    let mut rows = query.query_map([id], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"status":r.get::<_,String>(1)?,"objector":r.get::<_,String>(2)?,"resolved_by":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if !rows.is_empty() {
+        let more = rows.len() > 5;
+        rows.truncate(5);
+        value["objections"] =
+            json!({"items":rows,"more":more,"fetch":format!("fray thread {id} --bodies")});
+    }
+    let override_event: Option<(String,String)> = conn.query_row("SELECT actor,json_extract(payload,'$.detail.over_objection') FROM events WHERE card_id=? AND json_extract(payload,'$.detail.over_objection') IS NOT NULL ORDER BY seq DESC LIMIT 1", [id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+    if let Some((by, reason)) = override_event {
+        value["objection_override"] = json!({"by":by,"reason":clip(&reason,240),"fetch":format!("fray thread {id} --bodies")});
+    }
+    if let Some((objector, parent)) = objection_origin(conn, id)? {
+        let resolved: Option<String> = conn.query_row("SELECT json_extract(payload,'$.detail.objection_resolved_by') FROM events WHERE card_id=? AND json_extract(payload,'$.detail.objection_resolved_by') IS NOT NULL ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).optional()?;
+        value["objection"] = json!({"objector":objector,"parent":parent,"resolved_by":resolved});
+    }
+    Ok(())
+}
 
 /// The complete current text of a card. A long send keeps only a bounded
 /// head on the card; the whole message lives in its creation event, or, for
@@ -4070,6 +4216,9 @@ fn unread_events(
 }
 
 fn events(conn: &Connection, after: i64, card: Option<i64>, limit: i64) -> Result<Vec<Value>> {
+    if card.is_none() {
+        crate::retention::check_cursor(conn, after)?;
+    }
     let sql="SELECT seq,ts_ms,actor,op,card_id,payload FROM events WHERE seq>? AND (? IS NULL OR card_id=?) ORDER BY seq LIMIT ?";
     let mut s = conn.prepare(sql)?;
     let raw = s
@@ -4103,6 +4252,9 @@ fn inbox(
     now: i64,
 ) -> Result<Value> {
     registered(conn, actor)?;
+    if after > 0 {
+        crate::retention::check_cursor(conn, after)?;
+    }
     let condition=format!("d.agent=?1 AND d.pending_seq>d.ack_seq AND d.pending_seq>?2 AND (?3=0 OR d.pending_seq>d.shown_seq OR d.shown_at_ms<=?4) AND {}",selection.condition());
     let total: i64 = conn.query_row(
         &format!(
@@ -4153,6 +4305,7 @@ fn inbox(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut compact = card.compact(now);
+        objection_presentation(conn, id, &mut compact)?;
         let review = crate::review::context(conn, id, false)?;
         if !review.is_null() {
             compact["review"] = review;
@@ -4336,10 +4489,10 @@ fn tick_state(conn: &Connection, now: i64) -> Result<(Option<i64>, bool)> {
 pub(crate) fn stuck_set(conn: &Connection, now: i64) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let mut s = conn.prepare(&format!(
-        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND ((c.assignee IS NOT NULL AND c.assignee<>c.author AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question') OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id LIMIT 1000"
+        "SELECT c.id FROM cards c WHERE {ACTIVE} AND c.author<>?2 AND (c.assignee IS NULL OR c.assignee<>?1) AND ((c.author=?3 AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question') OR (c.assignee IS NOT NULL AND c.assignee<>c.author AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question') OR EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=c.author AND json_extract(e.payload,'$.detail.respond_by_ms') IS NOT NULL)) ORDER BY c.id LIMIT 1000"
     ))?;
     let ids = s
-        .query_map(params![OWNER, ESCALATION], |r| r.get::<_, i64>(0))?
+        .query_map(params![OWNER, ESCALATION, MOTE], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
         out.extend(card_stuck(conn, id, now)?);
@@ -4411,12 +4564,19 @@ fn card_stuck(conn: &Connection, id: i64, now: i64) -> Result<Vec<Value>> {
     } else {
         to.clone()
     };
+    // Why a keepalive serving the addressee is not answering, if it is not.
+    let keepalive_state = if reasons.is_empty() || to.is_empty() {
+        Value::Null
+    } else {
+        crate::keepalive::brief(conn, &to, now)?["state"].clone()
+    };
     Ok(reasons
         .into_iter()
         .map(|reason| {
             json!({"subject":format!("card:{id}:{addressee}"),"card_id":id,"reason":reason,
                 "addressee":addressee,"requester":requester,"title":c.title,"rev":c.rev,
-                "reachability":reach.as_str(),"age_min":(now-since)/60_000})
+                "reachability":reach.as_str(),"age_min":(now-since)/60_000,
+                "keepalive":keepalive_state.clone()})
         })
         .collect())
 }
@@ -4520,19 +4680,21 @@ fn escalate_tick(conn: &Connection, interval_ms: Option<i64>, now: i64) -> Resul
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            if let Some((eid, card_id, at)) = open {
+            if let Some((_, card_id, at)) = open {
                 let closed = get_card(conn, card_id)?.terminal();
                 if !(closed && now - at >= ESCALATION_REMIND_MS) {
                     continue;
                 }
-                conn.execute(
-                    "UPDATE escalations SET settled_ms=? WHERE id=?",
-                    params![now, eid],
-                )?;
             }
             if created.len() >= ESCALATIONS_PER_TICK {
                 deferred += 1;
                 continue;
+            }
+            if let Some((eid, _, _)) = open {
+                conn.execute(
+                    "UPDATE escalations SET settled_ms=? WHERE id=?",
+                    params![now, eid],
+                )?;
             }
             let id = escalation_card(conn, item, steward, open.is_some(), now)?;
             conn.execute(
@@ -4633,8 +4795,9 @@ fn wake_state(conn: &Connection, actor: &str, now: i64) -> Result<(bool, Value, 
         .optional()?
         .unwrap_or(false);
     // A keepalive paused by its budget, or asked to stop, takes no further
-    // turns: it does not wake.
-    let controller = conn.query_row("SELECT c.state,c.updated_ms FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=?1 AND json_extract(d.detail,'$.keepalive.paused') IS NULL AND NOT EXISTS(SELECT 1 FROM keepalives k WHERE k.agent=c.agent AND k.stop_requested=1 AND k.session=json_extract(d.detail,'$.keepalive.session'))", [actor], |r| {
+    // turns: it does not wake. Nor does one deferred to its busy terminal
+    // (a fresh busy mark from the session it serves), so R3 escalates.
+    let controller = conn.query_row("SELECT c.state,c.updated_ms FROM controllers c LEFT JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id WHERE c.agent=?1 AND json_extract(d.detail,'$.keepalive.paused') IS NULL AND NOT EXISTS(SELECT 1 FROM keepalives k WHERE k.agent=c.agent AND k.stop_requested=1 AND k.session=json_extract(d.detail,'$.keepalive.session')) AND NOT EXISTS(SELECT 1 FROM keepalives k JOIN terminal_turns t ON t.agent=k.agent AND t.session=k.companion WHERE k.agent=c.agent AND k.session=json_extract(d.detail,'$.keepalive.session') AND t.busy_since_ms IS NOT NULL AND t.last_hook_ms>?2)", params![actor, now - crate::keepalive::BUSY_STALE_MS], |r| {
         let state: String = r.get(0)?;
         let updated: i64 = r.get(1)?;
         Ok(json!({"state":state,"live":enabled && matches!(state.as_str(),"waiting"|"running") && now-updated<120000}))
@@ -4708,7 +4871,7 @@ fn unarmed_reason(listening: &Value, now: i64) -> (&'static str, String) {
 
 fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
     let (enabled, listening, armed) = wake_state(conn, actor, now)?;
-    let outgoing: i64 = conn.query_row(&format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)"), [actor], |r| r.get(0))?;
+    let outgoing: i64 = conn.query_row(&format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question' AND c.author=?1 AND c.assignee IS NOT NULL AND c.assignee<>?1 AND NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=?1 AND m.card_id=c.id)"), [actor], |r| r.get(0))?;
     let mut out = json!({"enabled":enabled,"open_requests_awaiting_others":outgoing,"armed":armed,"listening":listening,"model_response_guaranteed":false});
     if enabled && outgoing > 0 && !armed {
         out["warning"] = json!(format!("{outgoing} open requests awaiting others; no armed listener covering their replies. A connected transport or a hook alone cannot wake an idle host."));
@@ -4720,10 +4883,10 @@ fn idle_readiness(conn: &Connection, actor: &str, now: i64) -> Result<Value> {
     // Asks addressed to this agent that nothing will wake it for once its
     // turn ends (no-silent-stalls R5). The next hook context says so first.
     let incoming: i64 = conn.query_row(
-        // Asks this agent has not yet answered: an answer is any annotation
-        // by it after the ask was created (the asker resolves the card).
-        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND c.kind='question' AND c.assignee=?1 AND c.author<>?1 AND NOT EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=?1 AND e.op='annotate')"),
-        [actor],
+        // Requestness comes from creation. A Mote card remains open until
+        // Mote says so; a local annotation is never a substitute response.
+        &format!("SELECT count(*) FROM cards c WHERE {ACTIVE} AND json_extract((SELECT e.payload FROM events e WHERE e.card_id=c.id ORDER BY e.seq LIMIT 1),'$.card.kind')='question' AND c.assignee=?1 AND c.author<>?1 AND (c.author=?2 AND EXISTS(SELECT 1 FROM mote_requests m WHERE m.card_id=c.id AND m.state='open') OR c.author<>?2 AND NOT EXISTS(SELECT 1 FROM events e WHERE e.card_id=c.id AND e.actor=?1 AND e.op='annotate'))"),
+        params![actor, MOTE],
         |r| r.get(0),
     )?;
     // Wakeable by any means (R1), including an unfiltered wait in progress,

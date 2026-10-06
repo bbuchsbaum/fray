@@ -1,5 +1,12 @@
 # Validation
 
+## Local Mote sweep (2026-10-06)
+
+The [sweep evidence](LOCAL_SWEEP_20261006.md) separates local implementation,
+focused tests, crash/restore checks, stress limits, and outstanding qualification.
+Paid comparison remains deferred. Mote authority gaps and real keepalive sandbox
+qualification remain open; no broad epic completion or release is claimed.
+
 ## No silent stalls (2026-10-01)
 
 `docs/design/no-silent-stalls.md` slices R1 to R5, on branch

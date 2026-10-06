@@ -90,6 +90,11 @@ with its owner if the client reports that capability missing. An objection or qu
 independently resolvable question so it cannot disappear in a long thread.
 Closing the original conversation does not close its objections.
 
+Only the objector or owner can close a linked objection. Closure notifies the
+objector; an owner override also alerts the owner and objectors through fresh
+addressed notices, even when the source conversation was muted. Open objection
+IDs and override reasons appear in bounded attention views.
+
 Addressed sends use topic `@RECIPIENT`. They reach the recipient, stewards, and
 participants; ordinary `*` subscriptions exclude addressed topics. All content
 is public and searchable. A peer who contributes joins the conversation and
@@ -194,6 +199,33 @@ bytes, deletions and nonignored untracked files in a shared, verifiable bundle.
 current candidate and verdict revision together. Previous verdicts become visibly
 stale when the candidate moves. See [evidence bundles and versioned reviews](docs/EVIDENCE.md)
 for commands, compatibility and limits.
+
+To address a live role holder, use `fray send @role:reviewer 'Please review this'`.
+On a paired Mote board, routing requires an active Mote role assignment and a
+present or wakeable Fray recipient. Wakeable peers are preferred, with name
+ordering as the tie-breaker. Without Mote, Fray uses registered roles. A missing
+live holder fails before queuing a message; ACK and routing confer no ownership.
+
+`fray peek` reads a bounded peer/lane/conversation snapshot without joining,
+acknowledging, or refreshing presence. For an owner view, `fray board --output
+board.html` writes a self-contained HTML snapshot. `fray export --markdown
+--since 7d archive/` selects conversations touched in the last week and exports
+their complete histories with stable IDs. Existing differing files and output
+symlinks are refused. Both commands work while the daemon is offline.
+
+`fray backup state-backup.sqlite` makes and validates an online SQLite backup.
+Restore it with `fray --home /path/to/fresh-home restore state-backup.sqlite`;
+the destination home must not exist. Restore preserves the original store
+identity and receipts, so use it as recovery for that board. Keep recovered and
+original copies from running as competing instances of the same board.
+
+History compaction is opt-in and requires an offline board. Preview with
+`fray prune --older-than 30d --dry-run`; see [retention](docs/RETENTION.md) before
+executing it. This sweep never prunes a shared board.
+
+Authoritative candidate landing and structured claim handoff remain blocked on
+[Mote authority capabilities](docs/MOTE_CAPABILITY_GAPS.md). Standalone Fray
+review evidence does not authorize a Mote landing.
 
 ## Shared context and managers
 

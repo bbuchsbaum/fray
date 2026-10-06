@@ -2,7 +2,10 @@
 //! interactive agent answerable after its turn ends by starting a detached
 //! `fray drive --keepalive` under the agent's name. This is the board's side:
 //! the record of what was started for whom, the companion session it may
-//! bind, stop requests, the daily input-token budget, and the fixed spawn.
+//! bind, stop requests, the daily input-token budget, and the fixed spawn;
+//! and (K2) the terminal's turns as its hooks report them, so the keepalive
+//! and the terminal take turns, and what the keepalive did, so the terminal
+//! hears of it at its next prompt.
 //!
 //! Experimental and not yet announced to agents (K3 changes the skill).
 use crate::model::*;
@@ -24,11 +27,77 @@ pub const PREFIX: &str = "keepalive:";
 pub const DAILY_TOKENS: i64 = 2_000_000;
 /// The owner's override, read from the daemon's start environment only.
 pub const BUDGET_ENV: &str = "FRAY_KEEPALIVE_DAILY_TOKENS";
+pub const MODEL_ENV: &str = "FRAY_KEEPALIVE_MODEL";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartOptions {
+    pub model: Option<String>,
+    pub budget: i64,
+}
+
+/// Owner-controlled start policy. Only the current pinned owner Team card can
+/// override daemon-start defaults; duplicate or malformed explicit lines fail
+/// closed rather than selecting an arbitrary value.
+pub fn start_options(conn: &Connection, _now: i64) -> Result<StartOptions> {
+    let fallback_budget = std::env::var(BUDGET_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &i64| *v > 0)
+        .unwrap_or(DAILY_TOKENS);
+    let fallback_model = std::env::var(MODEL_ENV).ok().filter(|v| !v.is_empty());
+    let summary: Option<String> = conn.query_row(
+        "SELECT summary FROM cards WHERE author='owner' AND pinned=1 AND title='Team' AND status NOT IN ('resolved','superseded','withdrawn') ORDER BY id DESC LIMIT 1", [], |r| r.get(0)
+    ).optional()?;
+    let mut model = None;
+    let mut budget = None;
+    for line in summary.as_deref().unwrap_or("").lines() {
+        if let Some(value) = line.trim().strip_prefix("keepalive model:") {
+            if model.replace(value.trim().to_owned()).is_some() {
+                return Err(Error::invalid(
+                    "duplicate keepalive model option in Team card",
+                ));
+            }
+        }
+        if let Some(value) = line.trim().strip_prefix("keepalive budget:") {
+            if budget.replace(value.trim().to_owned()).is_some() {
+                return Err(Error::invalid(
+                    "duplicate keepalive budget option in Team card",
+                ));
+            }
+        }
+    }
+    let model = match model {
+        Some(value)
+            if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) =>
+        {
+            return Err(Error::invalid(
+                "keepalive model must be 1..128 non-control characters",
+            ))
+        }
+        Some(value) => Some(value),
+        None => fallback_model,
+    };
+    let budget = match budget {
+        Some(value) => value
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| Error::invalid("keepalive budget must be a positive integer"))?,
+        None => fallback_budget,
+    };
+    Ok(StartOptions { model, budget })
+}
 /// How long a started keepalive counts as starting before its drive begins.
 const STARTING_MS: i64 = 20_000;
 /// A controller not refreshed for this long is not live (as for drives).
 const CONTROLLER_TTL_MS: i64 = 120_000;
 const DAY_MS: i64 = 86_400_000;
+/// A busy mark with no hook activity for this long is stale: an interrupt
+/// that no hook event reported.
+pub const BUSY_STALE_MS: i64 = 30 * 60_000;
+/// Hook events that begin, continue or end an interactive terminal's turn
+/// (`terminal_turn`'s `turn`).
+pub const TURN_MARKS: [&str; 3] = ["begin", "active", "end"];
 /// The only command the daemon runs, after its own executable. Nothing in a
 /// request reaches it: the name, home and session go in the environment.
 pub const DRIVE_ARGS: [&str; 2] = ["drive", "--keepalive"];
@@ -296,13 +365,15 @@ pub fn status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
     let live = ours.is_some_and(|(state, updated, _, _)| {
         matches!(state.as_str(), "waiting" | "running") && now - updated < CONTROLLER_TTL_MS
     });
+    let terminal = terminal(conn, agent, &k.companion, now)?;
+    let busy = terminal["busy"] == true;
     let state = if live {
         if k.stop {
             "stopping"
         } else if !keep["paused"].is_null() {
             "paused"
-        } else if !keep["deferred"].is_null() {
-            // Set by K2 while the terminal is busy.
+        } else if busy {
+            // The terminal's turn comes first (docs/design/keepalive.md).
             "deferred"
         } else {
             "keepalive"
@@ -319,12 +390,21 @@ pub fn status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
     } else {
         0
     };
+    let model: Option<String> = conn
+        .query_row(
+            "SELECT model FROM keepalive_options WHERE agent=?",
+            [agent],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     Ok(json!({
         "agent":agent,"state":state,
         "turn":if live {ours.map(|c| c.0.clone())} else {None},
-        "host":k.host,"companion":k.companion,"session":k.session,"cwd":k.cwd,"log":k.log,
+        "host":k.host,"companion":k.companion,"session":k.session,"cwd":k.cwd,"log":k.log,"model":model,
         "pid":k.pid,"started_ms":k.started,"stop_requested":k.stop,
-        "fork":keep["fork"],"turns":detail["turn"],"paused":keep["paused"],"deferred":keep["deferred"],
+        "fork":keep["fork"],"turns":detail["turn"],"paused":keep["paused"],
+        "deferred":if live && busy {json!("terminal busy")} else {Value::Null},"terminal":terminal,
         "summary":keep["summary"],"failures":keep["failures"],"oversized":keep["oversized"],
         "reason":if live {None} else {ours.and_then(|c| c.2.clone())},
         "usage":{"day":today(now),"input_tokens":used,"budget":k.budget,"over_budget":used>=k.budget},
@@ -357,6 +437,7 @@ pub(crate) fn begin(
     budget: i64,
     now: i64,
 ) -> Result<Value> {
+    let options = start_options(conn, now)?;
     let agent = req.actor.as_str();
     let session = req.session.as_deref().ok_or_else(|| {
         Error::new(
@@ -420,11 +501,34 @@ pub(crate) fn begin(
             "a live drive already owns this identity; a keepalive would be a second controller",
         ));
     }
+    // Without hooks the keepalive cannot see the terminal's turns, so it
+    // could answer behind a terminal that is working. The turn that runs
+    // `fray keepalive` began with a prompt; its UserPromptSubmit hook must
+    // have reached the board from this very session.
+    if terminal(conn, agent, session, now)?["prompts"]
+        .as_i64()
+        .unwrap_or(0)
+        == 0
+    {
+        let events = if host == "codex" {
+            "UserPromptSubmit, Stop, Interrupt and SessionStart"
+        } else {
+            "UserPromptSubmit, Stop, StopFailure, SessionEnd and SessionStart"
+        };
+        return Err(Error::new(
+            "hooks_missing",
+            format!("no prompt from this session has reached the board through `fray hook`, so a keepalive could not tell when the terminal is working. Install `fray hook --host {host}` for {events} (README, hooks), start a new session or turn, and run fray keepalive again"),
+        ));
+    }
     let label = format!("{PREFIX}{conversation}");
     // A restart keeps the day's usage: the budget is per name and day.
     conn.execute(
         "INSERT INTO keepalives(agent,session,companion,host,cwd,log,pid,budget,stop_requested,started_ms) VALUES(?1,?2,?3,?4,?5,?6,NULL,?7,0,?8) ON CONFLICT(agent) DO UPDATE SET session=excluded.session,companion=excluded.companion,host=excluded.host,cwd=excluded.cwd,log=excluded.log,pid=NULL,budget=excluded.budget,stop_requested=0,started_ms=excluded.started_ms",
         params![agent, label, session, host, cwd, log, budget, now],
+    )?;
+    conn.execute(
+        "INSERT INTO keepalive_options(agent,model) VALUES(?,?) ON CONFLICT(agent) DO UPDATE SET model=excluded.model",
+        params![agent, options.model],
     )?;
     status(conn, agent, now)
 }
@@ -480,6 +584,142 @@ pub(crate) fn usage(conn: &Connection, req: &Request, now: i64) -> Result<Value>
         params![today(now), tokens, req.actor],
     )?;
     Ok(status(conn, &req.actor, now)?["usage"].clone())
+}
+
+/// The terminal's turn state for its host `session`, from its hooks: busy
+/// from UserPromptSubmit until its turn ends, unless stale.
+pub(crate) fn terminal(conn: &Connection, agent: &str, session: &str, now: i64) -> Result<Value> {
+    let row: Option<(Option<i64>, i64, i64, Option<String>)> = conn
+        .query_row(
+            "SELECT busy_since_ms,last_hook_ms,prompts,transcript FROM terminal_turns WHERE agent=? AND session=?",
+            params![agent, session],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((since, last, prompts, transcript)) = row else {
+        return Ok(json!({"session":session,"busy":false,"prompts":0}));
+    };
+    let stale = since.is_some() && now - last >= BUSY_STALE_MS;
+    Ok(
+        json!({"session":session,"busy":since.is_some() && !stale,"busy_since_ms":since,
+        "stale":stale,"last_hook_ms":last,"prompts":prompts,"transcript":transcript}),
+    )
+}
+
+/// `terminal_turn`: a hook in the interactive terminal reports its turn
+/// beginning (UserPromptSubmit), continuing (any other hook, a blocking
+/// Stop) or ending (a Stop that does not block, StopFailure, SessionEnd,
+/// Codex's Interrupt). Never from a keepalive's own session. Answers what
+/// the terminal must hear: cards its keepalive is handling right now, and,
+/// when a turn begins, what the keepalive did since the terminal's last turn
+/// (each reported once).
+pub(crate) fn mark(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    check_fields(&req.args, &["turn", "transcript"])?;
+    let turn = string(&req.args, "turn")?;
+    if !TURN_MARKS.contains(&turn) {
+        return Err(Error::invalid("turn: begin|active|end"));
+    }
+    let transcript = req
+        .args
+        .get("transcript")
+        .filter(|t| !t.is_null())
+        .map(|_| string(&req.args, "transcript"))
+        .transpose()?;
+    if let Some(path) = transcript {
+        text(path, "transcript", 4096, false)?;
+    }
+    let session = req.session.as_deref().ok_or_else(|| {
+        Error::new(
+            "session_required",
+            "a terminal's turns are recorded per host session",
+        )
+    })?;
+    if is_session(Some(session)) {
+        return Err(Error::new(
+            "keepalive_session",
+            "a keepalive's own turns are not its terminal's",
+        ));
+    }
+    let agent = req.actor.as_str();
+    conn.execute(
+        "INSERT INTO terminal_turns(agent,session,busy_since_ms,last_hook_ms,prompts,transcript) VALUES(?1,?2,CASE WHEN ?3='begin' THEN ?4 END,?4,?3='begin',?5) ON CONFLICT(agent,session) DO UPDATE SET busy_since_ms=CASE ?3 WHEN 'begin' THEN coalesce(busy_since_ms,?4) WHEN 'end' THEN NULL ELSE busy_since_ms END,last_hook_ms=?4,prompts=prompts+(?3='begin'),transcript=coalesce(?5,transcript)",
+        params![agent, session, turn, now, transcript],
+    )?;
+    let mut out = json!({"turn":turn,"handling":handling(conn, agent, now)?});
+    if turn == "begin" {
+        out["away"] = away(conn, agent)?;
+    }
+    Ok(out)
+}
+
+/// Cards the keepalive's background turn is handling right now: those
+/// presented to its running turn. Empty when no turn runs.
+pub(crate) fn handling(conn: &Connection, agent: &str, now: i64) -> Result<Vec<i64>> {
+    let detail: Option<String> = conn.query_row(
+        "SELECT d.detail FROM controllers c JOIN controller_details d ON d.agent=c.agent AND d.run_id=c.run_id JOIN keepalives k ON k.agent=c.agent WHERE c.agent=? AND c.state='running' AND c.updated_ms>? AND k.session=json_extract(d.detail,'$.keepalive.session')",
+        params![agent, now - CONTROLLER_TTL_MS], |r| r.get(0),
+    ).optional()?;
+    let detail: Value = detail
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or(Value::Null);
+    Ok(detail["presented"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["id"].as_i64())
+        .collect())
+}
+
+/// What the keepalive posted since the terminal was last told, oldest first.
+/// Mark exactly the returned rows reported; excess remains for the next prompt.
+fn away(conn: &Connection, agent: &str) -> Result<Value> {
+    let mut s = conn.prepare(
+        "SELECT event_seq,card_id,kind,follow_up FROM keepalive_actions WHERE agent=? AND reported=0 ORDER BY event_seq LIMIT 20",
+    )?;
+    let rows = s.query_map([agent], |r| {
+        Ok(json!({"seq":r.get::<_,i64>(0)?,"card":r.get::<_,i64>(1)?,"kind":r.get::<_,String>(2)?,"follow_up":r.get::<_,Option<i64>>(3)?}))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let total: i64 = conn.query_row(
+        "SELECT count(*) FROM keepalive_actions WHERE agent=? AND reported=0",
+        [agent],
+        |r| r.get(0),
+    )?;
+    for row in &rows {
+        conn.execute(
+            "UPDATE keepalive_actions SET reported=1 WHERE event_seq=?",
+            [row["seq"].as_i64()],
+        )?;
+    }
+    Ok(json!({"actions":rows,"more":total - rows.len() as i64}))
+}
+
+/// A keepalive's reply, recorded for its terminal's "while you were away".
+pub(crate) fn acted(conn: &Connection, req: &Request, result: &Value) -> Result<()> {
+    let session = req.session.as_deref();
+    if req.op != "annotate" || !is_session(session) {
+        return Ok(());
+    }
+    let (Some(seq), Some(card)) = (result["event_seq"].as_i64(), req.args["id"].as_i64()) else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO keepalive_actions(event_seq,agent,card_id,kind,follow_up) VALUES(?,?,?,?,?)",
+        params![seq, req.actor, card, req.args["kind"].as_str().unwrap_or("note"), result["follow_up"]["id"].as_i64()],
+    )?;
+    Ok(())
+}
+
+/// A terminal `/clear` or compaction starts a new conversation: move its
+/// keepalive to that companion so its next background turn forks the new one.
+pub(crate) fn rebind(conn: &Connection, agent: &str, session: &str) -> Result<()> {
+    let Ok((host, _)) = companion(session) else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE keepalives SET companion=?1 WHERE agent=?2 AND host=?3 AND companion<>?1",
+        params![session, agent, host],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

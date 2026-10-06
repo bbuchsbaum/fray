@@ -342,6 +342,7 @@ fn a_request_carded_after_its_addressee_joins_is_listed_once() {
     let req = json!({"store_id":"st-A","requests":[{"msg_id":"msg-9","recipient":"yan","from":"alice","state":"open","body":"x"}]});
     at(&mut s, "runner", "mote_requests_sync", req.clone(), NOW);
     at(&mut s, "yan", "join", json!({"topics":[]}), NOW + MIN);
+    at(&mut s, "yan", "leave", json!({}), NOW + MIN);
     at(&mut s, "runner", "mote_requests_sync", req, NOW + MIN);
     let st = at(&mut s, "alice", "stuck_requests", json!({}), NOW + 40 * MIN);
     let subjects: Vec<&str> = st["stuck"]
@@ -352,6 +353,115 @@ fn a_request_carded_after_its_addressee_joins_is_listed_once() {
         .collect();
     assert_eq!(subjects.len(), 1, "{subjects:?}");
     assert!(subjects[0].starts_with("card:"), "{subjects:?}");
+}
+
+/// A Mote request remains overdue from its sent time even if a local patch
+/// clears its assignee. Mote is still the authority for whether it is open.
+#[test]
+fn clearing_a_mote_request_assignee_does_not_hide_its_overdue_escalation() {
+    let mut s = board();
+    at(
+        &mut s,
+        "alice",
+        "mote_bind",
+        json!({"store":"/r/.mote","store_id":"st-A"}),
+        NOW,
+    );
+    let req = json!({"store_id":"st-A","requests":[{"msg_id":"msg-10","recipient":"helper","from":"alice","state":"open","body":"x","sent_ms":NOW}]});
+    let synced = at(&mut s, "runner", "mote_requests_sync", req, NOW);
+    let id = synced["created"][0].clone();
+    at(
+        &mut s,
+        "runner",
+        "patch",
+        json!({"id":id,"expect":1,"assignee":null}),
+        NOW + MIN,
+    );
+    heartbeat(&mut s, NOW + 61 * MIN);
+    let tick = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 61 * MIN);
+    assert_eq!(tick["created"].as_array().unwrap().len(), 2, "{tick}");
+    assert_eq!(tick["stuck"], 1, "{tick}");
+}
+
+/// A deferred reminder leaves the old escalation open until the cap allows
+/// its replacement, so that replacement is explicitly a Still Stuck card.
+#[test]
+fn a_cap_deferred_reminder_is_still_stuck_on_the_next_available_tick() {
+    let mut s = board();
+    at(
+        &mut s,
+        "helper",
+        "controller",
+        json!({"run_id":"live","state":"waiting","begin":true}),
+        NOW,
+    );
+    for _ in 0..10 {
+        ask(&mut s, json!({}));
+    }
+    // These older asks arrived, so only their later deadlines can make them
+    // stuck; the target below is the sole initial unreachable request.
+    shown(&mut s, "helper", NOW);
+    at(
+        &mut s,
+        "helper",
+        "controller",
+        json!({"run_id":"live","state":"stopped"}),
+        NOW + MIN,
+    );
+    let target = ask(&mut s, json!({}));
+    heartbeat(&mut s, NOW + 20 * MIN);
+    at(&mut s, "runner", "escalate_tick", json!({}), NOW + 20 * MIN);
+    let mine = escalations(&mut s, "steward", NOW + 20 * MIN)
+        .into_iter()
+        .find(|c| {
+            c["summary"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("patch {target}"))
+        })
+        .unwrap();
+    at(
+        &mut s,
+        "steward",
+        "patch",
+        json!({"id":mine["id"],"expect":mine["rev"],"status":"resolved"}),
+        NOW + 21 * MIN,
+    );
+    // Add earlier cards' deadlines. At 81 min their 20 overdue escalations
+    // consume the tick cap before the target's reminder can be created.
+    for id in 1..=10 {
+        at(
+            &mut s,
+            "alice",
+            "annotate",
+            json!({"id":id,"body":"due","respond_within_ms":MIN}),
+            NOW + 22 * MIN,
+        );
+    }
+    heartbeat(&mut s, NOW + 81 * MIN);
+    let tick = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 81 * MIN);
+    assert_eq!(tick["created"].as_array().unwrap().len(), 20, "{tick}");
+    assert!(tick["deferred"].as_i64().unwrap() > 0, "{tick}");
+    heartbeat(&mut s, NOW + 82 * MIN);
+    let tick = at(&mut s, "runner", "escalate_tick", json!({}), NOW + 82 * MIN);
+    assert_eq!(tick["created"].as_array().unwrap().len(), 1, "{tick}");
+    let reminder = escalations(&mut s, "steward", NOW + 82 * MIN)
+        .into_iter()
+        .find(|c| {
+            c["summary"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("patch {target}"))
+                && c["status"] == "open"
+        })
+        .unwrap();
+    assert!(
+        reminder["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Still Stuck"),
+        "{reminder}"
+    );
 }
 
 /// Review of a8dabdf: asks that can never be stuck (unassigned, no

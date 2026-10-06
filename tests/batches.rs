@@ -296,7 +296,7 @@ fn thread_lists_open_objections_until_resolved() {
     assert_eq!(shown["follow_ups"][0]["assignee"], "codex");
     call(
         &mut s,
-        "codex",
+        "claude",
         "patch",
         json!({"id": objection["id"], "expect": objection["rev"], "status": "resolved"}),
     );

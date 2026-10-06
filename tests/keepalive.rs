@@ -2,7 +2,7 @@
 //! conversation comes from the bound session, the companion session binds
 //! beside the terminal's, a Monitor or drive already owning the wake is
 //! refused, and stop requests and the daily budget are recorded.
-use fray::{model::Request, store::Store};
+use fray::{keepalive, model::Request, store::Store};
 use serde_json::{json, Value};
 
 const NOW: i64 = 1_800_000_000_000;
@@ -76,7 +76,71 @@ fn board() -> Store {
     let mut s = Store::memory().unwrap();
     ok(&mut s, "observer", None, "join", json!({}), NOW);
     ok(&mut s, "alice", Some("claude:c1"), "join", json!({}), NOW);
+    // K2 requires the terminal's UserPromptSubmit hook before a keepalive
+    // starts; this completed synthetic turn leaves it available to run.
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"begin"}),
+        NOW,
+    );
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"end"}),
+        NOW,
+    );
     s
+}
+
+fn team(store: &mut Store, summary: &str) {
+    ok(
+        store,
+        "owner",
+        None,
+        "owner_decide",
+        json!({"title":"Team","summary":summary,"pin":true}),
+        NOW,
+    );
+}
+
+#[test]
+fn only_the_pinned_owner_team_card_supplies_a_validated_model_and_budget() {
+    let mut s = board();
+    team(
+        &mut s,
+        "keepalive model: codex-synthetic\nkeepalive budget: 12345",
+    );
+    assert_eq!(
+        keepalive::start_options(&s.conn, NOW).unwrap(),
+        keepalive::StartOptions {
+            model: Some("codex-synthetic".into()),
+            budget: 12_345,
+        }
+    );
+    let started = begin(&mut s, "alice", Some("claude:c1"), NOW + 1).unwrap();
+    assert_eq!(started["model"], "codex-synthetic");
+
+    let mut duplicate = board();
+    team(&mut duplicate, "keepalive model: one\nkeepalive model: two");
+    assert_eq!(
+        keepalive::start_options(&duplicate.conn, NOW)
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+    let mut invalid = board();
+    team(&mut invalid, "keepalive budget: 0");
+    assert_eq!(
+        keepalive::start_options(&invalid.conn, NOW)
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
 }
 
 #[test]
@@ -222,7 +286,8 @@ fn the_companion_binds_beside_the_terminal_and_survives_its_clear() {
         .unwrap_err(),
         "keepalive_session"
     );
-    // The terminal's /clear rebinds the interactive side only.
+    // The terminal's /clear rebinds both the interactive side and the
+    // keepalive's next fork source.
     let cleared = ok(
         &mut s,
         "alice",
@@ -255,7 +320,7 @@ fn the_companion_binds_beside_the_terminal_and_survives_its_clear() {
     let entry = roster_entry(&mut s, "alice", NOW + 10);
     assert_eq!(entry["session"]["bound"]["session"], "claude:c2");
     assert_eq!(entry["keepalive"]["state"], "keepalive");
-    assert_eq!(entry["keepalive"]["companion"], "claude:c1");
+    assert_eq!(entry["keepalive"]["companion"], "claude:c2");
     assert_eq!(status(&mut s, "alice", NOW + 10)["state"], "keepalive");
 }
 
@@ -510,13 +575,14 @@ fn the_keepalives_waits_leave_the_terminals_wait_row_alone() {
     let held: String = s
         .conn
         .query_row(
-            "SELECT session FROM agent_waits WHERE agent='alice'",
+            "SELECT session FROM session_waits WHERE agent='alice' AND session='claude:c1'",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(held, "claude:c1");
-    // Its wake row still makes the agent wakeable while it waits.
+    // A keepalive's controller, rather than a lingering wake row, establishes
+    // wakeability so terminal-busy deferral cannot be bypassed.
     let woken: i64 = s
         .conn
         .query_row(
@@ -525,5 +591,32 @@ fn the_keepalives_waits_leave_the_terminals_wait_row_alone() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(woken, 1);
+    assert_eq!(woken, 0);
+}
+
+#[test]
+fn a_busy_terminal_defers_its_keepalive_until_a_nonblocking_end() {
+    let mut s = board();
+    begin(&mut s, "alice", Some("claude:c1"), NOW + 1).unwrap();
+    drive_begins(&mut s, NOW + 2);
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"begin"}),
+        NOW + 3,
+    );
+    let deferred = status(&mut s, "alice", NOW + 4);
+    assert_eq!(deferred["state"], "deferred");
+    assert_eq!(deferred["deferred"], "terminal busy");
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"end"}),
+        NOW + 5,
+    );
+    assert_eq!(status(&mut s, "alice", NOW + 6)["state"], "keepalive");
 }

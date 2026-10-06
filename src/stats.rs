@@ -10,6 +10,25 @@ use crate::store::{live_lanes, reachability, Reach, OWNER};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::Path;
+
+/// Metrics use their own read-only WAL connection. One deferred transaction
+/// gives every query the same snapshot without holding the publisher's mutex.
+pub fn read_snapshot(path: &Path, req: &Request, now: i64) -> Result<Value> {
+    if !matches!(req.op.as_str(), "stats" | "friction") {
+        return Err(Error::invalid(
+            "metrics snapshot supports stats and friction only",
+        ));
+    }
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.execute_batch("BEGIN DEFERRED")?;
+    // No schema initialization: this connection must never migrate or write.
+    let mut reader = crate::store::Store { conn };
+    let result = reader.execute_at(req, now)?;
+    reader.conn.execute_batch("COMMIT")?;
+    Ok(result)
+}
 
 /// Items listed per friction category; the count is always complete.
 const FRICTION_LIMIT: usize = 5;
@@ -251,14 +270,16 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
         .query_map([since], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    // Age runs from the oldest peer event the agent has not acknowledged, not
-    // from the card's newest one. Agents who left and cards muted by the
+    // Age starts no earlier than this agent's first routing to the card.
+    // Legacy rows whose routing time was never recorded retain event-based
+    // ages and are explicitly counted. Agents who left and cards muted by the
     // agent are excluded, except a question assigned to it, whose outcome
     // must still reach it.
     let mut s = conn.prepare(
-        "SELECT d.agent,count(*),max(?1-(SELECT min(e.ts_ms) FROM events e
-             WHERE e.card_id=d.card_id AND e.seq>d.ack_seq AND e.seq<=d.pending_seq AND e.actor<>d.agent))
+        "SELECT d.agent,count(*),max(max(0,?1-max(coalesce(r.routed_at_ms,0),coalesce((SELECT min(e.ts_ms) FROM events e
+             WHERE e.card_id=d.card_id AND e.seq>d.ack_seq AND e.seq<=d.pending_seq AND e.actor<>d.agent),(SELECT ts_ms FROM events WHERE seq=d.pending_seq))))),sum(r.routed_at_ms IS NULL)
          FROM deliveries d JOIN agents a ON a.name=d.agent AND a.enabled=1
+         LEFT JOIN delivery_routes r ON r.agent=d.agent AND r.card_id=d.card_id
          WHERE d.pending_seq>d.ack_seq
            AND (NOT EXISTS(SELECT 1 FROM muted_cards m WHERE m.agent=d.agent AND m.card_id=d.card_id)
              OR EXISTS(SELECT 1 FROM cards c WHERE c.id=d.card_id AND c.kind='question' AND c.assignee=d.agent))
@@ -266,7 +287,7 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
     )?;
     let unacked = s
         .query_map([now], |r| {
-            Ok(json!({"agent":r.get::<_,String>(0)?,"items":r.get::<_,i64>(1)?,"oldest_age_ms":r.get::<_,i64>(2)?}))
+            Ok(json!({"agent":r.get::<_,String>(0)?,"items":r.get::<_,i64>(1)?,"oldest_age_ms":r.get::<_,i64>(2)?,"legacy_routing_items":r.get::<_,i64>(3)?}))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -297,7 +318,7 @@ pub(crate) fn stats(conn: &Connection, window_ms: Option<i64>, now: i64) -> Resu
         "exposure":{"publish_to_first_shown":summary(exposure),
             "note":"From presented batches, which are retained for a bounded time: recent history only. Exposure is not handling."},
         "attention":{"unacked_items":unacked.iter().map(|a| a["items"].as_i64().unwrap_or(0)).sum::<i64>(),
-            "agents":unacked,"note":"Current state, not windowed. Excludes agents who left and cards they muted."},
+            "agents":unacked,"note":"Current state, not windowed. Age starts at first routing; legacy_routing_items have unknown routing times and use content age. Excludes agents who left and cards they muted."},
         "lanes":lanes,
         "friction_notes":friction_notes,
         "unavailable":[

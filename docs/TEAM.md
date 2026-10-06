@@ -27,6 +27,22 @@ Waking: Codex runs under `fray drive -- codex exec -`; interactive Claude
 Needs the owner: pushes, releases, anything touching another repository.
 ```
 
+For keepalive, the newest active **pinned owner** Team card may also set:
+
+```text
+keepalive model: MODEL_ID
+keepalive budget: 2000000
+```
+
+These values are captured at start, so later Team edits do not silently change
+a running companion's model or daily token limit. Duplicate keys, an empty or
+invalid model, and a nonpositive budget refuse start. When omitted, the daemon
+uses `FRAY_KEEPALIVE_MODEL` and `FRAY_KEEPALIVE_DAILY_TOKENS` (budget default:
+2,000,000). If no model is configured, the host's recorded transcript model is
+used; missing recorded model fails explicitly. Fixed host argv always includes
+the selected model. Keepalive remains unannounced pending the live-host and
+sandbox qualification described in [its design](design/keepalive.md).
+
 Joining is then one sentence in a new terminal: "join the fray", or "join
 the fray as a reviewer", "as a coder on bd-123", "as the steward", "as a
 monitor". The `fray` skill's "Joining the team" section says how an agent

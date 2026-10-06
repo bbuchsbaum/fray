@@ -261,3 +261,59 @@ fn an_answered_ask_no_longer_counts_toward_the_lapse() {
     );
     assert!(lapse(&mut s, NOW + 3 * MIN).is_null());
 }
+
+/// R5 is based on the creation event, and a Mote reply is authoritative only
+/// when the Mote sync observes it.
+#[test]
+fn kind_patches_and_local_mote_annotations_do_not_clear_a_lapse() {
+    let mut s = board();
+    let sent = at(
+        &mut s,
+        "alice",
+        "send",
+        json!({"to":"helper","body":"review?","ask":true}),
+        NOW,
+    );
+    at(
+        &mut s,
+        "alice",
+        "patch",
+        json!({"id":sent["card"]["id"],"expect":1,"kind":"note"}),
+        NOW + MIN,
+    );
+    let lapse = |s: &mut Store| {
+        at(s, "helper", "brief", json!({}), NOW + 2 * MIN)["idle_readiness"]["lapse"].clone()
+    };
+    assert_eq!(lapse(&mut s)["open_asks_to_you"], 1);
+
+    at(
+        &mut s,
+        "alice",
+        "mote_bind",
+        json!({"store":"/r/.mote","store_id":"st-A"}),
+        NOW + 2 * MIN,
+    );
+    at(
+        &mut s,
+        "alice",
+        "mote_requests_sync",
+        json!({"store_id":"st-A","requests":[{"msg_id":"msg-1","recipient":"helper","from":"alice","state":"open","body":"review?"}]}),
+        NOW + 2 * MIN,
+    );
+    let mote = at(&mut s, "helper", "inbox", json!({}), NOW + 2 * MIN);
+    let mote_id = mote["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["card"]["author"] == "mote")
+        .unwrap()["card"]["id"]
+        .clone();
+    at(
+        &mut s,
+        "helper",
+        "annotate",
+        json!({"id":mote_id,"body":"locally noted"}),
+        NOW + 3 * MIN,
+    );
+    assert_eq!(lapse(&mut s)["open_asks_to_you"], 2);
+}

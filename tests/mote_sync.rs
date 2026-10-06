@@ -357,8 +357,11 @@ fn the_tail_cursor_is_op_id_shaped_and_orders_with_real_ids() {
 struct Temp(PathBuf);
 impl Temp {
     fn new(tag: &str) -> Self {
-        let p =
-            PathBuf::from("/tmp").join(format!("fray-sync-{tag}-{}", &random_key().unwrap()[..10]));
+        let p = PathBuf::from("/tmp").join(format!(
+            "fray-sync-{tag}-{}-{}",
+            std::process::id(),
+            random_key().unwrap()
+        ));
         fs::create_dir_all(&p).unwrap();
         Self(fs::canonicalize(&p).unwrap())
     }
@@ -1799,4 +1802,88 @@ fn fray_team_reports_an_unreadable_mote_as_unknown() {
         t["gaps"].to_string().contains("Mote could not be read"),
         "{t}"
     );
+}
+
+#[test]
+fn role_send_uses_real_mote_lease_and_refuses_an_expired_holder() {
+    let Some(p) = Project::new("roles") else {
+        return;
+    };
+    let session = p.mote(
+        "bob",
+        &["--json", "session", "start", "--as", "bob", "--ttl", "1h"],
+    );
+    assert!(
+        session.status.success(),
+        "{}",
+        String::from_utf8_lossy(&session.stderr)
+    );
+    let session: Value = serde_json::from_slice(&session.stdout).unwrap();
+    let sid = session["session_id"].as_str().unwrap();
+    let defined = p.mote(
+        "alice",
+        &[
+            "role",
+            "define",
+            "reviewer",
+            "--remit",
+            "Review this fixture",
+            "--assigner",
+            "alice",
+            "--idempotency-key",
+            "fixture-role",
+        ],
+    );
+    assert!(
+        defined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&defined.stderr)
+    );
+    let assigned = p.mote(
+        "alice",
+        &[
+            "role",
+            "assign",
+            "reviewer",
+            "bob",
+            "--session",
+            sid,
+            "--ttl",
+            "30m",
+            "--idempotency-key",
+            "fixture-assignment",
+        ],
+    );
+    assert!(
+        assigned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&assigned.stderr)
+    );
+    let (ok, out) = p.fray(
+        &[],
+        "alice",
+        &["--json", "send", "@role:reviewer", "Review the role route"],
+    );
+    assert!(ok, "{out}");
+    let sent: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(sent["card"]["assignee"], "bob", "{sent}");
+    assert!(
+        sent["card"]["tags"].to_string().contains("role:reviewer"),
+        "{sent}"
+    );
+    // Ending Mote's session invalidates its lease even though Fray is present.
+    let ended = p.mote("bob", &["session", "end", sid]);
+    assert!(
+        ended.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    let (ok, out) = p.fray(
+        &[],
+        "alice",
+        &["--json", "send", "@role:reviewer", "Must not queue"],
+    );
+    assert!(!ok && out.contains("no_live_role"), "{out}");
+    let (_, out) = p.fray(&[], "alice", &["--json", "query", "--all"]);
+    assert!(!out.contains("Must not queue"), "{out}");
 }

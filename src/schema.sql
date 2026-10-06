@@ -53,6 +53,19 @@ CREATE TABLE IF NOT EXISTS deliveries (
     PRIMARY KEY(agent, card_id)
 );
 CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(agent, pending_seq);
+-- First routing time is independent of the age of the card's content.
+-- NULL means a legacy receipt predating this table; do not invent its time.
+CREATE TABLE IF NOT EXISTS delivery_routes(
+    agent TEXT NOT NULL,
+    card_id INTEGER NOT NULL,
+    routed_at_ms INTEGER,
+    PRIMARY KEY(agent,card_id),
+    FOREIGN KEY(agent,card_id) REFERENCES deliveries(agent,card_id) ON DELETE CASCADE
+);
+CREATE TRIGGER IF NOT EXISTS deliveries_first_route AFTER INSERT ON deliveries BEGIN
+    INSERT OR IGNORE INTO delivery_routes(agent,card_id,routed_at_ms)
+    VALUES(new.agent,new.card_id,CAST((SELECT value FROM meta WHERE key='routing_clock_ms') AS INTEGER));
+END;
 -- Receiving a broadcast is not participation. Only contribution or explicit follow is.
 CREATE TABLE IF NOT EXISTS participants (
     agent TEXT NOT NULL REFERENCES agents(name),
@@ -183,7 +196,7 @@ CREATE TABLE IF NOT EXISTS review_verdicts(
     verdict TEXT NOT NULL CHECK(verdict IN ('approve','object','blocked'))
 );
 CREATE INDEX IF NOT EXISTS review_verdicts_card ON review_verdicts(card_id,event_seq);
--- A wait in progress, refreshed every minute: reachability, not activity.
+-- Superseded by session_waits (below); kept so older boards open unchanged.
 CREATE TABLE IF NOT EXISTS agent_waits(
     agent TEXT PRIMARY KEY,
     session TEXT,
@@ -285,4 +298,47 @@ CREATE TABLE IF NOT EXISTS keepalives(
     stop_requested INTEGER NOT NULL DEFAULT 0 CHECK(stop_requested IN (0,1)),
     started_ms INTEGER NOT NULL
 );
+-- An interactive terminal's turns, per name and host session, from `fray
+-- hook` (docs/design/keepalive.md, "One turn at a time"): busy from
+-- UserPromptSubmit until a Stop that does not block, StopFailure,
+-- SessionEnd or Codex's Interrupt. A busy mark with no hook activity for
+-- 30 minutes is stale. `prompts` counts UserPromptSubmit, so a keepalive
+-- can tell the terminal has taken a turn since its fork; `transcript` is
+-- the host's transcript path from the hook input. Never written by a
+-- keepalive's own session. Additive, so older boards gain it.
+CREATE TABLE IF NOT EXISTS terminal_turns(
+    agent TEXT NOT NULL,
+    session TEXT NOT NULL,
+    busy_since_ms INTEGER,
+    last_hook_ms INTEGER NOT NULL,
+    prompts INTEGER NOT NULL DEFAULT 0,
+    transcript TEXT,
+    PRIMARY KEY(agent, session)
+);
+-- Replies a keepalive posted as its agent, until the terminal is told of
+-- them at its next prompt ("while you were away"). Additive.
+CREATE TABLE IF NOT EXISTS keepalive_actions(
+    event_seq INTEGER PRIMARY KEY,
+    agent TEXT NOT NULL,
+    card_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    follow_up INTEGER,
+    reported INTEGER NOT NULL DEFAULT 0 CHECK(reported IN (0,1))
+);
+CREATE INDEX IF NOT EXISTS keepalive_actions_unreported ON keepalive_actions(agent, reported);
+-- A wait in progress, per name and session (no session: ''), refreshed
+-- every minute: reachability, not activity. Replaces agent_waits, which
+-- kept one row per name, so a keepalive's waits and its terminal's no
+-- longer share a row. Additive; agent_waits is left unused.
+CREATE TABLE IF NOT EXISTS session_waits(
+    agent TEXT NOT NULL,
+    session TEXT NOT NULL DEFAULT '',
+    refreshed_ms INTEGER NOT NULL,
+    PRIMARY KEY(agent, session)
+);
 PRAGMA user_version = 3;
+-- Owner-selected options are stored beside the keepalive's fixed identity.
+CREATE TABLE IF NOT EXISTS keepalive_options(
+    agent TEXT PRIMARY KEY REFERENCES agents(name),
+    model TEXT
+);

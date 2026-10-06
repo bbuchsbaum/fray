@@ -7,6 +7,45 @@ use std::process::Command;
 const NOW: i64 = 1_800_000_000_000;
 const MIN: i64 = 60_000;
 
+#[test]
+fn a_read_only_metrics_connection_matches_the_store_and_never_initializes_a_database() {
+    let dir = std::env::temp_dir().join(format!(
+        "fray-stats-snapshot-{}",
+        fray::model::random_key().unwrap()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("state.db");
+    let mut s = Store::open(&path, false).unwrap();
+    for name in ["claude", "codex"] {
+        at(&mut s, name, "join", json!({}), NOW);
+    }
+    ask(&mut s, "claude", "codex", "Review", NOW);
+    let before = s.highwater().unwrap();
+    for (op, args) in [
+        ("stats", json!({})),
+        ("stats", json!({"window_ms":60000})),
+        ("friction", json!({})),
+    ] {
+        let req = Request::new(op, "claude", args);
+        let expected = s.execute_at(&req, NOW + MIN).unwrap();
+        assert_eq!(
+            fray::stats::read_snapshot(&path, &req, NOW + MIN).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(s.highwater().unwrap(), before);
+    let missing = dir.join("missing.db");
+    assert!(
+        fray::stats::read_snapshot(&missing, &Request::new("stats", "", json!({})), NOW).is_err()
+    );
+    assert!(!missing.exists());
+    assert!(
+        fray::stats::read_snapshot(&path, &Request::new("join", "other", json!({})), NOW).is_err()
+    );
+    drop(s);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn at(s: &mut Store, actor: &str, op: &str, args: Value, t: i64) -> Value {
     s.execute_at(&Request::new(op, actor, args), t)
         .unwrap_or_else(|e| panic!("{op}: {} {}", e.code, e.message))
@@ -22,6 +61,80 @@ fn board() -> Store {
 
 fn stats(s: &mut Store, window_ms: Option<i64>, t: i64) -> Value {
     at(s, "claude", "stats", json!({"window_ms": window_ms}), t)["stats"].clone()
+}
+
+#[test]
+fn unacked_age_never_predates_first_routing_and_reassignment_does_not_reset_it() {
+    let mut s = board();
+    let id = at(
+        &mut s,
+        "claude",
+        "post",
+        json!({"kind":"note","topic":"@claude","title":"Old note","summary":"old"}),
+        NOW,
+    )["card"]["id"]
+        .as_i64()
+        .unwrap();
+    let five_days = 5 * 24 * 60 * MIN;
+    at(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id":id,"expect":1,"assignee":"codex"}),
+        NOW + five_days,
+    );
+    let st = stats(&mut s, None, NOW + five_days + MIN);
+    let item = st["attention"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["agent"] == "codex")
+        .unwrap();
+    assert_eq!(item["oldest_age_ms"], MIN);
+    assert_eq!(item["legacy_routing_items"], 0);
+    at(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id":id,"expect":2,"assignee":"deepseek"}),
+        NOW + five_days + 2 * MIN,
+    );
+    at(
+        &mut s,
+        "claude",
+        "patch",
+        json!({"id":id,"expect":3,"assignee":"codex"}),
+        NOW + five_days + 3 * MIN,
+    );
+    let st = stats(&mut s, None, NOW + five_days + 4 * MIN);
+    let item = st["attention"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["agent"] == "codex")
+        .unwrap();
+    assert_eq!(item["oldest_age_ms"], 4 * MIN);
+}
+
+#[test]
+fn legacy_delivery_routing_times_are_flagged_instead_of_invented() {
+    let mut s = board();
+    let id = ask(&mut s, "claude", "codex", "old request", NOW);
+    s.conn
+        .execute(
+            "UPDATE delivery_routes SET routed_at_ms=NULL WHERE card_id=?",
+            [id],
+        )
+        .unwrap();
+    let st = stats(&mut s, None, NOW + MIN);
+    let item = st["attention"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["agent"] == "codex")
+        .unwrap();
+    assert_eq!(item["oldest_age_ms"], MIN);
+    assert_eq!(item["legacy_routing_items"], 1);
 }
 
 fn ask(s: &mut Store, from: &str, to: &str, body: &str, t: i64) -> i64 {

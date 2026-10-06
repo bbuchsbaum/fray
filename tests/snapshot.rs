@@ -1,11 +1,12 @@
 use fray::snapshot;
 use std::{
+    collections::BTreeMap,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicUsize, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct Temp(PathBuf);
@@ -63,6 +64,21 @@ fn repo() -> (Temp, PathBuf, PathBuf) {
     (t, root, out)
 }
 
+fn shasum(path: &Path) -> String {
+    let output = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
 #[test]
 fn captures_worktree_states_and_reuses_stable_identity() {
     let (_t, root, out) = repo();
@@ -115,6 +131,45 @@ fn captures_worktree_states_and_reuses_stable_identity() {
         snapshot::verify(&bundle).unwrap()["manifest"],
         one["manifest"]
     );
+}
+
+#[test]
+fn captures_and_verifies_500_files_with_shasum_identical_digests() {
+    let (_t, root, out) = repo();
+    for index in 0..500usize {
+        let mut bytes = vec![0u8; 1024 + index % 97];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            *byte = ((index * 31 + offset * 17) % 251) as u8;
+        }
+        write(&root, &format!("src/many/{index:03}.bin"), &bytes);
+    }
+
+    let started = Instant::now();
+    let created = snapshot::create(&root, &out, &[PathBuf::from("src")]).unwrap();
+    let bundle = PathBuf::from(created["bundle"].as_str().unwrap());
+    let verified = snapshot::verify(&bundle).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(verified["manifest"], created["manifest"]);
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let actual: BTreeMap<String, String> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["state"] == "file")
+        .map(|entry| {
+            (
+                entry["path"].as_str().unwrap().to_owned(),
+                entry["sha256"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(actual.len(), 502); // two tracked base files plus 500 generated files
+    for (path, digest) in actual {
+        assert_eq!(digest, shasum(&bundle.join("files").join(path)));
+    }
+    eprintln!("500-file snapshot capture+verify: {elapsed:?}");
 }
 
 #[test]

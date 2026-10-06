@@ -380,11 +380,15 @@ Candidate reviews follow the rule in 7.3.
 
 #### 7.2 Handoff (child 6) [D4]
 
-Revision 1 said a gap-free handoff was impossible on Mote 0.1.0. That was
-wrong. Carriers make it possible:
+Carriers can preserve reservation continuity while their leases remain live.
+They do not make ownership transfer atomic. The 2026-10-06 authority review
+found that a sender-holder precheck cannot enforce sender-only handoff;
+see [capability gaps](../MOTE_CAPABILITY_GAPS.md). This sequence remains a
+design, not a shipped or qualified `fray handoff` contract:
 
 1. Check that the sender holds the work claim (5); refuse otherwise. This
-   compensates for Mote's missing holder check.
+   detects an already changed holder, but cannot compensate for Mote's
+   missing atomic expected-holder check.
 2. Post the Fray handoff packet: state, next step, evidence, lanes, and the
    carrier and reservation ids.
 3. `mote handoff WORK --to RECIPIENT` transfers the work claim. The carriers
@@ -403,15 +407,20 @@ wrong. Carriers make it possible:
 5. The recipient may later move the reservations to its own carriers by the
    renewal step in 7.1.
 
-The paths are never unreserved. Each step is checked before it runs, and
+Provided the leases do not expire, the paths remain reserved. Each step is checked before it runs, and the proposed
 `fray handoff --resume` continues from the first incomplete step. Until
 recipients accept, the sender's open carriers keep the paths reserved in the
 sender's name. The handoff packet says so.
 
 #### 7.3 Review and landing (child 1) [D7]
 
-- The Fray verdict is always recorded on the board. It is conversation and
-  evidence, open to any reviewer, and bound to its SHA or manifest.
+- Standalone Fray reviews record conversation evidence bound to a SHA or
+  manifest. They confer no Mote acceptance or landing authority.
+- For a future authoritative Mote candidate-review command, Mote must accept
+  the review before Fray records its corresponding verdict. A rejection or
+  unknown receipt is an error; it must not create a Fray substitute verdict.
+  This follows child 1's acceptance contract and replaces the earlier
+  unconditional-record-first proposal.
 - It is mirrored to Mote as a candidate review only when three conditions all
   hold: the reviewer is a named reviewer or holds an eligible role, the Fray
   verdict's SHA equals the candidate's `commit_oid`, and the reviewer is not
@@ -419,6 +428,12 @@ sender's name. The handoff packet says so.
 - A verdict that is not mirrored says why ("not a named reviewer", "reviewed
   SHA differs from the candidate") and changes nothing in Mote.
 - Landability always comes from `candidate show`, never from Fray verdicts.
+  Actor eligibility also requires explicit membership in the authorization's
+  grantees; `candidate show --actor` does not itself apply that check.
+- A revocation-safe local Git merge needs a Mote fencing/commit primitive.
+  A final reread followed by Git CAS leaves a cross-system race. Mutating
+  `fray land` remains unimplemented rather than weakening its acceptance
+  promise. See [the exact boundary and required tests](../MOTE_CAPABILITY_GAPS.md).
 
 ## Requests to Mote
 
@@ -439,6 +454,9 @@ another project, which the charter reserves for the owner.
    re-reads Mote wherever it matters: `fray land`, the pre-push guard, and
    reconciliation.
 6. Distinct exit codes for usage errors and reducer rejections.
+7. An authorization protocol participating in local Git publication, so an
+   accepted revocation fences the ref update and accepted landing cannot be
+   retrospectively invalidated by late earlier-stamped operations.
 
 ## Acceptance
 

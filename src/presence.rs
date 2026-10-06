@@ -70,6 +70,10 @@ pub fn presented(conn: &Connection, req: &Request) -> Result<Value> {
             "peer presentation needs a bound host session",
         )
     })?;
+    // Exposure belongs to a host session. Once that session ended, its
+    // private peer cursor can never be used again; keep live companion and
+    // terminal sessions independently, rather than accumulating every clear.
+    conn.execute("DELETE FROM peer_seen WHERE EXISTS(SELECT 1 FROM sessions s WHERE s.agent=peer_seen.reader AND s.session=peer_seen.session AND s.ended_ms IS NOT NULL)", [])?;
     let store: String = conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
         r.get(0)
     })?;

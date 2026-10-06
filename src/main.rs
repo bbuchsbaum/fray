@@ -84,6 +84,41 @@ impl Filters {
 }
 #[derive(Subcommand)]
 enum Cmd {
+    /// Make a consistent online SQLite backup to a new file.
+    Backup {
+        destination: PathBuf,
+    },
+    /// Restore a validated backup into a fresh, nonexistent --home.
+    Restore {
+        backup: PathBuf,
+    },
+    /// Preview offline archival compaction of terminal history; opt in with --archive.
+    Prune {
+        #[arg(long)]
+        older_than: Window,
+        /// Execute after archiving to this fresh directory. Requires offline board.
+        #[arg(long, conflicts_with = "dry_run")]
+        archive: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read the whole board without joining, acknowledging, or touching presence.
+    Board {
+        /// Write a self-contained, read-only HTML snapshot to a fresh file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// A bounded read-only snapshot of peers, lanes and open conversations.
+    Peek,
+    /// Export complete conversation histories with stable card and event IDs.
+    Export {
+        #[arg(long, required = true)]
+        markdown: bool,
+        /// Select cards touched in this look-back window; keep their full histories.
+        #[arg(long)]
+        since: Option<Window>,
+        directory: PathBuf,
+    },
     /// Capture or verify explicit working-tree evidence without contacting a daemon.
     Snapshot {
         #[command(subcommand)]
@@ -2710,6 +2745,68 @@ fn run(cli: Cli) -> Result<Option<Value>> {
     let key = cli.key;
     let mut timeout = 10;
     let (op, args) = match cli.command {
+        Cmd::Backup { destination } => {
+            fray::recovery::backup(&home, &destination)?;
+            return Ok(Some(
+                json!({"backup":destination,"source_home":home,"verified":true}),
+            ));
+        }
+        Cmd::Restore { backup } => {
+            fray::recovery::restore(&home, &backup)?;
+            return Ok(Some(
+                json!({"restored_home":home,"backup":backup,"verified":true}),
+            ));
+        }
+        Cmd::Prune {
+            older_than,
+            archive,
+            dry_run: _,
+        } => {
+            let now = now_ms();
+            return Ok(Some(fray::retention::run(
+                &home,
+                now.saturating_sub(older_than.0),
+                archive.as_deref(),
+                now,
+            )?));
+        }
+        Cmd::Board { output } => {
+            let snapshot = fray::archive::board(&home, now_ms())?;
+            if let Some(path) = output {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| Error::invalid("board output must name a UTF-8 file"))?;
+                fray::archive::write_files(
+                    path.parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(Path::new(".")),
+                    &[(
+                        name.to_owned(),
+                        fray::archive::board_html(&snapshot).into_bytes(),
+                    )],
+                )?;
+                return Ok(Some(
+                    json!({"output":path,"cursor":snapshot["cursor"],"read_only":true}),
+                ));
+            }
+            return Ok(Some(snapshot));
+        }
+        Cmd::Peek => return Ok(Some(fray::archive::peek(&home, now_ms())?)),
+        Cmd::Export {
+            markdown: _,
+            since,
+            directory,
+        } => {
+            let files = fray::archive::markdown(
+                &home,
+                since.map(|window| now_ms().saturating_sub(window.0)),
+            )?;
+            fray::archive::write_files(&directory, &files)?;
+            return Ok(Some(
+                json!({"directory":directory,"files":files.iter().map(|(name,_)|name).collect::<Vec<_>>(),"read_only":true}),
+            ));
+        }
         Cmd::Snapshot { command } => {
             return Ok(Some(match command {
                 SnapshotCmd::Create {
@@ -2840,6 +2937,18 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             pending,
             respond_within,
         } => {
+            let mut refs = refs;
+            let to = if let Some(role) = to.strip_prefix("@role:") {
+                let route = fray::routing::resolve(&home, &actor, role)?;
+                let recipient = route["recipient"].as_str().unwrap().to_owned();
+                refs.push(format!("role:{role}"));
+                if let Some(assignment) = route["assignment"].as_str() {
+                    refs.push(format!("mote:{assignment}"));
+                }
+                recipient
+            } else {
+                to
+            };
             let mut a = json!({"to":to,"body":message_body(body,body_file)?,"ask":ask,"priority":priority,"refs":refs});
             if let Some(title) = title {
                 a["title"] = json!(title);
@@ -3928,10 +4037,14 @@ fn hook(
         .ok_or_else(|| Error::invalid("missing hook_event_name"))?;
     if ![
         "SessionStart",
+        "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
         "PostToolUseFailure",
         "Stop",
+        "StopFailure",
+        "SessionEnd",
+        "Interrupt",
     ]
     .contains(&event)
     {
@@ -3946,10 +4059,6 @@ fn hook(
     // The demand-driven runner supplies the bounded packet and owns presence.
     // Hook reinjection would bypass that budget and replay unrelated startup state.
     if std::env::var("FRAY_DRIVE").as_deref() == Ok("1") {
-        server::write_frame(&mut io::stdout().lock(), &json!({}))?;
-        return Ok(());
-    }
-    if event == "Stop" && input["stop_hook_active"] == true {
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
@@ -4013,6 +4122,24 @@ fn hook(
         send(home, &actor, "heartbeat", json!({}), None, 5)?;
         brief
     };
+    // K2: record terminal ownership before deciding whether this hook has
+    // anything to inject. A blocking Stop continues the turn; a normal Stop,
+    // StopFailure, SessionEnd and Codex Interrupt end it.
+    let turn = match event {
+        "UserPromptSubmit" => "begin",
+        "Stop" if input["stop_hook_active"] == true => "active",
+        "Stop" | "StopFailure" | "SessionEnd" | "Interrupt" => "end",
+        _ => "active",
+    };
+    let mut turn_args = json!({"turn":turn});
+    if let Some(path) = input["transcript_path"].as_str() {
+        turn_args["transcript"] = json!(path);
+    }
+    let terminal = send(home, &actor, "terminal_turn", turn_args, None, 5)?;
+    if event == "Stop" && input["stop_hook_active"] == true {
+        server::write_frame(&mut io::stdout().lock(), &json!({}))?;
+        return Ok(());
+    }
     // Pre-tool exposure used to consume the fresh marker before PostToolUse
     // could surface it. Reserve presentation for completed tool boundaries.
     if event == "PreToolUse" {
@@ -4028,9 +4155,15 @@ fn hook(
         args["min_priority"] = json!(1);
         args["unresolved"] = json!(true);
     }
-    let page = send(home, &actor, "inbox", args, None, 5)?;
+    let mut page = send(home, &actor, "inbox", args, None, 5)?;
+    // A packet already being handled by the keepalive belongs to that turn;
+    // do not make the terminal duplicate it.
+    let handling = terminal["handling"].as_array().cloned().unwrap_or_default();
+    if let Some(items) = page["items"].as_array_mut() {
+        items.retain(|item| !handling.iter().any(|id| *id == item["card"]["id"]));
+    }
     let peers = peer_delta(home, &actor);
-    let mut data = json!({"agent":actor,"board_home":home,"attention":page,"idle_readiness":brief["idle_readiness"],"new_peers":peers});
+    let mut data = json!({"agent":actor,"board_home":home,"attention":page,"idle_readiness":brief["idle_readiness"],"new_peers":peers,"keepalive":{"handling":handling,"away":terminal["away"]}});
     // Preserve a bounded hook payload even if several long annotations arrive.
     while serde_json::to_vec(&data)?.len() > 6000 {
         let items = data["attention"]["items"].as_array_mut().unwrap();

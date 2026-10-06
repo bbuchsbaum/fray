@@ -31,7 +31,23 @@ pub fn context(conn: &Connection, id: i64, history: bool) -> Result<Value> {
     for verdict in &mut verdicts {
         verdict["stale"] = json!(verdict["subject_rev"] != result["subject_rev"]);
     }
-    result["latest_verdict"] = verdicts.first().cloned().unwrap_or(Value::Null);
+    // The compact header must describe the peer currently asked to review,
+    // rather than letting an unsolicited verdict replace that peer's result.
+    let card = crate::store::get_card(conn, id)?;
+    result["requested_reviewer"] = json!(card.assignee);
+    result["latest_verdict"] = if let Some(reviewer) = card.assignee.as_deref() {
+        let mut latest: Option<Value> = conn.query_row(
+            "SELECT event_seq,reviewer,subject_rev,version,verdict FROM review_verdicts WHERE card_id=? AND reviewer=? ORDER BY event_seq DESC LIMIT 1",
+            params![id, reviewer],
+            |r| Ok(json!({"event_seq":r.get::<_,i64>(0)?,"reviewer":r.get::<_,String>(1)?,"subject_rev":r.get::<_,i64>(2)?,"version":r.get::<_,String>(3)?,"verdict":r.get::<_,String>(4)?})),
+        ).optional()?;
+        if let Some(verdict) = &mut latest {
+            verdict["stale"] = json!(verdict["subject_rev"] != result["subject_rev"]);
+        }
+        latest.unwrap_or(Value::Null)
+    } else {
+        verdicts.first().cloned().unwrap_or(Value::Null)
+    };
     if history {
         result["verdicts_more"] = json!(verdicts.len() > 20);
         verdicts.truncate(20);
@@ -60,6 +76,12 @@ pub fn prepare_verdict(conn: &Connection, id: i64, actor: &str, args: &Value) ->
         ));
     }
     let card = crate::store::get_card(conn, id)?;
+    if card.terminal() {
+        return Err(Error::new(
+            "closed",
+            "reopen or create a new review before giving a verdict",
+        ));
+    }
     if card.author == actor {
         return Err(Error::new(
             "self_review",

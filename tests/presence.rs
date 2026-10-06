@@ -60,6 +60,67 @@ fn shown(peer: &Value) -> Value {
 }
 
 #[test]
+fn ended_session_peer_cursors_are_pruned_and_live_sessions_are_preserved() {
+    let mut s = Store::memory().unwrap();
+    join(&mut s, "reader", Some("codex:old"), T);
+    join(&mut s, "other", Some("claude:live"), T);
+    join(&mut s, "peer", Some("claude:peer"), T);
+    for (who, session) in [("reader", "codex:old"), ("other", "claude:live")] {
+        let listing = peers(&mut s, who, session, 20, T);
+        present(
+            &mut s,
+            who,
+            session,
+            &listing,
+            json!([shown(&peer(&listing, "peer"))]),
+            T,
+        )
+        .unwrap();
+    }
+    for n in 0..12 {
+        let session = format!("codex:new-{n}");
+        ok(
+            &mut s,
+            "reader",
+            Some(&session),
+            "join",
+            json!({"takeover":true}),
+            T + n + 1,
+        );
+        let listing = peers(&mut s, "reader", &session, 20, T + n + 1);
+        let before = s.highwater().unwrap();
+        present(
+            &mut s,
+            "reader",
+            &session,
+            &listing,
+            json!([shown(&peer(&listing, "peer"))]),
+            T + n + 1,
+        )
+        .unwrap();
+        assert_eq!(s.highwater().unwrap(), before);
+        let count: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM peer_seen WHERE reader='reader'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let other: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM peer_seen WHERE reader='other' AND session='claude:live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(other, 1);
+    }
+}
+
+#[test]
 fn first_session_surfaces_existing_peers_once_and_later_join_once() {
     let mut s = Store::memory().unwrap();
     join(&mut s, "early", Some("early:1"), T);

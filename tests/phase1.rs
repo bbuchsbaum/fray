@@ -226,17 +226,26 @@ fn readiness_warning_with_maximum_identity_fits_the_minimum_brief_budget() {
     let mut s = board();
     let actor = "a".repeat(80);
     call(&mut s, &actor, "join", json!({}));
-    call(
-        &mut s,
-        &actor,
-        "send",
-        json!({"to":"reviewer","ask":true,"body":"Review requested"}),
-    );
+    for _ in 0..3 {
+        call(
+            &mut s,
+            &actor,
+            "send",
+            json!({"to":"reviewer","ask":true,"body":"Review requested"}),
+        );
+        call(
+            &mut s,
+            "reviewer",
+            "send",
+            json!({"to":actor,"ask":true,"body":"Review requested"}),
+        );
+    }
     let brief = call(&mut s, &actor, "brief", json!({"budget":2000}));
     assert!(serde_json::to_vec(&brief).unwrap().len() <= 2000);
     assert!(brief["idle_readiness"]["warning"].is_string());
     assert!(brief["idle_readiness"]["arm_command"].is_string());
-    assert_eq!(brief["idle_readiness"]["open_requests_awaiting_others"], 1);
+    assert_eq!(brief["idle_readiness"]["open_requests_awaiting_others"], 3);
+    assert_eq!(brief["idle_readiness"]["lapse"]["open_asks_to_you"], 3);
     // The hint is `fray arm`, short enough that the readiness details now
     // fit beside it; rows are still trimmed to the budget.
     assert_eq!(
@@ -244,6 +253,7 @@ fn readiness_warning_with_maximum_identity_fits_the_minimum_brief_budget() {
         format!("fray --as {actor} arm")
     );
     assert_eq!(brief["budget_truncated"], true);
+    assert_eq!(brief["idle_readiness"]["details_omitted"], true);
 }
 
 #[test]

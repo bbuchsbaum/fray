@@ -21,6 +21,7 @@ use std::{
 };
 
 pub const REQUEST_LIMIT: usize = 128 * 1024;
+
 pub const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const MAX_CLIENTS: usize = 128;
 struct Limits {
@@ -73,6 +74,7 @@ struct Shared {
     stop: AtomicBool,
     clients: AtomicUsize,
     long_clients: AtomicUsize,
+    metrics_readers: AtomicUsize,
     limits: Limits,
     socket: PathBuf,
 }
@@ -160,6 +162,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         stop: AtomicBool::new(false),
         clients: AtomicUsize::new(0),
         long_clients: AtomicUsize::new(0),
+        metrics_readers: AtomicUsize::new(0),
         limits,
         socket: socket.clone(),
     });
@@ -302,6 +305,43 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
             None
         };
         match req.op.as_str() {
+            "stats" | "friction" => {
+                // Each WAL reader adds SQLite descriptors beyond the stream
+                // admission budget. Keep those within its reserved headroom.
+                if shared
+                    .metrics_readers
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                        (n < 2).then_some(n + 1)
+                    })
+                    .is_err()
+                {
+                    write_frame(
+                        &mut stream,
+                        &failure(Error::new(
+                            "metrics_busy",
+                            "two metrics snapshots are already running; retry later",
+                        )),
+                    )?;
+                    continue;
+                }
+                struct Reader<'a>(&'a AtomicUsize);
+                impl Drop for Reader<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                let reader = Reader(&shared.metrics_readers);
+                let response = match crate::stats::read_snapshot(
+                    &shared.socket.with_file_name("state.db"),
+                    &req,
+                    now_ms(),
+                ) {
+                    Ok(value) => success(value),
+                    Err(error) => failure(error),
+                };
+                drop(reader);
+                write_frame(&mut stream, &response)?;
+            }
             "watch_attention" => {
                 if !reader.buffer().is_empty() {
                     write_frame(
@@ -349,6 +389,17 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                 let response = match keepalive_start(shared, &req) {
                     Ok(v) => success(v),
                     Err(e) => failure(e),
+                };
+                write_frame(&mut stream, &response)?;
+            }
+            "keepalive_status" => {
+                let result = shared.store.lock().map_err(|_| poisoned())?.execute(&req);
+                let response = match result {
+                    Ok(mut value) => {
+                        value["daemon_sandboxed"] = json!(crate::keepalive::sandboxed());
+                        success(value)
+                    }
+                    Err(error) => failure(error),
                 };
                 write_frame(&mut stream, &response)?;
             }
@@ -441,16 +492,17 @@ fn keepalive_start(shared: &Shared, req: &Request) -> Result<Value> {
     let cwd_text = cwd
         .to_str()
         .ok_or_else(|| Error::invalid("cwd must be valid UTF-8"))?;
-    let budget = std::env::var(crate::keepalive::BUDGET_ENV)
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(crate::keepalive::DAILY_TOKENS);
     let log = crate::keepalive::file(home, &req.actor, "log");
     let begun = {
         let mut store = shared.store.lock().map_err(|_| poisoned())?;
-        let begun =
-            store.keepalive_begin(req, cwd_text, &log.to_string_lossy(), budget, now_ms())?;
+        let options = crate::keepalive::start_options(&store.conn, now_ms())?;
+        let begun = store.keepalive_begin(
+            req,
+            cwd_text,
+            &log.to_string_lossy(),
+            options.budget,
+            now_ms(),
+        )?;
         shared.changed.notify_all();
         begun
     };
@@ -879,6 +931,7 @@ fn watch(stream: &mut UnixStream, shared: &Shared, req: &Request) -> Result<()> 
         let store = shared.store.lock().map_err(|_| poisoned())?;
         let head = store.highwater()?;
         let cursor = bounded(&req.args, "after", head, 0, i64::MAX)?;
+        crate::retention::check_cursor(&store.conn, cursor)?;
         if cursor > head {
             return Err(Error::new(
                 "cursor_ahead",
@@ -933,5 +986,60 @@ fn watch(stream: &mut UnixStream, shared: &Shared, req: &Request) -> Result<()> 
             stream,
             &success(json!({"type":"checkpoint","cursor":cursor,"store_id":store_id})),
         )?;
+    }
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+
+    #[test]
+    fn metrics_reply_while_the_publishers_store_mutex_is_held() {
+        let dir = std::env::temp_dir().join(format!("fray-metrics-{}", random_key().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        let store = Store::open(&dir.join("state.db"), false).unwrap();
+        let shared = Arc::new(Shared {
+            store: Mutex::new(store),
+            changed: Condvar::new(),
+            stop: AtomicBool::new(false),
+            clients: AtomicUsize::new(0),
+            long_clients: AtomicUsize::new(0),
+            metrics_readers: AtomicUsize::new(0),
+            limits: Limits {
+                clients: 128,
+                long: 112,
+                descriptors: 512,
+            },
+            socket: dir.join("bus.sock"),
+        });
+        // Ordinary dispatch would block here. Both metrics must finish
+        // before the publisher's guard is released.
+        let guard = shared.store.lock().unwrap();
+        for op in ["stats", "friction"] {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let owner = shared.clone();
+            let thread = thread::spawn(move || connection(server, &owner));
+            write_frame(
+                &mut client,
+                &serde_json::to_value(Request::new(op, "", json!({}))).unwrap(),
+            )
+            .unwrap();
+            let reply = read_frame(
+                &mut BufReader::new(client.try_clone().unwrap()),
+                RESPONSE_LIMIT,
+            )
+            .unwrap()
+            .unwrap();
+            let reply: Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            client.shutdown(Shutdown::Both).unwrap();
+            thread.join().unwrap().unwrap();
+        }
+        drop(guard);
+        drop(shared);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

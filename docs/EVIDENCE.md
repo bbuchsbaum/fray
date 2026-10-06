@@ -37,7 +37,8 @@ capture, use `--paths . --output DIRECTORY_OUTSIDE_REPOSITORY`. Fray rejects
 symlinks in selected source paths, Gitlinks/submodules, sparse or unmerged index
 entries, special files, escaping paths and non-UTF-8 names. Git HEAD must exist.
 Limits are 64 scopes, 16,384 files, 64 MiB per file and 256 MiB total. The command
-uses local Git and `shasum -a 256` and never fetches or uploads content.
+uses local Git and a built-in streaming SHA-256 implementation; it never fetches,
+uploads, or spawns a hashing process for each file.
 
 Capture hashes the copied bytes, then checks source bytes, metadata, deletion
 states and Git inventory again before publishing the completed bundle. A detected

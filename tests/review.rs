@@ -163,6 +163,97 @@ fn review_objection_uses_existing_linked_closure_gate() {
 }
 
 #[test]
+fn an_unsolicited_verdict_does_not_replace_the_requested_reviewers_header() {
+    let (mut s, id) = board();
+    call(&mut s, "bystander", "join", json!({}));
+    verdict(&mut s, &id, 1, 'b', "object");
+    let extra = call(
+        &mut s,
+        "bystander",
+        "annotate",
+        json!({
+            "id":id,"body":"Additional advisory evidence","kind":"evidence",
+            "review_verdict":{"verdict":"approve","at":version('b'),"expect":1}
+        }),
+    );
+    assert_eq!(extra["review"]["requested_reviewer"], "reader");
+    assert_eq!(extra["review"]["latest_verdict"]["reviewer"], "reader");
+    assert_eq!(extra["review"]["latest_verdict"]["verdict"], "object");
+    assert_eq!(extra["review"]["verdicts"][0]["reviewer"], "bystander");
+    let inbox = call(&mut s, "writer", "inbox", json!({}));
+    let item = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["card"]["id"] == id)
+        .unwrap();
+    assert_eq!(
+        item["card"]["review"]["latest_verdict"]["verdict"],
+        "object"
+    );
+    call(
+        &mut s,
+        "writer",
+        "patch",
+        json!({"id":id,"expect":1,"assignee":"bystander"}),
+    );
+    let shown = call(&mut s, "writer", "show", json!({"id":id}));
+    assert_eq!(shown["review"]["requested_reviewer"], "bystander");
+    assert_eq!(shown["review"]["latest_verdict"]["reviewer"], "bystander");
+}
+
+#[test]
+fn terminal_reviews_refuse_both_subject_changes_and_verdicts_atomically() {
+    for status in ["resolved", "superseded", "withdrawn"] {
+        let (mut s, id) = board();
+        call(
+            &mut s,
+            "writer",
+            "patch",
+            json!({"id":id,"expect":1,"status":status}),
+        );
+        let before = call(&mut s, "reader", "show", json!({"id":id,"history":true}));
+        assert_eq!(
+            run(
+                &mut s,
+                "writer",
+                "review_subject",
+                json!({
+                    "id":id,"expect":1,"at":version('c')
+                })
+            )
+            .unwrap_err()
+            .code,
+            "closed"
+        );
+        for (choice, kind) in [
+            ("approve", "evidence"),
+            ("object", "objection"),
+            ("blocked", "question"),
+        ] {
+            assert_eq!(
+                run(
+                    &mut s,
+                    "reader",
+                    "annotate",
+                    json!({
+                        "id":id,"body":"Too late","kind":kind,
+                        "review_verdict":{"verdict":choice,"at":version('b'),"expect":1}
+                    })
+                )
+                .unwrap_err()
+                .code,
+                "closed"
+            );
+            assert_eq!(
+                call(&mut s, "reader", "show", json!({"id":id,"history":true})),
+                before
+            );
+        }
+    }
+}
+
+#[test]
 fn frozen_scope_authority_and_cas_are_enforced_without_freezing_routing() {
     let (mut s, id) = board();
     for field in ["title", "summary", "kind"] {
