@@ -53,9 +53,9 @@ def drain_watch(watcher, state, through):
             continue
         if frame.get("type") != "event": raise RuntimeError("watch returned invalid frame")
         sequence = frame["event"]["seq"]
-        if sequence in state["seen"]: raise RuntimeError("watch delivered duplicate event")
+        if sequence <= state["cursor"]: raise RuntimeError("watch delivered duplicate event")
         if sequence != state["cursor"] + 1: raise RuntimeError("watch skipped event sequence")
-        state["seen"].add(sequence); state["cursor"] = sequence
+        state["cursor"] = sequence
 
 def main():
     parser = argparse.ArgumentParser()
@@ -65,12 +65,14 @@ def main():
     args = parser.parse_args()
     if args.agents < 30 or args.warmup < 0 or args.duration < 1:
         parser.error("agents must be >=30, warmup >=0, and duration >=1")
+    if any(getattr(args, key) <= 0 for key in ("fd_limit", "rss_mib_limit", "wal_mib_limit", "p95_publish_ms_limit")):
+        parser.error("qualification limits must be positive")
     args.out.mkdir(parents=True, exist_ok=True)
     config = {key: str(value) if isinstance(value, pathlib.Path) else value for key, value in vars(args).items()}
     binary = pathlib.Path(args.binary).resolve()
     source_sha = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True)
     report = {"defaults": DEFAULTS, "config": config, "success": False, "qualified": False, "timeouts": 0,
-              "duplicates": 0, "sqlite_busy": 0, "samples": 0, "failure": None}
+              "duplicates": 0, "sqlite_busy": 0, "delivery_failures": 0, "sent": 0, "samples": 0, "failure": None}
     samples_path = args.out / "samples.jsonl"
     home = tempfile.mkdtemp(prefix="fray-soak-", dir="/tmp")
     daemon = None; peers = []; watchers = []
@@ -92,7 +94,7 @@ def main():
         for watcher, name in zip(watchers, names):
             ready = watcher.call("watch", name, {"after": 0})
             if ready.get("type") != "ready": raise RuntimeError("watch did not become ready")
-            watch_state.append({"cursor": ready["cursor"], "seen": set()})
+            watch_state.append({"cursor": ready["cursor"]})
         seen = set(); timings = []; started = time.monotonic(); next_sample = started
         with samples_path.open("w") as raw:
             while time.monotonic() - started < args.warmup + args.duration:
@@ -103,7 +105,7 @@ def main():
                 elapsed = (time.perf_counter() - begin) * 1000
                 card = sent["card"]["id"]
                 if card in seen: report["duplicates"] += 1
-                seen.add(card)
+                seen.add(card); report["sent"] += 1
                 for watcher, state in zip(watchers, watch_state): drain_watch(watcher, state, sent["event_seq"])
                 inbox = peers[(index + 1) % args.agents].call("inbox", receiver, {"selection": "all"})
                 receipts = [item["receipt"] for item in inbox["items"] if item["card"]["id"] == card and item["receipt"]["through_seq"] == sent["event_seq"]]
@@ -132,6 +134,8 @@ def main():
     except socket.timeout as error:
         report["timeouts"] += 1; report["failure"] = str(error)
     except Exception as error:
+        if "DUPLICATE" in str(error).upper(): report["duplicates"] += 1
+        if "DELIVERY" in str(error).upper() or "SKIPPED EVENT" in str(error).upper(): report["delivery_failures"] += 1
         if "SQLITE_BUSY" in str(error).upper() or "DATABASE IS LOCKED" in str(error).upper(): report["sqlite_busy"] += 1
         report["failure"] = str(error)
     finally:

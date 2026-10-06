@@ -225,6 +225,18 @@ class Keepalive(unittest.TestCase):
     def status(self, actor):
         return self.fray("keepalive", "--status", actor=actor)
 
+    def hook(self, actor, session, event, **extra):
+        payload = {"hook_event_name": event, "session_id": session.split(":", 1)[1]}
+        payload.update(extra)
+        result = subprocess.run(
+            [str(BINARY), "--home", self.home, "--as", actor, "--session", session,
+             "hook", "--host", "claude"],
+            env=self.env, cwd=self.repo, input=json.dumps(payload), text=True,
+            capture_output=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return json.loads(result.stdout or "{}")
+
     def await_status(self, actor, check, what, timeout=10):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -283,6 +295,40 @@ class Keepalive(unittest.TestCase):
     def pending(self, actor):
         return self.rpc("inbox", actor)["data"]["total"]
 
+    def test_hook_busy_fences_an_idle_keepalive_until_end_and_stop_states_are_durable(self):
+        session = "claude:hook-race"
+        self.start("erin", session)
+        self.hook("erin", session, "UserPromptSubmit")
+        self.assertTrue(self.status("erin")["terminal"]["busy"])
+        card = self.ask("erin", "Must wait for the terminal")
+        time.sleep(0.25)
+        self.assertEqual(self.calls(), [], "a busy terminal must fence host launch")
+        blocked = self.hook("erin", session, "Stop")
+        self.assertEqual(blocked["decision"], "block")
+        self.assertTrue(self.status("erin")["terminal"]["busy"], "block keeps terminal busy")
+        ended = self.hook("erin", session, "Stop", stop_hook_active=True)
+        self.assertEqual(ended, {})
+        self.assertFalse(self.status("erin")["terminal"]["busy"])
+        self.await_reply(card, "erin")
+
+    def test_hook_prompt_surfaces_away_actions_before_reporting_them(self):
+        session = "claude:hook-away"
+        self.start("frank", session)
+        first = self.ask("frank", "First completed background action")
+        self.await_reply(first, "frank")
+        second = self.ask("frank", "Second completed background action")
+        self.await_reply(second, "frank")
+        prompt = self.hook("frank", session, "UserPromptSubmit")
+        text = prompt["hookSpecificOutput"]["additionalContext"]
+        self.assertIn('"away"', text)
+        self.assertIn(str(first), text)
+        self.assertIn(str(second), text)
+        # A following prompt has no duplicate away report: the hook recorded
+        # exactly the IDs included in the successful first frame.
+        self.hook("frank", session, "Stop", stop_hook_active=True)
+        again = self.hook("frank", session, "UserPromptSubmit")
+        self.assertNotIn('"away":{"actions":[', json.dumps(again))
+
     def test_claude_forks_then_resumes_answers_as_the_agent_and_survives_clear(self):
         started = self.start("alice", "claude:c0ffee-1")
         # The conversation is the bound session's; the command is fixed.
@@ -320,7 +366,8 @@ class Keepalive(unittest.TestCase):
             "recorded its fork",
         )
         self.assertEqual(status["usage"]["input_tokens"], 10)
-        # The terminal's /clear rebinds the interactive side only.
+        # /clear rebases the next background turn on the new terminal
+        # conversation; it must not resume the old fork.
         cleared = self.rpc(
             "join",
             "alice",
@@ -334,8 +381,9 @@ class Keepalive(unittest.TestCase):
         second = self.ask("alice", "And the lexer?")
         self.await_reply(second, "alice")
         later = self.calls()[1]
-        self.assertEqual(later["argv"][:5], ["-p", "--model", "synthetic-model", "--resume", fork])
-        self.assertNotIn("--fork-session", later["argv"])
+        next_fork = later["argv"][later["argv"].index("--session-id") + 1]
+        self.assertEqual(later["argv"][:8], ["-p", "--model", "synthetic-model", "--resume", "c0ffee-2", "--fork-session", "--session-id", next_fork])
+        self.assertNotEqual(next_fork, fork)
         roster = next(
             a for a in self.rpc("agents")["data"]["items"] if a["name"] == "alice"
         )
@@ -443,6 +491,19 @@ class Keepalive(unittest.TestCase):
         )
         self.assertLess(time.monotonic() - asked, 3)
         self.assertEqual(len(self.calls()), 2)
+
+    def test_codex_first_fork_refreshes_a_late_source_transcript_total(self):
+        self.start("gina", "codex:late-total")
+        transcript = self.root / "late-source.jsonl"
+        transcript.write_text(json.dumps({"type":"turn.completed","usage":{"input_tokens":5000}}) + "\n")
+        # The terminal flushes this source total while the keepalive is idle;
+        # no new prompt generation is required for the first fork baseline.
+        self.rpc("terminal_turn", "gina", {"turn":"active", "transcript":str(transcript)}, session="codex:late-total")
+        (self.stub / "parent").write_text("5000")
+        card = self.ask("gina", "Charge only the new fork work")
+        self.await_reply(card, "gina")
+        status = self.status("gina")
+        self.assertEqual(status["usage"]["input_tokens"], 10)
 
     def test_stop_lets_a_running_turn_finish_then_exits(self):
         self.mode("slow:2")

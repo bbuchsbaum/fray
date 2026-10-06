@@ -2,7 +2,79 @@
 use crate::{model::*, store::Store};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::Write,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    path::{Component, Path, PathBuf},
+};
+
+/// Inspect original path components before resolving aliases away. macOS's
+/// fixed /tmp, /var and /etc aliases are normalized to their system targets.
+pub(crate) fn safe_path(path: &Path, allow_missing: bool) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut checked = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::RootDir => checked.push(Path::new("/")),
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                checked.pop();
+                continue;
+            }
+            Component::Normal(name) => checked.push(name),
+            _ => return Err(Error::invalid("unsupported output path")),
+        }
+        match fs::symlink_metadata(&checked) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let alias = if cfg!(target_os = "macos") {
+                    match checked.to_str() {
+                        Some("/tmp") => Some("/private/tmp"),
+                        Some("/var") => Some("/private/var"),
+                        Some("/etc") => Some("/private/etc"),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(target) = alias {
+                    let link = fs::read_link(&checked)?;
+                    let link = if link.is_absolute() {
+                        link
+                    } else {
+                        checked.parent().unwrap().join(link)
+                    };
+                    if link != Path::new(target)
+                        || fs::symlink_metadata(target)?.file_type().is_symlink()
+                    {
+                        return Err(Error::invalid("system path alias changed"));
+                    }
+                    checked = PathBuf::from(target);
+                } else {
+                    return Err(Error::invalid(format!(
+                        "path traverses a symlink: {}",
+                        checked.display()
+                    )));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(checked)
+}
+
+/// Persist this directory's published names. Creators also sync the parents
+/// whose entries name newly created directories.
+pub(crate) fn sync_directory(directory: &Path) -> Result<()> {
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
 
 fn reader(home: &Path) -> Result<Store> {
     let conn =
@@ -189,6 +261,8 @@ pub fn markdown(home: &Path, since: Option<i64>) -> Result<Vec<(String, Vec<u8>)
 
 /// Never replace unrelated or changed exports, and never follow output symlinks.
 pub fn write_files(directory: &Path, files: &[(String, Vec<u8>)]) -> Result<()> {
+    let checked = safe_path(directory, true)?;
+    let directory = checked.as_path();
     for (name, _) in files {
         let mut components = Path::new(name).components();
         if !matches!(components.next(), Some(std::path::Component::Normal(_)))
@@ -202,7 +276,16 @@ pub fn write_files(directory: &Path, files: &[(String, Vec<u8>)]) -> Result<()> 
     if fs::symlink_metadata(directory).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(Error::invalid("export directory must not be a symlink"));
     }
-    fs::create_dir_all(directory)?;
+    let mut existing_anchor = directory.to_path_buf();
+    while !existing_anchor.exists() {
+        if !existing_anchor.pop() {
+            return Err(Error::invalid("export has no existing parent"));
+        }
+    }
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)?;
     // Check every destination before publishing any file.
     for (name, bytes) in files {
         let path = directory.join(name);
@@ -221,6 +304,7 @@ pub fn write_files(directory: &Path, files: &[(String, Vec<u8>)]) -> Result<()> 
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&path)
         {
             Ok(mut file) => {
@@ -238,6 +322,12 @@ pub fn write_files(directory: &Path, files: &[(String, Vec<u8>)]) -> Result<()> 
                 }
             }
             Err(error) => return Err(error.into()),
+        }
+    }
+    for ancestor in directory.ancestors() {
+        sync_directory(ancestor)?;
+        if ancestor == existing_anchor {
+            break;
         }
     }
     Ok(())

@@ -163,3 +163,29 @@ fn refuses_existing_outputs_and_cleans_failed_restore() {
     );
     assert!(!fresh.exists());
 }
+
+#[test]
+fn bare_backup_filename_works_and_intermediate_symlinks_are_refused() {
+    let temp = Temp::new();
+    let home = temp.0.join("source");
+    fs::create_dir(&home).unwrap();
+    drop(Store::open(&home.join("state.db"), false).unwrap());
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fray"))
+        .current_dir(&temp.0)
+        .args(["--home", home.to_str().unwrap(), "backup", "bare.sqlite"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let fresh = temp.0.join("restored-bare");
+    recovery::restore(&fresh, &temp.0.join("bare.sqlite")).unwrap();
+    let alias = temp.0.join("alias");
+    std::os::unix::fs::symlink(&temp.0, &alias).unwrap();
+    assert!(recovery::backup(&home, &alias.join("through.sqlite")).is_err());
+    assert!(!temp.0.join("through.sqlite").exists());
+    assert!(recovery::restore(&alias.join("through-home"), &temp.0.join("bare.sqlite")).is_err());
+    assert!(!temp.0.join("through-home").exists());
+}

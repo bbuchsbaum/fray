@@ -61,12 +61,12 @@ pub fn choose(role: &str, policy: Option<&Value>, roster: &Value, sender: &str) 
 pub fn resolve(home: &Path, sender: &str, role: &str) -> Result<Value> {
     text(role, "role", 80, false)?;
     let cwd = std::env::current_dir()?;
+    let bound = client::rpc(home, &Request::new("mote_binding", sender, json!({})), 10)?;
     let policy = if let Some(path) = mote::locate(home, &cwd)? {
         let store = mote::Store {
             store_id: mote::store_id(&path)?,
             path,
         };
-        let bound = client::rpc(home, &Request::new("mote_binding", sender, json!({})), 10)?;
         if !bound["binding"].is_null() && bound["binding"]["store_id"] != store.store_id {
             return Err(Error::new(
                 "mote_store_mismatch",
@@ -88,6 +88,9 @@ pub fn resolve(home: &Path, sender: &str, role: &str) -> Result<Value> {
             }
         }
     } else {
+        if !bound["binding"].is_null() {
+            return Err(Error::new("role_unavailable", "this board is bound to Mote but its store could not be resolved here; run from the paired repository or set MOTE_STORE. No message was queued"));
+        }
         None
     };
     let roster = client::rpc(

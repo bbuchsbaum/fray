@@ -414,3 +414,33 @@ fn compacted_cursors_fail_over_the_daemon_wire_but_fresh_reads_and_thread_marker
         "{thread_text}"
     );
 }
+
+#[test]
+fn intermediate_archive_symlink_refuses_before_output_or_compaction() {
+    let mut f = Fixture::new();
+    let id = f.close_post("Keep full body", "original body");
+    let before = f
+        .store
+        .conn
+        .query_row(
+            "SELECT payload FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap();
+    let alias = f.home.join("alias");
+    std::os::unix::fs::symlink(&f.home, &alias).unwrap();
+    assert!(retention::run(&f.home, NOW - 1_000, Some(&alias.join("archive")), NOW).is_err());
+    assert!(!f.home.join("archive").exists());
+    assert_eq!(
+        f.store
+            .conn
+            .query_row(
+                "SELECT payload FROM events WHERE card_id=? ORDER BY seq LIMIT 1",
+                [id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        before
+    );
+}

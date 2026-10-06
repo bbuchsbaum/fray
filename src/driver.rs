@@ -1149,6 +1149,14 @@ impl Run<'_> {
                 }
             }
             let cursor = page["cursor"].as_i64().unwrap_or(i64::MAX);
+            // A wait may have returned because of this packet just as the
+            // terminal began a prompt or changed conversation. Refresh its
+            // generation before even constructing a background packet.
+            if let Some(keep) = &self.keep {
+                if !self.terminal_ready(keep)? {
+                    continue;
+                }
+            }
             let (prompt, receipts, pointers) = self.packet(page, bootstrap)?;
             let mut preempted = false;
             if let Some(keep) = &self.keep {
@@ -1163,6 +1171,32 @@ impl Run<'_> {
                 }
                 if whole.is_empty() {
                     continue;
+                }
+                // Claim and publish the packet under the store transaction
+                // that checks terminal busy/generation. A concurrent prompt
+                // therefore wins before spawn, or sees these receipts as
+                // handled by the background turn.
+                if !self.terminal_ready(keep)? {
+                    continue;
+                }
+                self.detail.borrow_mut()["presented"] = json!(whole
+                    .iter()
+                    .map(|r| json!({"id":r["id"],"through_seq":r["through_seq"]}))
+                    .collect::<Vec<_>>());
+                let (companion, prompt_generation) = keep
+                    .fork_prompt
+                    .borrow()
+                    .as_ref()
+                    .map(|(companion, prompts)| (companion.clone(), *prompts))
+                    .unwrap_or_default();
+                match self.call(
+                    "keepalive_claim",
+                    json!({"run_id":self.id,"detail":self.detail.borrow().clone(),"companion":companion,"prompt_generation":prompt_generation}),
+                    10,
+                ) {
+                    Ok(_) => {}
+                    Err(error) if matches!(error.code.as_str(), "terminal_busy" | "terminal_changed") => continue,
+                    Err(error) => return Err(error),
                 }
                 turn += 1;
                 self.detail.borrow_mut()["turn"] = json!(turn);
@@ -1297,6 +1331,12 @@ impl Run<'_> {
         }
         *keep.base.borrow_mut() = base.to_owned();
         if keep.fork.borrow().is_none() {
+            // The host can flush its source transcript while this idle
+            // keepalive waits. Until a fork exists, each readiness boundary
+            // must use that latest cumulative total as the first-turn base.
+            if let Some(total) = codex_parent_total(status["terminal"]["transcript"].as_str()) {
+                *keep.parent_total.borrow_mut() = Some(total);
+            }
             *keep.fork_prompt.borrow_mut() = Some((companion.to_owned(), prompts));
         }
         Ok(true)

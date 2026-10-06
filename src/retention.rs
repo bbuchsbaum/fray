@@ -110,6 +110,31 @@ fn references(text: &str, id: i64) -> bool {
 /// transaction then fences any direct database writer through archive/commit.
 /// Dry runs open the database read-only and create no output or lock file.
 pub fn run(home: &Path, before: i64, destination: Option<&Path>, now: i64) -> Result<Value> {
+    run_with_publication(
+        home,
+        before,
+        destination,
+        now,
+        |home, destination, files| {
+            archive::write_files(destination, files)?;
+            recovery::backup(home, &destination.join("state-before.sqlite"))
+        },
+    )
+}
+
+fn run_with_publication(
+    home: &Path,
+    before: i64,
+    destination: Option<&Path>,
+    now: i64,
+    publish: impl FnOnce(&Path, &Path, &[(String, Vec<u8>)]) -> Result<()>,
+) -> Result<Value> {
+    let checked_home = archive::safe_path(home, false)?;
+    let home = checked_home.as_path();
+    let checked_destination = destination
+        .map(|path| archive::safe_path(path, true))
+        .transpose()?;
+    let destination = checked_destination.as_deref();
     if destination.is_none() {
         let conn =
             Connection::open_with_flags(home.join("state.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -155,8 +180,7 @@ pub fn run(home: &Path, before: i64, destination: Option<&Path>, now: i64) -> Re
         ));
     }
     let files = archive::markdown(home, None)?;
-    archive::write_files(destination, &files)?;
-    recovery::backup(home, &destination.join("state-before.sqlite"))?;
+    publish(home, destination, &files)?;
     for (name, bytes) in &files {
         if fs::read(destination.join(name))? != *bytes {
             return Err(Error::new(
@@ -261,4 +285,84 @@ pub fn check_cursor(conn: &Connection, after: i64) -> Result<()> {
         return Err(Error::new("cursor_compacted",format!("history through event {floor} was archived; use a fresh snapshot or start watch at the current cursor")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::store::Store;
+
+    #[test]
+    fn publication_failure_cannot_commit_compaction_or_its_cursor_and_audit() {
+        let home = std::env::temp_dir().join(format!("fray-prune-sync-{}", random_key().unwrap()));
+        fs::create_dir(&home).unwrap();
+        let mut store = Store::open(&home.join("state.db"), false).unwrap();
+        store
+            .execute_at(&Request::new("join", "writer", json!({})), 10)
+            .unwrap();
+        let post = store
+            .execute_at(
+                &Request::new(
+                    "post",
+                    "writer",
+                    json!({"kind":"note","topic":"*","title":"History","summary":"preserve me"}),
+                ),
+                10,
+            )
+            .unwrap();
+        store
+            .execute_at(
+                &Request::new(
+                    "patch",
+                    "writer",
+                    json!({"id":post["card"]["id"],"expect":1,"status":"resolved"}),
+                ),
+                20,
+            )
+            .unwrap();
+        let payloads = || {
+            store
+                .conn
+                .prepare("SELECT payload FROM events ORDER BY seq")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = payloads();
+        let error = run_with_publication(
+            &home,
+            100,
+            Some(&home.join("archive")),
+            200,
+            |source, dir, files| {
+                archive::write_files(dir, files)?;
+                recovery::backup(source, &dir.join("state-before.sqlite"))?;
+                // Failure after visible publication models a directory-sync error:
+                // readback alone cannot authorize destructive commit.
+                Err(Error::new(
+                    "injected_sync_failure",
+                    "publication was not confirmed durable",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "injected_sync_failure");
+        assert_eq!(payloads(), before);
+        assert_eq!(cursor_floor(&store.conn).unwrap(), 0);
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name='retention_events'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(store);
+        fs::remove_dir_all(home).unwrap();
+    }
 }

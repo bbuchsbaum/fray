@@ -4127,8 +4127,11 @@ fn hook(
     // StopFailure, SessionEnd and Codex Interrupt end it.
     let turn = match event {
         "UserPromptSubmit" => "begin",
-        "Stop" if input["stop_hook_active"] == true => "active",
-        "Stop" | "StopFailure" | "SessionEnd" | "Interrupt" => "end",
+        // A normal Stop can become a decision:block below. Keep terminal
+        // ownership provisionally until that decision is known.
+        "Stop" if input["stop_hook_active"] == true => "end",
+        "Stop" => "active",
+        "StopFailure" | "SessionEnd" | "Interrupt" => "end",
         _ => "active",
     };
     let mut turn_args = json!({"turn":turn});
@@ -4187,11 +4190,30 @@ fn hook(
     let peer_news = data["new_peers"]["peers"]
         .as_array()
         .is_some_and(|p| !p.is_empty());
+    // A completed background action, or a packet still owned by that action,
+    // is useful terminal context even when no fresh inbox item was selected.
+    let keepalive_context = data["keepalive"]["away"]["actions"]
+        .as_array()
+        .is_some_and(|actions| !actions.is_empty())
+        || data["keepalive"]["handling"]
+            .as_array()
+            .is_some_and(|handling| !handling.is_empty());
     if items.is_empty()
         && event != "SessionStart"
         && !(event == "Stop" && warning)
         && (event == "Stop" || !peer_news)
+        && !keepalive_context
     {
+        if event == "Stop" {
+            send(
+                home,
+                &actor,
+                "terminal_turn",
+                json!({"turn":"end"}),
+                None,
+                5,
+            )?;
+        }
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
     }
@@ -4202,6 +4224,28 @@ fn hook(
         json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":context}})
     };
     server::write_frame(&mut io::stdout().lock(), &result)?;
+    // `away` is a reservation until its context reached the host. Mark only
+    // after the successful hook frame; an empty hook leaves it for the next
+    // prompt boundary.
+    if terminal["away"]["actions"]
+        .as_array()
+        .is_some_and(|actions| !actions.is_empty())
+    {
+        let reported: Vec<Value> = terminal["away"]["actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|action| action["seq"].clone())
+            .collect();
+        send(
+            home,
+            &actor,
+            "terminal_turn",
+            json!({"turn":"active","report_away":reported}),
+            None,
+            5,
+        )?;
+    }
     if let Some(peers) = peers.as_ref() {
         mark_peers(home, &actor, peers);
     }

@@ -4,6 +4,12 @@
 
 Use `fray prune --older-than WINDOW --archive DIRECTORY` only with the board offline. The command refuses the daemon lock, writes a complete Markdown archive and verified `state-before.sqlite`, then replaces selected event payloads with metric projections and an archive path. It retains event IDs, timestamps, card-head fields required by metrics, and separate retention audit records. The archive database can be restored with `fray restore` into a fresh home.
 
+Publication syncs file contents, directory entries, and parents of newly created
+archive directories before compaction can commit. A publication error rolls back
+history, the cursor floor and audit. Intermediate symlinks are refused; macOS's
+fixed `/tmp`, `/var` and `/etc` system aliases are normalized. These are local
+filesystem checks, not a qualification of recovery from physical power loss.
+
 Compaction removes full event text from history search. It advances a durable cursor floor: watch, raw event, and inbox cursors before that floor fail explicitly and require a fresh snapshot. Statistics remain derived from the retained event projections; the archive holds conversation bodies.
 
 No daemon or shared board is pruned by this command. Archive destinations must be fresh directories.

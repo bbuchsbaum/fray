@@ -10,7 +10,7 @@ trial is part of this sweep.
 
 - Snapshot capture hashes while copying, using streaming safe Rust SHA-256
   checked against FIPS vectors and `shasum`, including block/padding/chunk
-  boundaries. Every staging file is still durably flushed before publication,
+  boundaries. Every copied payload file is still flushed before publication,
   with four bounded flush workers. A 500-file create-and-verify measured
   595.958208 ms; all 502 digests agreed with `shasum`. This is one local
   specimen, not a cross-tool benchmark.
@@ -44,7 +44,7 @@ trial is part of this sweep.
 - Keepalive K2 integrates terminal busy hooks, re-fork on terminal progression,
   while-away context, first-fork token baseline, session-scoped waits, pinned
   Team model/budget, and read-only doctor recovery reporting. Synthetic host
-  integration passed 8/8; real host and sandbox qualification remains open.
+  integration passed 11/11; real host and sandbox qualification remains open.
 
 The core still has five direct dependencies and no unsafe code. The existing
 `rusqlite` dependency gains its online-backup feature; no new dependency is added.
@@ -64,8 +64,15 @@ unsupported overload result or relax production timeouts.
 
 Actual owned-daemon SIGKILL/restart verifies pending delivery survives, a stale
 receipt cannot consume a newer update, a retried request key creates no duplicate
-event, and database integrity/store identity persist. It does not prove every
-possible crash instruction boundary or live-host listener/controller recovery.
+event, and database integrity/store identity persist. Bounded in-flight daemon
+kill races and a client send-completion handshake verify atomic retry outcomes;
+reconnected wait/watch observe later updates. This does not prove every SQLite
+instruction boundary, power-loss recovery, or live-host controller recovery.
+
+Archive publication syncs file contents and directory entries before compaction
+commit; an injected publication failure leaves history, cursor floor and audit
+unchanged. Snapshot payload flushes do not establish whole-bundle power-loss
+durability: its manifest and publication directory were not qualified.
 
 The soak gate is 30 agents and four fully drained watches, 60 seconds warmup,
 then 7,200 seconds measured mixed send/inbox/ACK/wait/watch. Bounds declared

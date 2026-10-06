@@ -24,27 +24,6 @@ fn must_be_real_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn reject_symlink_ancestors(path: &Path, label: &str) -> Result<()> {
-    let resolved = path
-        .canonicalize()
-        .map_err(|e| recovery_error(format!("cannot resolve {label}: {e}")))?;
-    for ancestor in resolved.ancestors() {
-        let metadata = fs::symlink_metadata(ancestor).map_err(|e| {
-            recovery_error(format!(
-                "cannot inspect {label} ancestor {}: {e}",
-                ancestor.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(recovery_error(format!(
-                "{label} resolves through symlink: {}",
-                ancestor.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn must_be_regular_file(path: &Path, label: &str) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| recovery_error(format!("{label} does not exist: {}", path.display())))?;
@@ -156,9 +135,11 @@ fn copy_database(source: &Connection, output: &Path) -> Result<()> {
 }
 
 fn publish_new(temporary: &Path, destination: &Path) -> Result<()> {
+    fs::File::open(temporary)?.sync_all()?;
     match fs::hard_link(temporary, destination) {
         Ok(()) => {
             fs::remove_file(temporary)?;
+            crate::archive::sync_directory(destination.parent().unwrap())?;
             Ok(())
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(recovery_error(format!(
@@ -172,17 +153,20 @@ fn publish_new(temporary: &Path, destination: &Path) -> Result<()> {
 /// Create a self-contained, immutable-by-convention copy of `home/state.db`.
 /// The destination must be a new filename beneath an existing real directory.
 pub fn backup(home: &Path, destination: &Path) -> Result<()> {
-    reject_symlink_ancestors(home, "source home")?;
+    let checked_home = crate::archive::safe_path(home, false)?;
+    let home = checked_home.as_path();
+    let checked_output = crate::archive::safe_path(destination, true)?;
+    let destination = checked_output.as_path();
     must_be_real_directory(home, "source home")?;
     let source_path = home.join(STATE_DB);
     must_be_regular_file(&source_path, "source state database")?;
-    reject_symlink_ancestors(&source_path, "source state database")?;
+    crate::archive::safe_path(&source_path, false)?;
 
     let parent = destination
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| recovery_error("backup output needs an existing parent directory"))?;
-    reject_symlink_ancestors(parent, "backup output")?;
+
     must_be_real_directory(parent, "backup output parent")?;
     require_absent(destination)?;
 
@@ -206,6 +190,10 @@ pub fn backup(home: &Path, destination: &Path) -> Result<()> {
 
 /// Restore `backup` into a strictly fresh, previously unused home directory.
 pub fn restore(home: &Path, backup: &Path) -> Result<()> {
+    let checked_home = crate::archive::safe_path(home, true)?;
+    let home = checked_home.as_path();
+    let checked_backup = crate::archive::safe_path(backup, false)?;
+    let backup = checked_backup.as_path();
     if home.exists() {
         return Err(recovery_error(format!(
             "restore home must not already exist: {}",
@@ -216,9 +204,9 @@ pub fn restore(home: &Path, backup: &Path) -> Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| recovery_error("restore home needs an existing parent directory"))?;
-    reject_symlink_ancestors(parent, "restore home")?;
+
     must_be_real_directory(parent, "restore home parent")?;
-    reject_symlink_ancestors(backup, "backup")?;
+
     must_be_regular_file(backup, "backup")?;
     let source = open_read_only(backup)?;
     let original = validate(&source)?;
@@ -236,7 +224,8 @@ pub fn restore(home: &Path, backup: &Path) -> Result<()> {
             ));
         }
         drop(copied);
-        publish_new(&temporary, &output)
+        publish_new(&temporary, &output)?;
+        crate::archive::sync_directory(parent)
     })();
     if outcome.is_err() {
         let _ = fs::remove_dir_all(home);

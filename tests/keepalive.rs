@@ -620,3 +620,85 @@ fn a_busy_terminal_defers_its_keepalive_until_a_nonblocking_end() {
     );
     assert_eq!(status(&mut s, "alice", NOW + 6)["state"], "keepalive");
 }
+
+#[test]
+fn away_actions_are_reserved_until_the_hook_reports_them_after_output() {
+    let mut s = board();
+    begin(&mut s, "alice", Some("claude:c1"), NOW + 1).unwrap();
+    s.conn
+        .execute(
+            "INSERT INTO keepalive_actions(event_seq,agent,card_id,kind,follow_up) VALUES(999,'alice',42,'answer',NULL)",
+            [],
+        )
+        .unwrap();
+    let prompt = ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"begin"}),
+        NOW + 2,
+    );
+    assert_eq!(prompt["away"]["actions"][0]["card"], 42);
+    assert!(!s
+        .conn
+        .query_row(
+            "SELECT reported FROM keepalive_actions WHERE event_seq=999",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"active","report_away":[999]}),
+        NOW + 3,
+    );
+    assert!(s
+        .conn
+        .query_row(
+            "SELECT reported FROM keepalive_actions WHERE event_seq=999",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+}
+
+#[test]
+fn terminal_begin_wins_the_atomic_keepalive_claim_before_any_child_can_start() {
+    let mut s = board();
+    begin(&mut s, "alice", Some("claude:c1"), NOW + 1).unwrap();
+    drive_begins(&mut s, NOW + 2);
+    ok(
+        &mut s,
+        "alice",
+        Some("claude:c1"),
+        "terminal_turn",
+        json!({"turn":"begin"}),
+        NOW + 3,
+    );
+    assert_eq!(
+        run(
+            &mut s,
+            "alice",
+            Some("keepalive:c1"),
+            "keepalive_claim",
+            json!({"run_id":"r1","companion":"claude:c1","prompt_generation":2,"detail":{"keepalive":{"session":"keepalive:c1"},"presented":[{"id":7,"through_seq":9}]}}),
+            NOW + 4,
+        )
+        .unwrap_err(),
+        "terminal_busy"
+    );
+    assert_eq!(
+        s.conn
+            .query_row(
+                "SELECT state FROM controllers WHERE agent='alice'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "waiting"
+    );
+}

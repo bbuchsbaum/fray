@@ -246,13 +246,20 @@ fn interrupted_daemon_and_client_requests_reconcile_as_one_complete_mutation() {
 
     let key = "client-race";
     let title = "client-race-card";
-    let child = Command::new("python3")
-        .args(["-c", "import json,socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]+'/bus.sock'); s.sendall((json.dumps({'op':'send','actor':'alice','key':sys.argv[2],'args':{'to':'bob','title':'client-race-card','body':'y'*7000}})+'\\n').encode()); time.sleep(30)", daemon.home.to_str().unwrap(), key])
-        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    thread::sleep(Duration::from_millis(2));
-    let mut child = child;
+    let mut child = Command::new("python3")
+        .args(["-c", r#"import json,socket,sys,time; s=socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1]+'/bus.sock'); s.sendall((json.dumps({'op':'send','actor':'alice','key':sys.argv[2],'args':{'to':'bob','title':'client-race-card','body':'y'*7000}})+'\n').encode()); print('sent',flush=True); time.sleep(30)"#, daemon.home.to_str().unwrap(), key])
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut sent = String::new();
+    let handshake = BufReader::new(child.stdout.take().unwrap()).read_line(&mut sent);
+    // Establish that the complete framed request reached the socket before
+    // killing the client, without waiting for a publication response.
+    let published = handshake.is_ok() && sent.trim() == "sent";
     child.kill().unwrap();
     child.wait().unwrap();
+    assert!(
+        published,
+        "client failed to send its request before SIGKILL"
+    );
     alice.call(
         "send",
         "alice",

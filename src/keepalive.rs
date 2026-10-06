@@ -586,6 +586,71 @@ pub(crate) fn usage(conn: &Connection, req: &Request, now: i64) -> Result<Value>
     Ok(status(conn, &req.actor, now)?["usage"].clone())
 }
 
+/// Atomically fence a background turn against a terminal prompt. The claimed
+/// receipts are durable before the driver forks a host process, so a prompt
+/// that wins the race sees them as already owned by the keepalive.
+pub(crate) fn claim(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    check_fields(
+        &req.args,
+        &["run_id", "detail", "companion", "prompt_generation"],
+    )?;
+    let session = req
+        .session
+        .as_deref()
+        .filter(|session| is_session(Some(session)))
+        .ok_or_else(|| {
+            Error::new(
+                "keepalive_session",
+                "keepalive claim requires its own session",
+            )
+        })?;
+    let agent = req.actor.as_str();
+    let companion: String = conn
+        .query_row(
+            "SELECT companion FROM keepalives WHERE agent=? AND session=? AND stop_requested=0",
+            params![agent, session],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| Error::new("keepalive_stopped", "keepalive no longer runs"))?;
+    if req.args["companion"].as_str() != Some(companion.as_str()) {
+        return Err(Error::new(
+            "terminal_changed",
+            "terminal conversation changed; rebuild the keepalive packet",
+        ));
+    }
+    let terminal = terminal(conn, agent, &companion, now)?;
+    if terminal["busy"] == true {
+        return Err(Error::new("terminal_busy", "terminal busy"));
+    }
+    if req.args["prompt_generation"].as_i64() != terminal["prompts"].as_i64() {
+        return Err(Error::new(
+            "terminal_changed",
+            "terminal prompt generation changed; rebuild the keepalive packet",
+        ));
+    }
+    let run_id = string(&req.args, "run_id")?;
+    let detail = req.args["detail"].clone();
+    if !detail.is_object() {
+        return Err(Error::invalid("detail must be an object"));
+    }
+    let updated = conn.execute(
+        "UPDATE controllers SET state='running',updated_ms=?,reason=NULL WHERE agent=? AND run_id=? AND state='waiting' AND updated_ms>?",
+        params![now, agent, run_id, now - CONTROLLER_TTL_MS],
+    )?;
+    if updated == 0 {
+        return Err(Error::new(
+            "controller_lost",
+            "keepalive controller is no longer waiting",
+        ));
+    }
+    conn.execute(
+        "INSERT INTO controller_details(agent,run_id,detail) VALUES(?,?,?) ON CONFLICT(agent) DO UPDATE SET run_id=excluded.run_id,detail=excluded.detail",
+        params![agent, run_id, serde_json::to_string(&detail)?],
+    )?;
+    Ok(json!({"claimed":true,"companion":companion}))
+}
+
 /// The terminal's turn state for its host `session`, from its hooks: busy
 /// from UserPromptSubmit until its turn ends, unless stale.
 pub(crate) fn terminal(conn: &Connection, agent: &str, session: &str, now: i64) -> Result<Value> {
@@ -614,7 +679,7 @@ pub(crate) fn terminal(conn: &Connection, agent: &str, session: &str, now: i64) 
 /// when a turn begins, what the keepalive did since the terminal's last turn
 /// (each reported once).
 pub(crate) fn mark(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
-    check_fields(&req.args, &["turn", "transcript"])?;
+    check_fields(&req.args, &["turn", "transcript", "report_away"])?;
     let turn = string(&req.args, "turn")?;
     if !TURN_MARKS.contains(&turn) {
         return Err(Error::invalid("turn: begin|active|end"));
@@ -647,7 +712,9 @@ pub(crate) fn mark(conn: &Connection, req: &Request, now: i64) -> Result<Value> 
     )?;
     let mut out = json!({"turn":turn,"handling":handling(conn, agent, now)?});
     if turn == "begin" {
-        out["away"] = away(conn, agent)?;
+        out["away"] = away(conn, agent, false)?;
+    } else if let Some(seqs) = req.args["report_away"].as_array() {
+        report_away(conn, agent, seqs)?;
     }
     Ok(out)
 }
@@ -672,7 +739,7 @@ pub(crate) fn handling(conn: &Connection, agent: &str, now: i64) -> Result<Vec<i
 
 /// What the keepalive posted since the terminal was last told, oldest first.
 /// Mark exactly the returned rows reported; excess remains for the next prompt.
-fn away(conn: &Connection, agent: &str) -> Result<Value> {
+fn away(conn: &Connection, agent: &str, _report: bool) -> Result<Value> {
     let mut s = conn.prepare(
         "SELECT event_seq,card_id,kind,follow_up FROM keepalive_actions WHERE agent=? AND reported=0 ORDER BY event_seq LIMIT 20",
     )?;
@@ -684,13 +751,31 @@ fn away(conn: &Connection, agent: &str) -> Result<Value> {
         [agent],
         |r| r.get(0),
     )?;
-    for row in &rows {
-        conn.execute(
-            "UPDATE keepalive_actions SET reported=1 WHERE event_seq=?",
-            [row["seq"].as_i64()],
-        )?;
-    }
     Ok(json!({"actions":rows,"more":total - rows.len() as i64}))
+}
+
+fn report_away(conn: &Connection, agent: &str, seqs: &[Value]) -> Result<()> {
+    if seqs.len() > 20 {
+        return Err(Error::invalid(
+            "report_away may contain at most 20 action IDs",
+        ));
+    }
+    for seq in seqs {
+        let seq = seq
+            .as_i64()
+            .ok_or_else(|| Error::invalid("report_away IDs must be integers"))?;
+        let changed = conn.execute(
+            "UPDATE keepalive_actions SET reported=1 WHERE event_seq=? AND agent=? AND reported=0",
+            params![seq, agent],
+        )?;
+        if changed != 1 {
+            return Err(Error::new(
+                "away_changed",
+                "a presented keepalive action was already reported or belongs to another agent",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A keepalive's reply, recorded for its terminal's "while you were away".

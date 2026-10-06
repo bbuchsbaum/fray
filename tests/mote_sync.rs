@@ -1887,3 +1887,40 @@ fn role_send_uses_real_mote_lease_and_refuses_an_expired_holder() {
     let (_, out) = p.fray(&[], "alice", &["--json", "query", "--all"]);
     assert!(!out.contains("Must not queue"), "{out}");
 }
+
+#[test]
+fn a_bound_mote_board_refuses_role_fallback_from_an_unrelated_directory() {
+    let Some(p) = Project::new("bound-role") else {
+        return;
+    };
+    p.fray(&[], "bob", &["join", "--role", "reviewer"]);
+    p.sync(&[], "alice").unwrap();
+    let outside = Temp::new("unrelated-role");
+    let out = Command::new(env!("CARGO_BIN_EXE_fray"))
+        .current_dir(&outside.0)
+        .env_remove("MOTE_STORE")
+        .env_remove("MOTE_ACTOR")
+        .env_remove("FRAY_AGENT")
+        .env("FRAY_SESSION", "test:alice")
+        .args([
+            "--home",
+            p.t.0.join(".fray").to_str().unwrap(),
+            "--as",
+            "alice",
+            "--json",
+            "send",
+            "@role:reviewer",
+            "must not fall back",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("role_unavailable"), "{text}");
+    let (_, all) = p.fray(&[], "alice", &["--json", "query", "--all"]);
+    assert!(!all.contains("must not fall back"), "{all}");
+}

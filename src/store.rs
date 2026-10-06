@@ -420,6 +420,7 @@ impl Store {
                 | "review_subject"
                 | "keepalive_stop"
                 | "keepalive_usage"
+                | "keepalive_claim"
                 | "terminal_turn"
         );
         if !write {
@@ -1022,6 +1023,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         }
         "keepalive_stop" => crate::keepalive::stop(conn, req, now),
         "keepalive_usage" => crate::keepalive::usage(conn, req, now),
+        "keepalive_claim" => crate::keepalive::claim(conn, req, now),
         "terminal_turn" => crate::keepalive::mark(conn, req, now),
         "follow" | "unfollow" => {
             check_fields(a, &["id"])?;
