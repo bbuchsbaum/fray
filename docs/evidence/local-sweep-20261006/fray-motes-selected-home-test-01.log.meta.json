@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:52:30.054758+00:00",
+  "finished_utc": "2026-10-06T20:52:33.279236+00:00",
+  "duration_seconds": 3.22441,
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--lib",
+    "diagnostics::tests"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-selected-home-test-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 120.0,
+  "log_bytes": 429
+}

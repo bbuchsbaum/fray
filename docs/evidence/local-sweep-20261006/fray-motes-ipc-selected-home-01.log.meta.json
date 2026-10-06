@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:59:36.145356+00:00",
+  "finished_utc": "2026-10-06T21:00:19.855775+00:00",
+  "duration_seconds": 43.710089,
+  "command": [
+    "python3",
+    "-W",
+    "error::ResourceWarning",
+    "scripts/integration.py",
+    "target/debug/fray"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-ipc-selected-home-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 600.0,
+  "log_bytes": 5318
+}

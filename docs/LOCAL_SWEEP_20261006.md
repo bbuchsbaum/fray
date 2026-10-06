@@ -4,7 +4,9 @@ Base: `b2cd1b9a187a5f9be14f66924e164732c3e3d979`. Work is isolated on
 `codex/outstanding-motes`; unrelated root and existing K2 worktree changes
 are preserved. Paid Agent Mail installation/comparison remains deferred by
 owner direction. No remote push, release, live board prune, or live paid host
-trial is part of this sweep.
+trial is part of this sweep. The owner's later upstream escalation request was
+completed as [Mote #18](https://github.com/bbuchsbaum/mote/issues/18); the posted
+body was read back and linked to the blocked authority tickets.
 
 ## Changes and evidence
 
@@ -80,8 +82,14 @@ The soak gate is 30 agents and four fully drained watches, 60 seconds warmup,
 then 7,200 seconds measured mixed send/inbox/ACK/wait/watch. Bounds declared
 before launch: FD count 256, RSS 256 MiB, WAL 64 MiB, publish p95 100 ms;
 no delivery mismatch, duplicate, timeout or escaped SQLITE_BUSY. Short smokes
-passed operational checks and explicitly report `qualified:false`. A full
-qualification result must be recorded before the reliability ticket is closed.
+passed operational checks and explicitly report `qualified:false`. The full
+default gate then passed on frozen `9be4977`: 106,343 total send cycles,
+7,201 measured resource samples, maximum FD 79, RSS 31.52 MiB, WAL 5.70 MiB,
+and publish p95 24.104 ms. Recorded error counters were zero. Raw UTC gaps
+are retained and disclosed in [Validation](VALIDATION.md); this qualifies the
+local monotonic-duration workload, not uninterrupted wall-clock or native-host
+service. Later diagnostic changes have independent checks; the result is not
+whole-binary performance qualification of the later implementation commit.
 
 HTML escaping and structure checks passed; the product browser was unavailable,
 so rendered visual qualification was not performed. The temporary preview

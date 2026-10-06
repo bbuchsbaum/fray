@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:59:39.270869+00:00",
+  "finished_utc": "2026-10-06T21:00:52.176906+00:00",
+  "duration_seconds": 72.905405,
+  "command": [
+    "python3",
+    "-W",
+    "error::ResourceWarning",
+    "scripts/drive_integration.py",
+    "target/debug/fray"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-drive-selected-home-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 600.0,
+  "log_bytes": 3784
+}

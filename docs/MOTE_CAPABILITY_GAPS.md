@@ -10,6 +10,13 @@ An independent read-only review inspected Mote 0.1.0's CLI and source at
 findings rather than executed race tests. Existing Fray adapter tests prove
 attention and reconciliation, not atomic cross-system authority.
 
+Upstream request: [Mote #18: fenced landing and holder-checked handoff](https://github.com/bbuchsbaum/mote/issues/18),
+filed and read back on 2026-10-06 against upstream main
+`fd53f0aee1dcb4410a3ce97153d42725752b5410`. The issue includes both source-reviewed
+interleavings and proposed acceptance tests; it does not claim executed race
+reproducers. Issue #14 covers out-of-band landing reconciliation, a distinct
+contract from prospective authorization fencing.
+
 ## Git landing
 
 Mote replay orders operation filenames (`src/repo.rs:153`,
@@ -65,4 +72,5 @@ another actor's live claim without impersonation, which the adapter forbids.
 Future acceptance tests need competing accepts, restart at every journal
 step, competing adoption, lease expiry, and holder replacement between
 precheck and handoff. No live store or other repository was changed to test
-or file these upstream requests.
+these source findings. Filing upstream #18 changed only the requested GitHub
+issue, with no Mote source or live-store mutation in the upstream repository.

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:55:24.355229+00:00",
+  "finished_utc": "2026-10-06T20:56:43.795266+00:00",
+  "duration_seconds": 79.439504,
+  "command": [
+    "python3",
+    "-c",
+    "import subprocess; commands=[[\"cargo\",\"fmt\",\"--all\",\"--\",\"--check\"],[\"cargo\",\"check\",\"--locked\",\"--all-targets\"],[\"cargo\",\"clippy\",\"--locked\",\"--all-targets\",\"--\",\"-D\",\"warnings\"],[\"cargo\",\"test\",\"--locked\",\"--all-targets\"],[\"cargo\",\"build\",\"--locked\"]]; [(print(\"CHECK\",command,flush=True),subprocess.run(command,check=True)) for command in commands]"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-final-checks-03.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 1200.0,
+  "log_bytes": 41969
+}

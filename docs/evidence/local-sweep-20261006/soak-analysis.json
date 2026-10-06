@@ -1,0 +1,43 @@
+{
+  "all_samples": 7261,
+  "artifact": {
+    "binary_sha256": "4ab56b765aa8fd84fed95cb52d9a344e3f4f2139aa2c806e2deb37246a61b825",
+    "budget": "Local synthetic data; 30 peers, four watches; 60s warmup +7200s measure, outer timeout7500s; no paid hosts or external writes",
+    "outputs": "/private/tmp/fray-qualification-9be4977/soak",
+    "source_sha": "9be4977905d018bd081081c8407a7546e2aecae7",
+    "version": "fray 0.2.1 (9be4977905d0)"
+  },
+  "first_sample_utc": "2026-10-06T20:14:54.491155+00:00",
+  "last_sample_utc": "2026-10-06T23:00:05.161759+00:00",
+  "limitations": "UTC gaps are retained; their cause is not established by samples alone. No uninterrupted wall-clock service, wall-clock response deadline, native-host, power-loss, or whole-binary bb6fb6f performance qualification.",
+  "measured_sample_maxima": {
+    "fds": 79,
+    "rss_bytes": 33046528,
+    "wal_bytes": 5978152
+  },
+  "measured_samples": 7201,
+  "monotonic_clock": {
+    "adjustable": false,
+    "implementation": "mach_absolute_time()",
+    "monotonic": true,
+    "resolution": 4.166666666666666e-08
+  },
+  "nonincreasing_utc_intervals": 0,
+  "owned_home_removed": true,
+  "scope": "7200 measured monotonic seconds after 60s warmup; sampled resource bounds and exact receipt/watch checks on frozen 9be4977. Later diagnostic corrections have separate evidence.",
+  "utc_gaps_over_5_seconds": [
+    {
+      "before_row": 3382,
+      "seconds": 420.99820494651794
+    },
+    {
+      "before_row": 3400,
+      "seconds": 1491.9125230312347
+    },
+    {
+      "before_row": 3412,
+      "seconds": 741.4917879104614
+    }
+  ],
+  "utc_sample_span_seconds": 9910.670603990555
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:14:54.141225+00:00",
+  "finished_utc": "2026-10-06T23:00:05.442686+00:00",
+  "duration_seconds": 7260.746994,
+  "command": [
+    "python3",
+    "scripts/soak.py",
+    "/private/tmp/fray-qualification-9be4977/fray",
+    "--out",
+    "/private/tmp/fray-qualification-9be4977/soak"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-soak-qualification-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 7500.0,
+  "log_bytes": 961
+}

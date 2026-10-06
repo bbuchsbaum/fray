@@ -1,0 +1,12 @@
+{
+  "harness": {
+    "pid": 60840,
+    "ppid": 60839,
+    "command": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python scripts/soak.py /private/tmp/fray-qualification-9be4977/fray --out /private/tmp/fray-qualification-9be4977/soak"
+  },
+  "parent": "60839 62014 /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python /Users/bbuchsbaum/.agents/skills/lean-logs/scripts/run_logged.py --log /tmp/fray-motes-soak-qualification-01.log --timeout 7500 -- python3 scripts/soak.py /private/tmp/fray-qualification-9be4977/fray --out /private/tmp/fray-qualification-9be4977/soak",
+  "native_exec_session": 37446,
+  "controller_cell": 169,
+  "read_only_progress_monitor_cell": 225,
+  "upstream_mote_issue": "https://github.com/bbuchsbaum/mote/issues/18"
+}

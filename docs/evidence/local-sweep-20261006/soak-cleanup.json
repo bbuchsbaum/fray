@@ -1,0 +1,20 @@
+{
+  "owned_native_exec_session": 37446,
+  "owned_harness_pid": 60840,
+  "owned_logger_pid": 60839,
+  "owned_daemon_pid": 60842,
+  "verification_command": [
+    "ps",
+    "-o",
+    "pid=,ppid=,command=",
+    "-p",
+    "60839,60840,60842"
+  ],
+  "verification_exit_code": 1,
+  "verification_stdout": "",
+  "meaning": "No selected owned PIDs remained at the post-run process check.",
+  "job_bound_idle_sleep_inhibitor_exec_session": 80379,
+  "idle_sleep_inhibitor_exit_code": 0,
+  "owned_temporary_home": "/tmp/fray-soak-jki29qx9",
+  "owned_temporary_home_removed": true
+}

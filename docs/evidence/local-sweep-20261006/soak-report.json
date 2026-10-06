@@ -1,0 +1,48 @@
+{
+  "config": {
+    "agents": 30,
+    "binary": "/private/tmp/fray-qualification-9be4977/fray",
+    "duration": 7200,
+    "fd_limit": 256,
+    "out": "/private/tmp/fray-qualification-9be4977/soak",
+    "p95_publish_ms_limit": 100,
+    "rss_mib_limit": 256,
+    "wal_mib_limit": 64,
+    "warmup": 60
+  },
+  "defaults": {
+    "agents": 30,
+    "duration": 7200,
+    "fd_limit": 256,
+    "p95_publish_ms_limit": 100,
+    "rss_mib_limit": 256,
+    "wal_mib_limit": 64,
+    "warmup": 60
+  },
+  "delivery_failures": 0,
+  "duplicates": 0,
+  "failure": null,
+  "limits": {
+    "fd": 256,
+    "p95_publish_ms": 100,
+    "rss_bytes": 268435456,
+    "wal_bytes": 67108864
+  },
+  "owned": {
+    "binary_sha256": "4ab56b765aa8fd84fed95cb52d9a344e3f4f2139aa2c806e2deb37246a61b825",
+    "home": "/tmp/fray-soak-jki29qx9",
+    "pid": 60842,
+    "source_sha": "9be4977905d018bd081081c8407a7546e2aecae7"
+  },
+  "publish_ms": {
+    "max": 422.3042919766158,
+    "p50": 8.506417041644454,
+    "p95": 24.104290991090238
+  },
+  "qualified": true,
+  "samples": 7201,
+  "sent": 106343,
+  "sqlite_busy": 0,
+  "success": true,
+  "timeouts": 0
+}

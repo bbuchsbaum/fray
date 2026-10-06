@@ -15,6 +15,11 @@
     "source": "/tmp/fray-bd-01M3S1M4KJD1VVSTJ3EW0VSPAJ-drive-crash.log"
   },
   {
+    "path": "diagnostic-artifact-bb6fb6f.json",
+    "sha256": "d81b6325e1555becf1326801ca82989bc5d82b736269c40905bd0744e8109fe4",
+    "source": "/private/tmp/fray-qualification-bb6fb6f/artifact.json"
+  },
+  {
     "path": "environment.json",
     "sha256": "e383cf108ba91b676c71d9992e20dea53cc6cbbd0f6e9a0432778b545de285db",
     "source": "captured locally"
@@ -38,6 +43,16 @@
     "path": "fray-motes-attention-02.log.meta.json",
     "sha256": "8d38af9f73dac7b8986ff124e53aa7a9820df821ce72f9c1aeccf2d9d8a18313",
     "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-attention-selected-home-01.log",
+    "sha256": "ebf83ce1590a32126124fd360ece332199472c1f7783709df8c2774e2df6c6d0",
+    "source": "/tmp/fray-motes-attention-selected-home-01.log"
+  },
+  {
+    "path": "fray-motes-attention-selected-home-01.log.meta.json",
+    "sha256": "fccf3d3e4261cc2f661082fb716c8c22bc3c7daa0882fc55c5534eb30a0e6d9b",
+    "source": "/tmp/fray-motes-attention-selected-home-01.log.meta.json"
   },
   {
     "path": "fray-motes-crash-consumed-01.log",
@@ -70,6 +85,16 @@
     "source": "/tmp/fray-motes-drive-final-debug-01.log.meta.json"
   },
   {
+    "path": "fray-motes-drive-selected-home-01.log",
+    "sha256": "ae778671b8aef18bdccad3b25cf4d9699c549abfb0b1f7fa4af2e3b0dd1b074b",
+    "source": "/tmp/fray-motes-drive-selected-home-01.log"
+  },
+  {
+    "path": "fray-motes-drive-selected-home-01.log.meta.json",
+    "sha256": "b14c320a8fc9e87830561a5dbbe7adf0a6b951e66d3e66d9764d4210b7eea698",
+    "source": "/tmp/fray-motes-drive-selected-home-01.log.meta.json"
+  },
+  {
     "path": "fray-motes-drive-tty-01.log",
     "sha256": "f2b3a2f2d6e724cfff0870edf163f591e4cc86b68493696445a1ccde32ff59ec",
     "source": "/tmp/fray-motes-drive-tty-01.log"
@@ -100,6 +125,16 @@
     "source": "/tmp/fray-motes-final-checks-02.log.meta.json"
   },
   {
+    "path": "fray-motes-final-checks-03.log",
+    "sha256": "4432d38843c8964eecd52b210b2e516427fbddc63c53eddaf904c9f4c525a4c9",
+    "source": "/tmp/fray-motes-final-checks-03.log"
+  },
+  {
+    "path": "fray-motes-final-checks-03.log.meta.json",
+    "sha256": "5b6fe3a18037637db0bb7a6a9f40368924bf92248822f12aa4774dd845847136",
+    "source": "/tmp/fray-motes-final-checks-03.log.meta.json"
+  },
+  {
     "path": "fray-motes-ipc-01.log",
     "sha256": "61a4b26055cdf866759ed09ee621d54dd952833a7d4997b32665e989e4c0f48d",
     "source": "/tmp/fray-motes-ipc-01.log"
@@ -108,6 +143,16 @@
     "path": "fray-motes-ipc-01.log.meta.json",
     "sha256": "38637eca7747004de5d9d9edd41ca5157077a9cf7b9fe2f79f792d50a2e40614",
     "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-ipc-selected-home-01.log",
+    "sha256": "fbca9b626d497b63cde07e9957b0f6b399c2acd372f6141d0af69fcc14494cd2",
+    "source": "/tmp/fray-motes-ipc-selected-home-01.log"
+  },
+  {
+    "path": "fray-motes-ipc-selected-home-01.log.meta.json",
+    "sha256": "f74de552941d219457a1a007b1ee3ecc4a5b3e0267585c1798affe1d8230e59c",
+    "source": "/tmp/fray-motes-ipc-selected-home-01.log.meta.json"
   },
   {
     "path": "fray-motes-native-wake-02.log",
@@ -128,6 +173,36 @@
     "path": "fray-motes-reliability-01.log.meta.json",
     "sha256": "cc61d1ad8c47065e2b6a139f97763ffc7e4435b9ef45b64975c4ac1fb723260d",
     "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-selected-home-release-build-01.log",
+    "sha256": "3c3d6fb0008e0c842a45dab2f1bc4337194a3d3c1b5fdfdf83efde6dc31a06c6",
+    "source": "/tmp/fray-motes-selected-home-release-build-01.log"
+  },
+  {
+    "path": "fray-motes-selected-home-release-build-01.log.meta.json",
+    "sha256": "1d84692149033fd3aacf1b262d852d43391731e0ea29a9b04be97e8290f11f85",
+    "source": "/tmp/fray-motes-selected-home-release-build-01.log.meta.json"
+  },
+  {
+    "path": "fray-motes-selected-home-test-01.log",
+    "sha256": "5df9e326781196336c4e292ee33e83ea703f71760f413c05656dff8f3cad51a6",
+    "source": "/tmp/fray-motes-selected-home-test-01.log"
+  },
+  {
+    "path": "fray-motes-selected-home-test-01.log.meta.json",
+    "sha256": "ea841cdf39c34b9449f7e97766ad3c4b1abcbbf74be30b7aef73f6f7d682c71a",
+    "source": "/tmp/fray-motes-selected-home-test-01.log.meta.json"
+  },
+  {
+    "path": "fray-motes-soak-qualification-01.log",
+    "sha256": "f45de7945b23e6bfcba882433f5b3b652558ac00d763e66c6d0884383d02c93e",
+    "source": "/tmp/fray-motes-soak-qualification-01.log"
+  },
+  {
+    "path": "fray-motes-soak-qualification-01.log.meta.json",
+    "sha256": "f47d582bf4a458a23d18e0955dd09f77373544a6928e3c3f67814c5a63fed23f",
+    "source": "/tmp/fray-motes-soak-qualification-01.log.meta.json"
   },
   {
     "path": "fray-motes-sql-01.log",
@@ -163,5 +238,50 @@
     "path": "fray-seatbelt-doctor-9be4977.py",
     "sha256": "8704f3ea9d424349f0b141bde4325d2a2935c2d7d7315a722022c7a83bbf5fcc",
     "source": "/private/tmp/fray-seatbelt-doctor-9be4977.py"
+  },
+  {
+    "path": "fray-seatbelt-doctor-bb6fb6f.log",
+    "sha256": "a210b7d0a8f9adfc8dccb139dca11e1e89df586734ee5cc6c679e91cb114d154",
+    "source": "/private/tmp/fray-seatbelt-doctor-bb6fb6f.log"
+  },
+  {
+    "path": "fray-seatbelt-doctor-bb6fb6f.py",
+    "sha256": "8d9dc7407c6121f4a6c36123cf8572f7b609314c60099ac2e3294bb84d1e4fa2",
+    "source": "/private/tmp/fray-seatbelt-doctor-bb6fb6f.py"
+  },
+  {
+    "path": "mote-fray-upstream-capabilities-20261006.md",
+    "sha256": "1ed98a2e43d53269b0d8782d4ba872c7c930bd92e4a5b65a755b2e582f10314f",
+    "source": "/private/tmp/mote-fray-upstream-capabilities-20261006.md"
+  },
+  {
+    "path": "mote-fray-upstream-issue18-receipt.json",
+    "sha256": "84dc59de367b404cc32e88c4bfc9b668fed8a51f01bddb5dbcade86d533cf048",
+    "source": "/private/tmp/mote-fray-upstream-issue18-receipt.json"
+  },
+  {
+    "path": "soak-active-job.json",
+    "sha256": "d05a3143daf445ab7d3a180d71f09ea066a74fc08f7d3c9685116544f63b6814",
+    "source": "/private/tmp/fray-qualification-9be4977/active-job.json"
+  },
+  {
+    "path": "soak-analysis.json",
+    "sha256": "963ea676d486265ca487f759c46f0d8f4bc8165bbe7da2a42529453a04a19d8a",
+    "source": "derived from retained raw samples and frozen artifact"
+  },
+  {
+    "path": "soak-cleanup.json",
+    "sha256": "e64510fa5f7c84532925edc23c96b5717d196637fea20ce44ab1ea967c9f9201",
+    "source": "actual post-run exec/ps results and owned-home existence check"
+  },
+  {
+    "path": "soak-report.json",
+    "sha256": "c4ad356d4798d3246383c6c1387c6d8d03431432562e2ac10c2826a4b0044bad",
+    "source": "/private/tmp/fray-qualification-9be4977/soak/report.json"
+  },
+  {
+    "path": "soak-samples.jsonl.gz",
+    "sha256": "bb9fb976034d1a0548bcb9bb71945b0aed7e06d02d0b7d45f131672756365a16",
+    "source": "/private/tmp/fray-qualification-9be4977/soak/samples.jsonl; gzip mtime=0"
   }
 ]

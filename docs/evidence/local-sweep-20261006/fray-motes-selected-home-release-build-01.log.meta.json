@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:55:24.355153+00:00",
+  "finished_utc": "2026-10-06T20:55:54.939134+00:00",
+  "duration_seconds": 30.583745,
+  "command": [
+    "cargo",
+    "build",
+    "--locked",
+    "--release",
+    "--target-dir",
+    "/private/tmp/fray-motes-qualification-build"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-selected-home-release-build-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 900.0,
+  "log_bytes": 126
+}

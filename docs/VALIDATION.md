@@ -8,7 +8,7 @@ Paid comparison remains deferred. Mote authority gaps and real keepalive sandbox
 qualification remain open; no broad epic completion or release is claimed.
 
 The implementation landed on local `main` at
-`9be4977905d018bd081081c8407a7546e2aecae7`, with independent exact-commit approvals
+`bb6fb6f01384f3ba6b512b2463e43702a3d16d2a`, with independent exact-commit approvals
 from `storage_review` and `keepalive_snapshot_review`. No remote push or shared
 daemon restart was performed. Formatting, locked all-target checking, Clippy
 with warnings denied, and all 426 Rust tests over 46 targets passed, including
@@ -41,7 +41,35 @@ and duplicates. Predeclared maxima are 256 descriptors, 256 MiB RSS, 64 MiB WAL,
 and 100 ms publish p95, with no delivery error, timeout, duplicate or escaped
 `SQLITE_BUSY`. Short runs explicitly remain unqualified. The frozen artifact's
 identity is retained in [artifact.json](evidence/local-sweep-20261006/artifact.json).
-The full result will be recorded after the running gate completes.
+The default gate completed with `success:true` and `qualified:true`: 106,343
+send/inbox/exact-receipt-ACK/wait cycles across warmup and measurement, four
+sequence-checked watches, and 7,201 measured resource samples. Recorded delivery
+failures, duplicates, timeouts and escaped `SQLITE_BUSY` were all zero.
+
+| Measured quantity | Observed | Declared limit |
+| --- | ---: | ---: |
+| Maximum descriptor count | 79 | 256 |
+| Maximum RSS | 31.52 MiB | 256 MiB |
+| Maximum WAL size | 5.70 MiB | 64 MiB |
+| Publish p95 | 24.104 ms | 100 ms |
+
+Publish p50 was 8.506 ms and the maximum was 422.304 ms; the predeclared latency
+gate bounds p95. The [report](evidence/local-sweep-20261006/soak-report.json),
+[compressed raw samples](evidence/local-sweep-20261006/soak-samples.jsonl.gz),
+and [sample analysis](evidence/local-sweep-20261006/soak-analysis.json) are retained
+with hashes and the logger's zero exit status. The owned daemon, harness and
+logger exited; the temporary home was removed, and the job-bound idle-sleep
+inhibitor exited.
+
+The duration gate uses macOS `mach_absolute_time()` through Python's monotonic
+clock. Raw UTC samples span 9,910.671 seconds and contain gaps of approximately
+421, 1,492 and 741 seconds; their cause is not established by samples alone.
+The pass covers the specified 7,200 measured monotonic seconds after warmup and
+sampled resource/delivery correctness. It does not establish uninterrupted
+wall-clock service, wall-clock response deadlines, or native-host reliability.
+To replay the recorded resource gate's source, build the full commit named in
+`artifact.json`; the current implementation's diagnostic corrections have
+separate checks described below.
 
 The SIGKILL gates also verify a consumed delivery's persisted `ack_seq` and
 absence from the recovered inbox. The managed-runner crash fixture reaps its
@@ -78,6 +106,21 @@ The two-hour resource artifact remains the frozen `9be4977` optimized binary.
 The later recovery-message correction does not change the send/inbox/ACK/wait/
 watch operations measured by that workload; its own command and sandbox checks
 are separate evidence.
+
+The final all-target log (`fray-motes-final-checks-03.log`) and the affected
+38 IPC, 28 attention, and 24 lifecycle checks were rerun after the recovery
+formatter correction and passed. A focused test executes the suggested shell
+commands through a harmless argument-recording stub from an unrelated working
+directory, with no Fray environment defaults and a home containing shell
+metacharacters. The separately frozen `bb6fb6f` release artifact also passed
+the custom seatbelt doctor/start refusal specimen with identical selected-home
+recovery instructions. Its hash and raw output are retained separately from
+the resource-soak artifact.
+
+The source-reviewed upstream authority requests were filed and read back as
+[Mote #18](https://github.com/bbuchsbaum/mote/issues/18). The receipt and exact
+issue body are retained. They do not establish executed race reproductions or
+unblock the two strict authority contracts.
 
 ## No silent stalls (2026-10-01)
 
