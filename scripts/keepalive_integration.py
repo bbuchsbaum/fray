@@ -14,6 +14,7 @@ import pathlib
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -295,6 +296,30 @@ class Keepalive(unittest.TestCase):
     def pending(self, actor):
         return self.rpc("inbox", actor)["data"]["total"]
 
+    def test_busy_pending_attention_blocks_without_wal_spin(self):
+        self.start("alice", "claude:bounded-busy")
+        self.hook("alice", "claude:bounded-busy", "UserPromptSubmit")
+        card = self.ask("alice", "Wait for my terminal turn")
+        observer = sqlite3.connect("file:" + self.home + "/state.db?mode=ro", uri=True)
+        try:
+            observer.execute("BEGIN")
+            observer.execute("SELECT count(*) FROM events").fetchone()
+            time.sleep(.2)
+            wal = pathlib.Path(self.home, "state.db-wal")
+            before = wal.stat().st_size
+            time.sleep(1.2)
+            growth = wal.stat().st_size - before
+            self.assertLessEqual(growth, 256 * 1024, f"busy deferral churned {growth} WAL bytes")
+            self.assertEqual(self.calls(), [])
+        finally:
+            observer.close()
+        self.hook("alice", "claude:bounded-busy", "Stop", stop_hook_active=True)
+        self.await_reply(card, "alice")
+        self.hook("alice", "claude:bounded-busy", "UserPromptSubmit")
+        self.ask("alice", "Remain pending while stopped")
+        self.fray("keepalive", "--stop", actor="alice", session="claude:bounded-busy")
+        self.await_status("alice", lambda state: state["state"] == "stopped", "responsive busy stop", timeout=3)
+
     def test_hook_busy_fences_an_idle_keepalive_until_end_and_stop_states_are_durable(self):
         session = "claude:hook-race"
         self.start("erin", session)
@@ -314,6 +339,7 @@ class Keepalive(unittest.TestCase):
     def test_hook_prompt_surfaces_away_actions_before_reporting_them(self):
         session = "claude:hook-away"
         self.start("frank", session)
+        self.hook("frank", session, "PostToolUse")  # consume peer announcements first
         first = self.ask("frank", "First completed background action")
         self.await_reply(first, "frank")
         second = self.ask("frank", "Second completed background action")

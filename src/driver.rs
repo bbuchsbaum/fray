@@ -1122,8 +1122,8 @@ impl Run<'_> {
                     continue;
                 }
                 if !self.terminal_ready(keep)? {
-                    if !self.wait(0)? {
-                        return Ok(if self.stop.get() { "stopped" } else { "idle" });
+                    if let Some(reason) = self.defer_terminal(keep)? {
+                        return Ok(reason);
                     }
                     continue;
                 }
@@ -1340,6 +1340,35 @@ impl Run<'_> {
             *keep.fork_prompt.borrow_mut() = Some((companion.to_owned(), prompts));
         }
         Ok(true)
+    }
+
+    /// Existing unread attention cannot end a busy-terminal deferral. Recheck
+    /// the terminal and stop request once a second; refresh bookkeeping only
+    /// at the normal heartbeat interval, without spinning on the same packet.
+    fn defer_terminal(&self, keep: &Keep) -> Result<Option<&'static str>> {
+        self.state("waiting", false, None)?;
+        let started = Instant::now();
+        let mut refreshed = Instant::now();
+        loop {
+            if self.stop.get() {
+                return Ok(Some("stopped"));
+            }
+            if started.elapsed() >= Duration::from_secs(self.options.idle_timeout) {
+                return Ok(Some("idle"));
+            }
+            thread::sleep(Duration::from_secs(1));
+            let ready = self.terminal_ready(keep)?;
+            if self.stop.get() {
+                return Ok(Some("stopped"));
+            }
+            if ready {
+                return Ok(None);
+            }
+            if refreshed.elapsed() >= Duration::from_secs(HEARTBEAT_SECS) {
+                self.state("waiting", false, None)?;
+                refreshed = Instant::now();
+            }
+        }
     }
     /// Over budget: take no turns, visibly (`paused`), until the day's count
     /// resets, a stop request, or the idle bound. None means resume.

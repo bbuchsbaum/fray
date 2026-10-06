@@ -44,7 +44,7 @@ trial is part of this sweep.
 - Keepalive K2 integrates terminal busy hooks, re-fork on terminal progression,
   while-away context, first-fork token baseline, session-scoped waits, pinned
   Team model/budget, and read-only doctor recovery reporting. Synthetic host
-  integration passed 11/11; real host and sandbox qualification remains open.
+  integration passed 12/12; real host and sandbox qualification remains open.
 
 The core still has five direct dependencies and no unsafe code. The existing
 `rusqlite` dependency gains its online-backup feature; no new dependency is added.
