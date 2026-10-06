@@ -13,7 +13,7 @@ from `storage_review` and `keepalive_snapshot_review`. No remote push or shared
 daemon restart was performed. Formatting, locked all-target checking, Clippy
 with warnings denied, and all 426 Rust tests over 46 targets passed, including
 the installed Mote integration. Host-neutral IPC passed 38 tests, attention 28,
-descriptor/cancellation reliability 7, and drive/keepalive 23. Native-wake's
+descriptor/cancellation reliability 7, and drive/keepalive 24. Native-wake's
 23 Python tests also passed; these are transport fixtures, not paid host trials.
 The SQL scanner passed its 193 prepared statements and 22 invariant checks.
 
@@ -58,9 +58,26 @@ recovery test completed in 30.520 seconds; cleanup time was not measured separat
 The lifecycle suite requires a debug build: its sandbox-refusal and deliberately
 tiny packet-budget specimens use debug-only test overrides. An optimized-binary
 run passed 22/24 cases and failed those two specimens because release builds
-intentionally ignore those overrides. That failed log is retained; it does not
+intentionally ignore those overrides. The clean debug rerun passed all 24 cases.
+That failed optimized log is retained; it does not
 qualify either release sandbox behavior or native hosts. The resource soak uses
 the separately frozen optimized binary.
+
+Two unpaid release specimens use a custom real macOS seatbelt profile that
+denies execution of `/usr/bin/sandbox-exec`. The keepalive guard refuses the
+request with `sandboxed`; doctor reports `daemon_sandboxed:true` and owner
+recovery instructions. No native host request was made, and the owned daemons
+and homes were cleaned up. The profile and raw outputs are retained. This
+exercises release probe refusal, not actual Codex sandbox inheritance or general
+nested-seatbelt behavior. It exposed recovery suggestions that dropped an
+explicit selected home. The corrected formatter preserves `--home` for stop/start
+and both home and identity for retry, quotes literal shell arguments, and names
+the original host session and repository as the retry context.
+
+The two-hour resource artifact remains the frozen `9be4977` optimized binary.
+The later recovery-message correction does not change the send/inbox/ACK/wait/
+watch operations measured by that workload; its own command and sandbox checks
+are separate evidence.
 
 ## No silent stalls (2026-10-01)
 

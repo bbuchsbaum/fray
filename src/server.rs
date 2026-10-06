@@ -478,16 +478,16 @@ fn keepalive_start(shared: &Shared, req: &Request) -> Result<Value> {
     check_fields(&req.args, &["cwd"])?;
     let cwd = string(&req.args, "cwd")?;
     text(cwd, "cwd", 4096, false)?;
-    if crate::keepalive::sandboxed() {
-        return Err(Error::new(
-            "sandboxed",
-            "this daemon runs inside a sandbox (it was started from inside a sandboxed tool call), so a keepalive it started would inherit it; stop it (fray stop) and start it again from the owner's own shell (fray start), then retry",
-        ));
-    }
     let home = shared
         .socket
         .parent()
         .ok_or_else(|| Error::new("internal", "socket has no home directory"))?;
+    if crate::keepalive::sandboxed() {
+        return Err(Error::new(
+            "sandboxed",
+            crate::diagnostics::sandbox_recovery(home, &req.actor),
+        ));
+    }
     let cwd = crate::keepalive::repository_dir(home, Path::new(cwd))?;
     let cwd_text = cwd
         .to_str()

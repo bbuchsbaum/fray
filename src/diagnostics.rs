@@ -104,7 +104,7 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
                         &mut report,
                         "keepalive_daemon_sandboxed",
                         "error",
-                        sandbox_recovery(),
+                        &sandbox_recovery(home, actor),
                     );
                 }
                 if matches!(
@@ -163,8 +163,10 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
     Ok(finish(report))
 }
 
-fn sandbox_recovery() -> &'static str {
-    "The daemon is sandboxed and cannot start a usable keepalive. From the owner's own shell, run `fray stop`, then `fray start`; retry `fray keepalive` after the daemon is reachable."
+pub(crate) fn sandbox_recovery(home: &Path, actor: &str) -> String {
+    let home = home.to_string_lossy().replace('\'', "'\\''");
+    let actor = actor.replace('\'', "'\\''");
+    format!("The daemon is sandboxed and cannot start a usable keepalive. From the owner's own shell, run `fray --home '{home}' stop`, then `fray --home '{home}' start`. After the daemon is reachable, retry `fray --home '{home}' --as '{actor}' keepalive` from the original bound host session and repository directory.")
 }
 
 pub fn listening(agent: &Value, now: i64) -> Value {
@@ -217,13 +219,58 @@ pub fn build_check(daemon: Option<&str>, client: &str) -> Option<(&'static str, 
 #[cfg(test)]
 mod tests {
     use super::sandbox_recovery;
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
-    fn sandbox_recovery_is_an_owner_shell_command() {
-        let message = sandbox_recovery();
+    fn sandbox_recovery_preserves_the_selected_home_and_literal_shell_arguments() {
+        let temp = Temp(std::env::temp_dir().join(format!(
+            "fray-recovery-command-{}",
+            crate::model::random_key().unwrap()
+        )));
+        fs::create_dir(&temp.0).unwrap();
+        let bin = temp.0.join("bin");
+        let elsewhere = temp.0.join("elsewhere");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        let stub = bin.join("fray");
+        fs::write(&stub, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700)).unwrap();
+        let home = temp.0.join("board space's $(touch leaked); *");
+        let actor = "reviewer";
+        let message = sandbox_recovery(&home, actor);
         assert!(message.contains("owner's own shell"));
-        assert!(message.contains("`fray stop`"));
-        assert!(message.contains("`fray start`"));
-        assert!(message.contains("`fray keepalive`"));
+        assert!(message.contains("original bound host session and repository directory"));
+        let commands: Vec<_> = message.split('`').skip(1).step_by(2).collect();
+        assert_eq!(commands.len(), 3);
+        for (command, expected) in commands.iter().zip([
+            vec!["--home", home.to_str().unwrap(), "stop"],
+            vec!["--home", home.to_str().unwrap(), "start"],
+            vec!["--home", home.to_str().unwrap(), "--as", actor, "keepalive"],
+        ]) {
+            let output = Command::new("/bin/sh")
+                .args(["-c", command])
+                .current_dir(&elsewhere)
+                .env("PATH", &bin)
+                .env_remove("FRAY_HOME")
+                .env_remove("FRAY_AGENT")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let actual: Vec<_> = output
+                .stdout
+                .split(|&byte| byte == 0)
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| std::str::from_utf8(arg).unwrap())
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        assert!(!elsewhere.join("leaked").exists());
     }
 }

@@ -1,0 +1,74 @@
+{
+  "binary": "/private/tmp/fray-qualification-9be4977/fray",
+  "daemon_exit": -15,
+  "home": "/private/tmp/fray-seatbelt-60d4o7zk",
+  "home_removed": true,
+  "host_spawned": false,
+  "keepalive_start": {
+    "error": {
+      "code": "sandboxed",
+      "message": "this daemon runs inside a sandbox (it was started from inside a sandboxed tool call), so a keepalive it started would inherit it; stop it (fray stop) and start it again from the owner's own shell (fray start), then retry"
+    },
+    "ok": false
+  },
+  "pid": 36798,
+  "ping": {
+    "data": {
+      "build": "9be4977905d0",
+      "capabilities": [
+        "peer_discovery",
+        "review_subjects",
+        "reply_ack_batch",
+        "agents_all",
+        "reply_refs",
+        "long_messages",
+        "inbox_filters",
+        "attention_stream",
+        "wait_filters",
+        "attention_filters",
+        "wait_indefinite",
+        "read_batches",
+        "thread_unread",
+        "thread_compact",
+        "sessions",
+        "objection_gate",
+        "card_attention",
+        "mute",
+        "idle_readiness",
+        "ack_last",
+        "pending_send",
+        "addressed_full_text",
+        "owner_channel",
+        "lanes",
+        "session_continue",
+        "partner_routing",
+        "stats",
+        "mote_adapter",
+        "mote_sync",
+        "mote_reconcile",
+        "mote_subjects",
+        "mote_requests",
+        "ask_deadlines",
+        "escalations",
+        "listener_activation",
+        "keepalive"
+      ],
+      "capacity": {
+        "client_limit": 128,
+        "clients": 1,
+        "descriptor_limit": 1048575,
+        "long_limit": 112,
+        "long_lived": 0,
+        "short_reserved": 16
+      },
+      "cursor": 0,
+      "protocol_version": 2,
+      "store_id": "35beab865ce6f59b1d6b54231c30539b",
+      "time_ms": 1791319499900,
+      "version": "0.2.1"
+    },
+    "ok": true
+  },
+  "profile": "/private/tmp/fray-seatbelt-9be4977.sb",
+  "socket_exists_after_cleanup": true
+}

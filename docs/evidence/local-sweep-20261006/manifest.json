@@ -60,6 +60,16 @@
     "source": "/tmp/fray-motes-drive-final-01.log.meta.json"
   },
   {
+    "path": "fray-motes-drive-final-debug-01.log",
+    "sha256": "f26079780a8b639f87eebd6aad4aa60682df3272351b1d866c3886098a563fc8",
+    "source": "/tmp/fray-motes-drive-final-debug-01.log"
+  },
+  {
+    "path": "fray-motes-drive-final-debug-01.log.meta.json",
+    "sha256": "60e8f572c8710e58b2fcf69d376bf8d282b92ef0789f3675b8935c7cfc31bc23",
+    "source": "/tmp/fray-motes-drive-final-debug-01.log.meta.json"
+  },
+  {
     "path": "fray-motes-drive-tty-01.log",
     "sha256": "f2b3a2f2d6e724cfff0870edf163f591e4cc86b68493696445a1ccde32ff59ec",
     "source": "/tmp/fray-motes-drive-tty-01.log"
@@ -128,5 +138,30 @@
     "path": "fray-motes-sql-01.log.meta.json",
     "sha256": "858c1ded884b72fb3edef6fc7f144e3d7b3cd55d130553d4cbdd5784da536e9e",
     "source": "raw log metadata"
+  },
+  {
+    "path": "fray-seatbelt-9be4977.log",
+    "sha256": "6e110457d7bb53bd7e5441d5e6f431303be939686ce9d4c29387f057008583a8",
+    "source": "/private/tmp/fray-seatbelt-9be4977.log"
+  },
+  {
+    "path": "fray-seatbelt-9be4977.py",
+    "sha256": "06059e9674bdec488e5bd344b66b46451f380a189a8981d9b54c391c8347431b",
+    "source": "/private/tmp/fray-seatbelt-9be4977.py"
+  },
+  {
+    "path": "fray-seatbelt-9be4977.sb",
+    "sha256": "469d2633930b8bd639adc95224cac36add9e2e7a1bd1dc7b4ab16c34ec29e4cf",
+    "source": "/private/tmp/fray-seatbelt-9be4977.sb"
+  },
+  {
+    "path": "fray-seatbelt-doctor-9be4977.log",
+    "sha256": "ff6897bb739ce453cfaaa1927e56bb737129b4bd543e69732e67f11c52f3cb7a",
+    "source": "/private/tmp/fray-seatbelt-doctor-9be4977.log"
+  },
+  {
+    "path": "fray-seatbelt-doctor-9be4977.py",
+    "sha256": "8704f3ea9d424349f0b141bde4325d2a2935c2d7d7315a722022c7a83bbf5fcc",
+    "source": "/private/tmp/fray-seatbelt-doctor-9be4977.py"
   }
 ]

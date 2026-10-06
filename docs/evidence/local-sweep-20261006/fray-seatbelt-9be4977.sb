@@ -1,0 +1,3 @@
+(version 1)
+(allow default)
+(deny process-exec (literal "/usr/bin/sandbox-exec"))

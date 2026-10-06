@@ -1,0 +1,219 @@
+{
+  "binary": "/private/tmp/fray-qualification-9be4977/fray",
+  "daemon_exit": -15,
+  "daemon_sandboxed": true,
+  "doctor": {
+    "agent": "synthetic",
+    "checks": [
+      {
+        "code": "keepalive_daemon_sandboxed",
+        "message": "The daemon is sandboxed and cannot start a usable keepalive. From the owner's own shell, run `fray stop`, then `fray start`; retry `fray keepalive` after the daemon is reachable.",
+        "severity": "error"
+      },
+      {
+        "code": "not_listening",
+        "message": "No live listener or managed runner is visible. Pending messages alone cannot wake an idle host; arm its supported adapter or perform an explicit wait.",
+        "severity": "warning"
+      }
+    ],
+    "client_build": "9be4977905d0",
+    "daemon": {
+      "build": "9be4977905d0",
+      "capabilities": [
+        "peer_discovery",
+        "review_subjects",
+        "reply_ack_batch",
+        "agents_all",
+        "reply_refs",
+        "long_messages",
+        "inbox_filters",
+        "attention_stream",
+        "wait_filters",
+        "attention_filters",
+        "wait_indefinite",
+        "read_batches",
+        "thread_unread",
+        "thread_compact",
+        "sessions",
+        "objection_gate",
+        "card_attention",
+        "mute",
+        "idle_readiness",
+        "ack_last",
+        "pending_send",
+        "addressed_full_text",
+        "owner_channel",
+        "lanes",
+        "session_continue",
+        "partner_routing",
+        "stats",
+        "mote_adapter",
+        "mote_sync",
+        "mote_reconcile",
+        "mote_subjects",
+        "mote_requests",
+        "ask_deadlines",
+        "escalations",
+        "listener_activation",
+        "keepalive"
+      ],
+      "capacity": {
+        "client_limit": 128,
+        "clients": 2,
+        "descriptor_limit": 1048575,
+        "long_limit": 112,
+        "long_lived": 0,
+        "short_reserved": 16
+      },
+      "protocol_version": 2,
+      "reachable": true,
+      "version": "0.2.1"
+    },
+    "diagnostic_version": 1,
+    "home": "/private/tmp/fray-seatbelt-doctor-203r2zs5",
+    "keepalive": {
+      "agent": "synthetic",
+      "daemon_sandboxed": true,
+      "state": "off",
+      "store_id": "c0faa0ce85e6b8c49736714f0de2ecca"
+    },
+    "listening": {
+      "activation": "unknown",
+      "activation_expired": false,
+      "activation_expires_ms": null,
+      "activation_source": "none",
+      "live": false,
+      "model_response_guaranteed": false,
+      "once": false,
+      "state": "absent",
+      "transport": "listener",
+      "transport_expires_ms": null
+    },
+    "model_response_guaranteed": false,
+    "pending_conversations": 0,
+    "read_only": true,
+    "registration": {
+      "enabled": true,
+      "recently_seen": true
+    },
+    "status": "blocked",
+    "store_id": "c0faa0ce85e6b8c49736714f0de2ecca",
+    "terminal_hooks": null
+  },
+  "doctor_exit": 0,
+  "home": "/private/tmp/fray-seatbelt-doctor-203r2zs5",
+  "home_removed": true,
+  "join": {
+    "data": {
+      "agent": "synthetic",
+      "agents": {
+        "items": [
+          {
+            "controller": null,
+            "enabled": true,
+            "keepalive": null,
+            "lanes": [],
+            "last_seen_ms": 1791319589591,
+            "listener": null,
+            "name": "synthetic",
+            "pending": false,
+            "reachability": "present",
+            "recently_seen": true,
+            "role": "worker",
+            "session": {
+              "bound": null,
+              "recent_takeover": null
+            },
+            "status": null,
+            "topics": [
+              "*"
+            ]
+          }
+        ],
+        "more": false
+      },
+      "attention": {
+        "addressed_to_me": false,
+        "agent": "synthetic",
+        "card_ids": [],
+        "cursor": 0,
+        "items": [],
+        "kinds": [],
+        "min_priority": null,
+        "more": false,
+        "read_is_not_ack": true,
+        "selection": "all",
+        "total": 0,
+        "unresolved": false
+      },
+      "available": {
+        "cursor": 0,
+        "items": [],
+        "more": false,
+        "next_offset": 0,
+        "total": 0
+      },
+      "blockers": {
+        "cursor": 0,
+        "items": [],
+        "more": false,
+        "next_offset": 0,
+        "total": 0
+      },
+      "budget_bytes": 12000,
+      "budget_truncated": false,
+      "claimed": {
+        "cursor": 0,
+        "items": [],
+        "more": false,
+        "next_offset": 0,
+        "total": 0
+      },
+      "context": {
+        "cursor": 0,
+        "items": [],
+        "more": false,
+        "next_offset": 0,
+        "total": 0
+      },
+      "cursor": 0,
+      "idle_readiness": {
+        "armed": false,
+        "enabled": true,
+        "listening": {
+          "activation": "unknown",
+          "activation_expired": false,
+          "activation_expires_ms": null,
+          "activation_source": "none",
+          "live": false,
+          "model_response_guaranteed": false,
+          "once": false,
+          "state": "absent",
+          "transport": "listener",
+          "transport_expires_ms": null
+        },
+        "model_response_guaranteed": false,
+        "open_requests_awaiting_others": 0
+      },
+      "note": "Current heads, not a historical digest. 'more' means additional live items exist. Attention acknowledgment does not resolve work.",
+      "store_id": "c0faa0ce85e6b8c49736714f0de2ecca",
+      "subscriptions": {
+        "note": "Existing receipts are retained, not acknowledged. Incidental receipt does not follow a conversation. Steward still receives all traffic; drive defaults to involved selection.",
+        "retained_pending_outside_scope": 0,
+        "topics": [
+          "*"
+        ]
+      },
+      "time_ms": 1791319589591
+    },
+    "ok": true
+  },
+  "native_host_invoked": false,
+  "pid": 41585,
+  "profile": "/private/tmp/fray-seatbelt-9be4977.sb",
+  "profile_scope": "custom real seatbelt denies process-exec of nested sandbox-exec; exercises release probe refusal only, not Codex inheritance or general nested-seatbelt behavior",
+  "recovery": [
+    "The daemon is sandboxed and cannot start a usable keepalive. From the owner's own shell, run `fray stop`, then `fray start`; retry `fray keepalive` after the daemon is reachable."
+  ],
+  "socket_exists_after_cleanup": true
+}
