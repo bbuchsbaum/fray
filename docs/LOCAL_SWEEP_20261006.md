@@ -45,6 +45,8 @@ trial is part of this sweep.
   while-away context, first-fork token baseline, session-scoped waits, pinned
   Team model/budget, and read-only doctor recovery reporting. Synthetic host
   integration passed 12/12; real host and sandbox qualification remains open.
+  Doctor skips keepalive probes when an older daemon does not advertise support;
+  the old-protocol fixture also exercises subsequent monitor and rewake calls.
 
 The core still has five direct dependencies and no unsafe code. The existing
 `rusqlite` dependency gains its online-backup feature; no new dependency is added.

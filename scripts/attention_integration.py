@@ -495,6 +495,8 @@ class Attention(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                 report=json.loads(result.stdout)
                 self.assertEqual(set(report['missing_capabilities']),{'listener_activation','read_batches'})
+                self.assertEqual(report['keepalive'],{'supported':False})
+                self.assertNotIn('keepalive_error',report)
                 self.assertIn('upgrade_required',[c['code'] for c in report['checks']])
                 with self.watch(adapter=True,home=home) as (process,lines):
                     notice=lines.get(timeout=3)

@@ -91,38 +91,45 @@ pub fn inspect(home: &Path, actor: &str) -> Result<Value> {
     report["listening"] = listening(agent, now_ms());
     // Read-only K2 visibility: terminal hook coverage and the keepalive's
     // durable state are reported without starting, stopping or rearming it.
-    match client::rpc(home, &Request::new("keepalive_status", actor, json!({})), 3) {
-        Ok(keepalive) => {
-            report["keepalive"] = keepalive.clone();
-            report["terminal_hooks"] = keepalive["terminal"].clone();
-            if keepalive["daemon_sandboxed"] == true {
-                add(
-                    &mut report,
-                    "keepalive_daemon_sandboxed",
-                    "error",
-                    sandbox_recovery(),
-                );
+    if daemon["capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|cap| cap == "keepalive"))
+    {
+        match client::rpc(home, &Request::new("keepalive_status", actor, json!({})), 3) {
+            Ok(keepalive) => {
+                report["keepalive"] = keepalive.clone();
+                report["terminal_hooks"] = keepalive["terminal"].clone();
+                if keepalive["daemon_sandboxed"] == true {
+                    add(
+                        &mut report,
+                        "keepalive_daemon_sandboxed",
+                        "error",
+                        sandbox_recovery(),
+                    );
+                }
+                if matches!(
+                    keepalive["state"].as_str(),
+                    Some("deferred" | "paused" | "stopping")
+                ) {
+                    add(
+                        &mut report,
+                        "keepalive_waiting",
+                        "warning",
+                        &format!(
+                            "Keepalive is {}: {}",
+                            keepalive["state"].as_str().unwrap_or("unknown"),
+                            keepalive["deferred"]
+                                .as_str()
+                                .or_else(|| keepalive["paused"].as_str())
+                                .unwrap_or("turn in progress")
+                        ),
+                    );
+                }
             }
-            if matches!(
-                keepalive["state"].as_str(),
-                Some("deferred" | "paused" | "stopping")
-            ) {
-                add(
-                    &mut report,
-                    "keepalive_waiting",
-                    "warning",
-                    &format!(
-                        "Keepalive is {}: {}",
-                        keepalive["state"].as_str().unwrap_or("unknown"),
-                        keepalive["deferred"]
-                            .as_str()
-                            .or_else(|| keepalive["paused"].as_str())
-                            .unwrap_or("turn in progress")
-                    ),
-                );
-            }
+            Err(error) => report["keepalive_error"] = json!(error),
         }
-        Err(error) => report["keepalive_error"] = json!(error),
+    } else {
+        report["keepalive"] = json!({"supported":false});
     }
     if agent["enabled"] != true {
         add(&mut report, "identity_left", "warning", "Identity has left. An old listener or registration does not authorize automatic rejoin.");
