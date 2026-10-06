@@ -1,0 +1,65 @@
+   Compiling mote v0.1.0 (/private/tmp/mote-63454fe-contract-check)
+warning: unused imports: `CandidateRevokeOp`, `Op`, and `candidate::AuthorizationStatus`
+ --> tests/review_regressions.rs:3:5
+  |
+3 |     candidate::AuthorizationStatus,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 |     ids,
+5 |     op::{CandidateRevokeOp, Op},
+  |          ^^^^^^^^^^^^^^^^^  ^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `revoke` is never used
+   --> tests/review_regressions.rs:183:8
+    |
+ 60 | impl Fixture {
+    | ------------ method in this implementation
+...
+183 |     fn revoke(&self) -> Command {
+    |        ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `wait_signal` is never used
+   --> tests/review_regressions.rs:211:4
+    |
+211 | fn wait_signal(path: &Path) {
+    |    ^^^^^^^^^^^
+
+warning: `mote` (test "review_regressions") generated 3 warnings (run `cargo fix --test "review_regressions"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running tests/review_regressions.rs (target/debug/deps/review_regressions-e95c9f97c6317f9f)
+
+running 4 tests
+REVIEW_LEGACY_CLAIM {"alice_first_accepted":true,"alice_still_accepted":false,"authority_enabled":false,"bob_accepted":true,"final_holder":"bob"}
+
+thread 'review_regression_first_claim_remains_winner_without_activation' (103362833) panicked at tests/review_regressions.rs:309:5:
+assertion `left == right` failed: later admission changed the previously accepted winner
+  left: Bool(false)
+ right: true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test review_regression_first_claim_remains_winner_without_activation ... FAILED
+REVIEW_FENCED_CLAIM {"alice_first_accepted":true,"alice_still_accepted":true,"authority_enabled":true,"bob_accepted":false,"final_holder":"alice"}
+test review_regression_activated_claim_order_positive_control ... ok
+REVIEW_MOVED_REF {"actual_target":"8ff565e049f0a46a9f4db86896bc2f9edad38ea6","exit":0,"moved_oid":"8ff565e049f0a46a9f4db86896bc2f9edad38ea6","result":{"actor":"lander","candidate_id":"cand-2049KT133MAQ7TVH5HD2GKTFPK","current_oid":"8ff565e049f0a46a9f4db86896bc2f9edad38ea6","detail":null,"git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpgCgIGw/.mote/authority/landing-11364f7bcc36cb442e4852bae336c0aaf144fd58e2f43735424e6e5e317e48af.json","new_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","old_oid":"a73f86836f9bf10650e45265ec5beb7909b4e1c1","outcome":"landed","phase":"Confirmed","repository_id":"repo-350af77f5e5fa8e818730669af562ef642b7775eabf98da0b3f743d5f794603d","retry":false,"target_current":false,"target_ref":"refs/heads/main"}}
+
+thread 'review_regression_ref_moved_after_final_check_is_nonzero' (103362834) panicked at tests/review_regressions.rs:284:5:
+first landing call reported success after target moved before confirmation: {"actor":"lander","candidate_id":"cand-2049KT133MAQ7TVH5HD2GKTFPK","current_oid":"8ff565e049f0a46a9f4db86896bc2f9edad38ea6","detail":null,"git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpgCgIGw/.mote/authority/landing-11364f7bcc36cb442e4852bae336c0aaf144fd58e2f43735424e6e5e317e48af.json","new_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","old_oid":"a73f86836f9bf10650e45265ec5beb7909b4e1c1","outcome":"landed","phase":"Confirmed","repository_id":"repo-350af77f5e5fa8e818730669af562ef642b7775eabf98da0b3f743d5f794603d","retry":false,"target_current":false,"target_ref":"refs/heads/main"}
+test review_regression_ref_moved_after_final_check_is_nonzero ... FAILED
+REVIEW_IO {"active_after_retry":false,"active_existed":true,"durable_phase":"Updated","exit":0,"result":{"actor":"lander","candidate_id":"cand-6MA50P075N02MWRFT2PFH3QZHQ","current_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","detail":"io error: Permission denied (os error 13)","git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpOeomTe/.mote/authority/landing-active.json","new_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","old_oid":"a73f86836f9bf10650e45265ec5beb7909b4e1c1","outcome":"landed","phase":"Confirmed","repository_id":"repo-8b544375688d47030e036c7f037e7993a90eb259a26c80c439ad23f5d271a349","retry":false,"target_current":true,"target_ref":"refs/heads/main"},"retry":{"actor":"lander","candidate_id":"cand-6MA50P075N02MWRFT2PFH3QZHQ","current_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","detail":null,"git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpOeomTe/.mote/authority/landing-11364f7bcc36cb442e4852bae336c0aaf144fd58e2f43735424e6e5e317e48af.json","new_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","old_oid":"a73f86836f9bf10650e45265ec5beb7909b4e1c1","outcome":"landed","phase":"Confirmed","repository_id":"repo-8b544375688d47030e036c7f037e7993a90eb259a26c80c439ad23f5d271a349","retry":true,"target_current":true,"target_ref":"refs/heads/main"},"retry_exit":0,"writer_exit":2,"writer_stderr":"error: the following required arguments were not provided:\n  --kind <NOTE_KIND>\n\nUsage: mote note --kind <NOTE_KIND> <ID> <TEXT>\n\nFor more information, try '--help'.\n"}
+
+thread 'review_regression_confirmed_journal_io_failure_is_nonzero' (103362832) panicked at tests/review_regressions.rs:260:5:
+journal I/O failure incorrectly returned success: {"actor":"lander","candidate_id":"cand-6MA50P075N02MWRFT2PFH3QZHQ","current_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","detail":"io error: Permission denied (os error 13)","git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpOeomTe/.mote/authority/landing-active.json","new_oid":"9ed5a5fc9cbf0c2856101884121c9a3a158835d1","old_oid":"a73f86836f9bf10650e45265ec5beb7909b4e1c1","outcome":"landed","phase":"Confirmed","repository_id":"repo-8b544375688d47030e036c7f037e7993a90eb259a26c80c439ad23f5d271a349","retry":false,"target_current":true,"target_ref":"refs/heads/main"}
+test review_regression_confirmed_journal_io_failure_is_nonzero ... FAILED
+
+failures:
+
+failures:
+    review_regression_confirmed_journal_io_failure_is_nonzero
+    review_regression_first_claim_remains_winner_without_activation
+    review_regression_ref_moved_after_final_check_is_nonzero
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.37s
+
+error: test failed, to rerun pass `--test review_regressions`

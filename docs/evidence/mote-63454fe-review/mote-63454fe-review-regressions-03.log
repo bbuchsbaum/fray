@@ -1,0 +1,49 @@
+   Compiling mote v0.1.0 (/private/tmp/mote-63454fe-contract-check)
+warning: unused imports: `CandidateRevokeOp`, `Op`, and `candidate::AuthorizationStatus`
+ --> tests/review_regressions.rs:3:5
+  |
+3 |     candidate::AuthorizationStatus,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 |     ids,
+5 |     op::{CandidateRevokeOp, Op},
+  |          ^^^^^^^^^^^^^^^^^  ^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `revoke` is never used
+   --> tests/review_regressions.rs:183:8
+    |
+ 60 | impl Fixture {
+    | ------------ method in this implementation
+...
+183 |     fn revoke(&self) -> Command {
+    |        ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `wait_signal` is never used
+   --> tests/review_regressions.rs:211:4
+    |
+211 | fn wait_signal(path: &Path) {
+    |    ^^^^^^^^^^^
+
+warning: `mote` (test "review_regressions") generated 3 warnings (run `cargo fix --test "review_regressions"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s
+     Running tests/review_regressions.rs (target/debug/deps/review_regressions-e95c9f97c6317f9f)
+
+running 1 test
+REVIEW_MOVED_REF {"actual_target":"ae73d6b6b3069040795bb48636315849a2f0c8cf","exit":0,"moved_oid":"ae73d6b6b3069040795bb48636315849a2f0c8cf","result":{"actor":"lander","candidate_id":"cand-3C48DH5F2B6GJ6XSZ4G17B6JA1","current_oid":"ae73d6b6b3069040795bb48636315849a2f0c8cf","detail":null,"git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmprjA46w/.mote/authority/landing-11364f7bcc36cb442e4852bae336c0aaf144fd58e2f43735424e6e5e317e48af.json","new_oid":"042f89c906b9bee26068be3bb526c84a8fe846a2","old_oid":"ae73d6b6b3069040795bb48636315849a2f0c8cf","outcome":"landed","phase":"Confirmed","repository_id":"repo-299ac7cc6279e3d11cbd35b1caf86774a5f6ca71812ea6a5564a0bf3388557aa","retry":false,"target_current":false,"target_ref":"refs/heads/main"}}
+
+thread 'review_regression_ref_moved_after_final_check_is_nonzero' (103382409) panicked at tests/review_regressions.rs:286:5:
+first landing call reported success after target moved before confirmation: {"actor":"lander","candidate_id":"cand-3C48DH5F2B6GJ6XSZ4G17B6JA1","current_oid":"ae73d6b6b3069040795bb48636315849a2f0c8cf","detail":null,"git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmprjA46w/.mote/authority/landing-11364f7bcc36cb442e4852bae336c0aaf144fd58e2f43735424e6e5e317e48af.json","new_oid":"042f89c906b9bee26068be3bb526c84a8fe846a2","old_oid":"ae73d6b6b3069040795bb48636315849a2f0c8cf","outcome":"landed","phase":"Confirmed","repository_id":"repo-299ac7cc6279e3d11cbd35b1caf86774a5f6ca71812ea6a5564a0bf3388557aa","retry":false,"target_current":false,"target_ref":"refs/heads/main"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test review_regression_ref_moved_after_final_check_is_nonzero ... FAILED
+
+failures:
+
+failures:
+    review_regression_ref_moved_after_final_check_is_nonzero
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.54s
+
+error: test failed, to rerun pass `--test review_regressions`

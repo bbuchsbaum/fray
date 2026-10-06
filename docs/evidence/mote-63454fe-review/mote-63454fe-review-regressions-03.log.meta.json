@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T23:22:32.377978+00:00",
+  "finished_utc": "2026-10-06T23:22:36.977759+00:00",
+  "duration_seconds": 4.599636,
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--test",
+    "review_regressions",
+    "review_regression_ref_moved_after_final_check_is_nonzero",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "/private/tmp/mote-63454fe-contract-check",
+  "log": "/private/tmp/mote-63454fe-review-regressions-03.log",
+  "exit_code": 101,
+  "child_returncode": 101,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 300.0,
+  "log_bytes": 3328
+}

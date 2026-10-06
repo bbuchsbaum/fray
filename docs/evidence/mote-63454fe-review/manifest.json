@@ -1,0 +1,87 @@
+[
+  {
+    "path": "mote-63454fe-ci-status.json",
+    "sha256": "a39b4909d30a2854db583b9b8afa83174dce6bceb33061fae9ae01f8d7452a59",
+    "source": "/private/tmp/mote-63454fe-ci-status.json"
+  },
+  {
+    "path": "mote-63454fe-contract-tests-01.log",
+    "sha256": "c97c9b3f315bb4aed608c09789bb66919af1f94e1c94fa9de36ceea3f036df41",
+    "source": "/private/tmp/mote-63454fe-contract-tests-01.log"
+  },
+  {
+    "path": "mote-63454fe-contract-tests-01.log.meta.json",
+    "sha256": "4e23a4afd9aff0a8dbf47163355ccd327246a2c215a18c920714b5683cb9ef07",
+    "source": "/private/tmp/mote-63454fe-contract-tests-01.log.meta.json"
+  },
+  {
+    "path": "mote-63454fe-macos-ci-failure.log",
+    "sha256": "20461daacebc3f665f19135ca3e924b7745f17e8e62a6c6b3bf3f01451422b68",
+    "source": "/private/tmp/mote-63454fe-macos-ci-failure.log"
+  },
+  {
+    "path": "mote-63454fe-review-regressions-01.log",
+    "sha256": "5f593de491a87b5bfbd186a2af5d4044a32e5fcba442e375fa3879221ebe20ab",
+    "source": "/private/tmp/mote-63454fe-review-regressions-01.log"
+  },
+  {
+    "path": "mote-63454fe-review-regressions-01.log.meta.json",
+    "sha256": "ba9ea774e872aa74194894a7d8a8bea2b4e047c67d082cc5dcd0a5f3400b40c2",
+    "source": "/private/tmp/mote-63454fe-review-regressions-01.log.meta.json"
+  },
+  {
+    "path": "mote-63454fe-review-regressions-02.log",
+    "sha256": "3e12ec3cf99968920ce5f29d2fe036945806ebe0232bdf29094b1fd4c217f4f1",
+    "source": "/private/tmp/mote-63454fe-review-regressions-02.log"
+  },
+  {
+    "path": "mote-63454fe-review-regressions-02.log.meta.json",
+    "sha256": "6bf19df5cce45d7e88a7aec2b0147871f69e459030b99122cc993684016a5bdf",
+    "source": "/private/tmp/mote-63454fe-review-regressions-02.log.meta.json"
+  },
+  {
+    "path": "mote-63454fe-review-regressions-03.log",
+    "sha256": "180ba339f6742d4c732005e991d0b216582af45216fb81272d481ce5182fb806",
+    "source": "/private/tmp/mote-63454fe-review-regressions-03.log"
+  },
+  {
+    "path": "mote-63454fe-review-regressions-03.log.meta.json",
+    "sha256": "b68598cdb69b7ab79984c32a7cf9378239f61b7d2c9a8538f0c18fc7f7f61775",
+    "source": "/private/tmp/mote-63454fe-review-regressions-03.log.meta.json"
+  },
+  {
+    "path": "mote-issue18-63454fe-comment-receipt.json",
+    "sha256": "be6115190af47b5b29a5e17270b2576003209f9b0f30711e7b6c4ea0302b6b4c",
+    "source": "/private/tmp/mote-issue18-63454fe-comment-receipt.json"
+  },
+  {
+    "path": "mote-issue18-63454fe-review.md",
+    "sha256": "e2ef873caefaa86a164618f2ab08a68116ff1cd67a67a25943b19cfce4d7e5fa",
+    "source": "/private/tmp/mote-issue18-63454fe-review.md"
+  },
+  {
+    "path": "review-provenance.json",
+    "sha256": "81fa75ab532fcdca1aa9c8435d3308bab6bb49b112f1705340d71c26add664e3",
+    "source": "/private/tmp/mote-63454fe-contract-check/review-provenance.json"
+  },
+  {
+    "path": "review-summary.json",
+    "sha256": "74ce810b87423d01fa6318a034cc1805c8b0da883477c4872dd87a1c73a8d6ce",
+    "source": "actual logs, CI and exact archived source verification"
+  },
+  {
+    "path": "review_regressions.rs",
+    "sha256": "a900a72652250db3a153b87a72436cdd08b2a00b51d2371ca7fa5cf22ae0b0fb",
+    "source": "/private/tmp/mote-63454fe-contract-check/tests/review_regressions.rs"
+  },
+  {
+    "path": "review_regressions_01.rs",
+    "sha256": "8b51466dea5ee07eb37d3905c776595af3858e6905d372dd11762a5125e1ea56",
+    "source": "reconstructed exact initial fixture before corrected writer probe"
+  },
+  {
+    "path": "review_regressions_02.rs",
+    "sha256": "6dc693961511bda15cdeb3f8bff10ed675941dc662438f4ebdb1852ccb1a0b2e",
+    "source": "exact fixture used for corrected IO probe; before stronger moved-ref case"
+  }
+]

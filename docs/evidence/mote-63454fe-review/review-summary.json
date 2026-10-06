@@ -1,0 +1,39 @@
+{
+  "revision": "63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1",
+  "product_files_verified_exact": 130,
+  "platform": "macOS-14.3-arm64-arm-64bit-Mach-O",
+  "existing_contract_tests": {
+    "passed": 37,
+    "failed": 0,
+    "names": [
+      "authority",
+      "coord",
+      "fenced_landing",
+      "handoff_authority"
+    ]
+  },
+  "additional_regressions": {
+    "passed": 1,
+    "failed": 3,
+    "result": "confirmed-journal I/O and moved-ref fresh landing both returned0/landed; unfenced later admission changed previously accepted claim holder; activated-store control passed"
+  },
+  "corrected_io_probe": {
+    "passed": 0,
+    "failed": 1,
+    "result": "same erroneous0/landed, durable phaseUpdated; ordinarynew command rejected for pending landing; byte-identical retry succeeded and removed activejournal"
+  },
+  "initial_io_probe_limitation": "The first fixture had an invalid note CLI writer probe; its landing I/O finding remains valid. The corrected second fixture proves the unrelated writer block.",
+  "hosted_ci": {
+    "run": "https://github.com/bbuchsbaum/mote/actions/runs/37545250747",
+    "linux_stable": "success",
+    "linux_1.85.0": "success",
+    "macos_stable": "failure; coord::a4_begin_race_exactly_one_succeeds both callers returned success"
+  },
+  "product_binary_sha256": "3a825911a1667cdc51cbad467741df601cbb338505570cf2883c13d173c6f90c",
+  "no_original_mote_source_or_live_store_changed": true,
+  "stronger_moved_ref_probe": {
+    "passed": 0,
+    "failed": 1,
+    "result": "external CAS moved main back to original preimage, away from candidate; first-call exit0/outcome landed with target_current:false and git_updated:true; ref was not reset by Mote"
+  }
+}

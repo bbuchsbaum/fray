@@ -1,0 +1,751 @@
+macos-latest / stable	UNKNOWN STEP	﻿2026-10-06T23:12:46.0401980Z Current runner version: '2.337.0'
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0470040Z ##[group]Runner Image Provisioner
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0471610Z Hosted Compute Agent
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0472620Z Version: 20260828.587
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0473710Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0475000Z Build Date: 2026-08-28T16:44:25Z
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0476170Z Worker ID: {e9166e50-dfaf-4d27-8e3d-4d419612e7c6}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0478630Z Azure Region: westus
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0479590Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0482960Z ##[group]Operating System
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0484090Z macOS
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0484940Z 26.6.2
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0485880Z 25G83
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0486740Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0487700Z ##[group]Runner Image
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0488770Z Image: macos-26-arm64
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0489800Z Version: 20260907.0351.1
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0492290Z Included Software: https://github.com/actions/runner-images/blob/macos-26-arm64/20260907.0351/images/macos/macos-26-arm64-Readme.md
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0495760Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-26-arm64%2F20260907.0351
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0497580Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0499720Z ##[group]GITHUB_TOKEN Permissions
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0504360Z Contents: read
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0505310Z Metadata: read
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0506230Z Packages: read
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0507140Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0512520Z Secret source: Actions
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0513220Z Cache mode: write
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0513760Z Prepare workflow directory
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0960560Z Prepare all required actions
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.0999170Z Getting action download info
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:46.5767520Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:47.0095650Z Download action repository 'dtolnay/rust-toolchain@master' (SHA:7e38f4b43b4db5c8dd498af069a4f6196df1d067)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:47.3292920Z Download action repository 'Swatinem/rust-cache@v2' (SHA:6323deb102c322ba6fcbdcafc7e3dddab59af2b6)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:47.9687590Z Complete job name: macos-latest / stable
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0871160Z ##[group]Run actions/checkout@v4
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0872030Z with:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0872440Z   repository: bbuchsbaum/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0883210Z   token: ***
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0884640Z   ssh-strict: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0885660Z   ssh-user: git
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0886720Z   persist-credentials: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0888740Z   clean: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0889510Z   sparse-checkout-cone-mode: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0890300Z   fetch-depth: 1
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0893460Z   fetch-tags: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0894890Z   show-progress: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0895500Z   lfs: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0896260Z   submodules: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0908830Z   set-safe-directory: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0909490Z   allow-unsafe-pr-checkout: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0914420Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0915000Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0917630Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.0918050Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.8475740Z Syncing repository: bbuchsbaum/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.8478070Z ##[group]Getting Git version info
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.8478990Z Working directory is '/Users/runner/work/mote/mote'
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.8480000Z [command]/opt/homebrew/bin/git version
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9566710Z git version 2.55.0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9813960Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9850410Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/ec2b80dc-de92-4857-a19c-4377736bf09e/.gitconfig'
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9858240Z Temporarily overriding HOME='/Users/runner/work/_temp/ec2b80dc-de92-4857-a19c-4377736bf09e' before making global git config changes
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9865860Z Adding repository directory to the temporary git global config as a safe directory
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9876120Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/mote/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9880360Z Deleting the contents of '/Users/runner/work/mote/mote'
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9882040Z ##[group]Initializing the repository
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:48.9883030Z [command]/opt/homebrew/bin/git init /Users/runner/work/mote/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0234240Z hint: Using 'master' as the name for the initial branch. This default branch name
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0241340Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0244610Z hint: to use in all of your new repositories, which will suppress this warning,
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0247530Z hint: call:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0248340Z hint:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0249300Z hint: 	git config --global init.defaultBranch <name>
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0252320Z hint:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0253560Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0259960Z hint: 'development'. The just-created branch can be renamed via this command:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0265680Z hint:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0266470Z hint: 	git branch -m <name>
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0267490Z hint:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0268820Z hint: Disable this message with "git config set advice.defaultBranchName false"
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0270740Z Initialized empty Git repository in /Users/runner/work/mote/mote/.git/
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0279370Z [command]/opt/homebrew/bin/git remote add origin https://github.com/bbuchsbaum/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0427440Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0429760Z ##[group]Disabling automatic garbage collection
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0433750Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0778610Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0779930Z ##[group]Setting up auth
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0781720Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.0828660Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.2910190Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.2985960Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.4659420Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.4980930Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.7273170Z [command]/opt/homebrew/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.7584690Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.7688640Z ##[group]Fetching the repository
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:49.7791410Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1:refs/remotes/origin/main
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4619070Z From https://github.com/bbuchsbaum/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4623710Z  * [new ref]         63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1 -> origin/main
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4637980Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4639890Z ##[group]Determining the checkout info
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4641410Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4642710Z [command]/opt/homebrew/bin/git sparse-checkout disable
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4788220Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4880880Z ##[group]Checking out the ref
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.4885420Z [command]/opt/homebrew/bin/git checkout --progress --force -B main refs/remotes/origin/main
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.5711560Z Switched to a new branch 'main'
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.5733760Z branch 'main' set up to track 'origin/main'.
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.5763350Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.5977270Z [command]/opt/homebrew/bin/git log -1 --format=%H
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6156790Z 63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6946830Z ##[group]Run dtolnay/rust-toolchain@master
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6947750Z with:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6948470Z   toolchain: stable
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6949230Z   components: rustfmt, clippy
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6949920Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6950660Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6951520Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.6952270Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7053070Z ##[start-action display=Parse toolchain version;id=__dtolnay_rust-toolchain.parse]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7137330Z ##[group]Run if [[ -z $toolchain ]]; then
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7138440Z ^[[36;1mif [[ -z $toolchain ]]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7139960Z ^[[36;1m  # GitHub does not enforce `required: true` inputs itself. https://github.com/actions/runner/issues/1070^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7141420Z ^[[36;1m  echo "'toolchain' is a required input" >&2^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7142660Z ^[[36;1m  exit 1^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7143850Z ^[[36;1melif [[ $toolchain =~ ^stable' '[0-9]+' '(year|month|week|day)s?' 'ago$ ]]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7144990Z ^[[36;1m  if [[ macOS == macOS ]]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7146430Z ^[[36;1m    echo "toolchain=1.$((($(date -v-$(sed 's/stable \([0-9]*\) \(.\).*/\1\2/' <<< $toolchain) +%s)/60/60/24-16569)/7/6))" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7148160Z ^[[36;1m  else^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7149440Z ^[[36;1m    echo "toolchain=1.$((($(date --date "${toolchain#stable }" +%s)/60/60/24-16569)/7/6))" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7150750Z ^[[36;1m  fi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7151560Z ^[[36;1melif [[ $toolchain =~ ^stable' 'minus' '[0-9]+' 'releases?$ ]]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7153010Z ^[[36;1m  echo "toolchain=1.$((($(date +%s)/60/60/24-16569)/7/6-${toolchain//[^0-9]/}))" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7154310Z ^[[36;1melif [[ $toolchain =~ ^1\.[0-9]+$ ]]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7155690Z ^[[36;1m  echo "toolchain=1.$((i=${toolchain#1.}, c=($(date +%s)/60/60/24-16569)/7/6, i+9*i*(10*i<=c)+90*i*(100*i<=c)))" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7157020Z ^[[36;1melse^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7157900Z ^[[36;1m  echo "toolchain=$toolchain" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7158960Z ^[[36;1mfi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7229040Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7230050Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7230660Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7231430Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7232390Z   toolchain: stable
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.7233070Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8417460Z ##[end-action id=__dtolnay_rust-toolchain.parse;outcome=success;conclusion=success;duration_ms=135]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8459220Z ##[start-action display=Construct rustup command line;id=__dtolnay_rust-toolchain.flags]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8691060Z ##[group]Run echo "targets=$(for t in ${targets//,/ }; do echo -n ' --target' $t; done)" >> $GITHUB_OUTPUT
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8692880Z ^[[36;1mecho "targets=$(for t in ${targets//,/ }; do echo -n ' --target' $t; done)" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8695130Z ^[[36;1mecho "components=$(for c in ${components//,/ }; do echo -n ' --component' $c; done)" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8696620Z ^[[36;1mecho "downgrade=" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8782160Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8783080Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8783870Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8784590Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8785300Z   targets: 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8785930Z   components: rustfmt, clippy
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.8786610Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9490330Z ##[end-action id=__dtolnay_rust-toolchain.flags;outcome=success;conclusion=success;duration_ms=102]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9506310Z ##[start-action display=Set $CARGO_HOME;id=__dtolnay_rust-toolchain.__run]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9595520Z ##[group]Run echo CARGO_HOME=${CARGO_HOME:-"$HOME/.cargo"} >> $GITHUB_ENV
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9598380Z ^[[36;1mecho CARGO_HOME=${CARGO_HOME:-"$HOME/.cargo"} >> $GITHUB_ENV^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9641220Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9642250Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9643120Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9643810Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:50.9644460Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0121490Z ##[end-action id=__dtolnay_rust-toolchain.__run;outcome=success;conclusion=success;duration_ms=61]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0127510Z ##[start-action display=Install rustup if needed;id=__dtolnay_rust-toolchain.__run_2]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0200060Z ##[group]Run if ! command -v rustup &>/dev/null; then
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0201000Z ^[[36;1mif ! command -v rustup &>/dev/null; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0202760Z ^[[36;1m  curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0204550Z ^[[36;1m  echo "$CARGO_HOME/bin" >> $GITHUB_PATH^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0205420Z ^[[36;1mfi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0248860Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0249880Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0250560Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0251310Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0252080Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0252860Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0657600Z ##[end-action id=__dtolnay_rust-toolchain.__run_2;outcome=success;conclusion=success;duration_ms=52]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0663220Z ##[start-action display=Install rustup if needed on windows;id=__dtolnay_rust-toolchain.__run_3]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0681230Z ##[end-action id=__dtolnay_rust-toolchain.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0694400Z ##[start-action display=rustup toolchain install stable;id=__dtolnay_rust-toolchain.__run_4]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0741970Z ##[group]Run log=$(mktemp)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0742680Z ^[[36;1mlog=$(mktemp)^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0743360Z ^[[36;1mtrap 'rm -f "$log"' EXIT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0744140Z ^[[36;1mfor attempt in 1 2 3 4 5; do^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0745870Z ^[[36;1m  if rustup toolchain install stable --component rustfmt --component clippy --profile minimal --no-self-update --force-non-host 2>&1 | tee "$log"; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0800390Z ^[[36;1m    break^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0801060Z ^[[36;1m  else^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0801680Z ^[[36;1m    status=$?^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0802290Z ^[[36;1m  fi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0803320Z ^[[36;1m  if [[ $attempt == 5 ]] || ! grep -Fq 'checksum failed for ' "$log" \^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0804940Z ^[[36;1m      || ! grep -Fq 'this is likely due to an ongoing update of the official release server' "$log"; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0806460Z ^[[36;1m    exit "$status"^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0807180Z ^[[36;1m  fi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0808140Z ^[[36;1m  echo "Retrying rustup toolchain install in 30 seconds (retry $attempt of 4)" >&2^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0809450Z ^[[36;1m  sleep 30^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0810130Z ^[[36;1mdone^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0866940Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0868710Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0870670Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0872330Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0873850Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0875510Z   RUSTUP_PERMIT_COPY_RENAME: 1
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.0879060Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.6160760Z info: syncing channel updates for stable-aarch64-apple-darwin
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.7793450Z info: latest update on 2026-10-01 for version 1.99.0 (b940084d7 2026-09-28)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.7950780Z info: removing previous version of component clippy
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.8005620Z info: removing previous version of component rustfmt
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.8043110Z info: removing previous version of component cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.8111290Z info: removing previous version of component rust-std
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.8262670Z info: removing previous version of component rustc
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:51.8432730Z info: downloading 5 components
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.6299660Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.6673930Z   stable-aarch64-apple-darwin updated - rustc 1.99.0 (b940084d7 2026-09-28) (from rustc 1.98.1 (48a229cea 2026-09-01))
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.6675450Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.6675670Z info: self-update is disabled for this build of rustup
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.6676220Z info: any updates to rustup will need to be fetched with your system package manager
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7084810Z ##[end-action id=__dtolnay_rust-toolchain.__run_4;outcome=success;conclusion=success;duration_ms=7635]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7091910Z ##[start-action display=rustup default stable;id=__dtolnay_rust-toolchain.__run_5]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7115010Z ##[group]Run rustup default stable --force-non-host
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7115410Z ^[[36;1mrustup default stable --force-non-host^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7149780Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7150070Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7150240Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7150490Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7150700Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7150910Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7814830Z info: using existing install for stable-aarch64-apple-darwin
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7831360Z info: default toolchain set to stable-aarch64-apple-darwin
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.7831630Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8007580Z   stable-aarch64-apple-darwin unchanged - rustc 1.99.0 (b940084d7 2026-09-28)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8008090Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8023740Z ##[end-action id=__dtolnay_rust-toolchain.__run_5;outcome=success;conclusion=success;duration_ms=93]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8025880Z ##[start-action display=Create cachekey;id=__dtolnay_rust-toolchain.rustc-version]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8045850Z ##[group]Run DATE=$(rustc +stable --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8046780Z ^[[36;1mDATE=$(rustc +stable --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8047340Z ^[[36;1mHASH=$(rustc +stable --version --verbose | sed -ne 's/^commit-hash: //p')^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8047750Z ^[[36;1mecho "cachekey=$(echo $DATE$HASH | head -c12)" >> $GITHUB_OUTPUT^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8080540Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8080830Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8081010Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8081260Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8081580Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.8081870Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9069690Z ##[end-action id=__dtolnay_rust-toolchain.rustc-version;outcome=success;conclusion=success;duration_ms=104]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9072540Z ##[start-action display=Disable incremental compilation;id=__dtolnay_rust-toolchain.__run_6]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9092730Z ##[group]Run if [ -z "${CARGO_INCREMENTAL+set}" ]; then
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9093190Z ^[[36;1mif [ -z "${CARGO_INCREMENTAL+set}" ]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9093550Z ^[[36;1m  echo CARGO_INCREMENTAL=0 >> $GITHUB_ENV^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9093910Z ^[[36;1mfi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9143080Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9143450Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9143620Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9143800Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9144070Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9144290Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9483690Z ##[end-action id=__dtolnay_rust-toolchain.__run_6;outcome=success;conclusion=success;duration_ms=40]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9485750Z ##[start-action display=Enable colors in Cargo output;id=__dtolnay_rust-toolchain.__run_7]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9502620Z ##[group]Run if [ -z "${CARGO_TERM_COLOR+set}" ]; then
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9502950Z ^[[36;1mif [ -z "${CARGO_TERM_COLOR+set}" ]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9503240Z ^[[36;1m  echo CARGO_TERM_COLOR=always >> $GITHUB_ENV^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9503990Z ^[[36;1mfi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9536400Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9536790Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9536950Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9537150Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9537330Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9537550Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9537710Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9865220Z ##[end-action id=__dtolnay_rust-toolchain.__run_7;outcome=success;conclusion=success;duration_ms=37]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9867730Z ##[start-action display=Enable Cargo sparse registry;id=__dtolnay_rust-toolchain.__run_8]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9886930Z ##[group]Run # implemented in 1.66, stabilized in 1.68, made default in 1.70
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9887380Z ^[[36;1m# implemented in 1.66, stabilized in 1.68, made default in 1.70^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9887980Z ^[[36;1mif [ -z "${CARGO_REGISTRIES_CRATES_IO_PROTOCOL+set}" -o -f "/Users/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol ]; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9888650Z ^[[36;1m  if rustc +stable --version --verbose | grep -q '^release: 1\.6[89]\.'; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9889230Z ^[[36;1m    touch "/Users/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol || true^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9889720Z ^[[36;1m    echo CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse >> $GITHUB_ENV^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9890230Z ^[[36;1m  elif rustc +stable --version --verbose | grep -q '^release: 1\.6[67]\.'; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9890720Z ^[[36;1m    touch "/Users/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol || true^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9891270Z ^[[36;1m    echo CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git >> $GITHUB_ENV^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9891560Z ^[[36;1m  fi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9891710Z ^[[36;1mfi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9923340Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9923610Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9923790Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9924040Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9924270Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9924480Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:58.9924640Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0773400Z ##[end-action id=__dtolnay_rust-toolchain.__run_8;outcome=success;conclusion=success;duration_ms=90]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0775640Z ##[start-action display=Work around spurious network errors in curl 8.0;id=__dtolnay_rust-toolchain.__run_9]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0792300Z ##[group]Run # https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/timeout.20investigation
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0792930Z ^[[36;1m# https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/timeout.20investigation^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0793440Z ^[[36;1mif rustc +stable --version --verbose | grep -q '^release: 1\.7[01]\.'; then^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0793850Z ^[[36;1m  echo CARGO_HTTP_MULTIPLEXING=false >> $GITHUB_ENV^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0794120Z ^[[36;1mfi^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0823830Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0824150Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0824300Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0824490Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0824680Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0824910Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.0825070Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1405820Z ##[end-action id=__dtolnay_rust-toolchain.__run_9;outcome=success;conclusion=success;duration_ms=62]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1409130Z ##[start-action display=rustc +stable --version --verbose;id=__dtolnay_rust-toolchain.__run_10]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1427390Z ##[group]Run rustc +stable --version --verbose
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1427710Z ^[[36;1mrustc +stable --version --verbose^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1458010Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1458270Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1458430Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1458620Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1459070Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1459430Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.1459620Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2010390Z rustc 1.99.0 (b940084d7 2026-09-28)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2010710Z binary: rustc
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2010940Z commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2011230Z commit-date: 2026-09-28
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2011430Z host: aarch64-apple-darwin
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2011630Z release: 1.99.0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2012810Z LLVM version: 23.1.1
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2026430Z ##[end-action id=__dtolnay_rust-toolchain.__run_10;outcome=success;conclusion=success;duration_ms=61]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2114570Z ##[group]Run Swatinem/rust-cache@v2
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2114800Z with:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2114950Z   prefix-key: v0-rust
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2115130Z   add-job-id-key: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2115330Z   add-rust-environment-hash-key: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2115540Z   cache-targets: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2115760Z   cache-all-crates: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2115950Z   cache-workspace-crates: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2116250Z   save-if: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2116440Z   cache-provider: github
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2116630Z   cache-bin: true
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2116790Z   lookup-only: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2116950Z   cmd-format: {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2117110Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2117250Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2117440Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2117620Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2117820Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.2117980Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5855280Z ##[group]Cache Configuration
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5856360Z Cache Provider:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5857050Z     github
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5857660Z Workspaces:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5858290Z     /Users/runner/work/mote/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5859060Z Cache Paths:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5859680Z     /Users/runner/.cargo/bin
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5869080Z     /Users/runner/.cargo/.crates.toml
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5869600Z     /Users/runner/.cargo/.crates2.json
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5869860Z     /Users/runner/.cargo/registry
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5870060Z     /Users/runner/.cargo/git
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5870330Z     /Users/runner/work/mote/mote/target
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5870600Z Restore Key:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5871560Z     v0-rust-test-Darwin-arm64-2d9a0fc5
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5871830Z Cache Key:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5872050Z     v0-rust-test-Darwin-arm64-2d9a0fc5-7e400b80
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5872360Z .. Prefix:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5872550Z   - v0-rust-test-Darwin-arm64
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5872820Z .. Environment considered:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5873850Z   - Rust Versions:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5874290Z     - 1.99.0 aarch64-apple-darwin b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5874660Z   - CARGO_HOME
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5874870Z   - CARGO_INCREMENTAL
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5875080Z   - CARGO_TERM_COLOR
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5875280Z   - RUSTFLAGS
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5875480Z .. Lockfiles considered:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5875740Z   - /Users/runner/work/mote/mote/Cargo.lock
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5876030Z   - /Users/runner/work/mote/mote/Cargo.toml
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5876560Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5876690Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.5876750Z ... Restoring cache ...
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:12:59.8720960Z Cache hit for restore-key: v0-rust-test-Darwin-arm64-2d9a0fc5-a175d5a8
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:01.1350280Z Received 0 of 151993319 (0.0%), 0.0 MBs/sec
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:02.1364510Z Received 88080384 of 151993319 (58.0%), 41.9 MBs/sec
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:03.1381790Z Received 143604711 of 151993319 (94.5%), 45.6 MBs/sec
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:03.2114890Z Received 151993319 of 151993319 (100.0%), 47.1 MBs/sec
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:03.2119590Z Cache Size: ~145 MB (151993319 B)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:03.2144970Z [command]/opt/homebrew/bin/gtar -xf /Users/runner/work/_temp/b88d7b7b-0f21-45f1-9bd8-c7aaab135517/cache.tzst -P -C /Users/runner/work/mote/mote --delay-directory-restore --use-compress-program unzstd
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:04.9724160Z Cache restored successfully
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:04.9756120Z Restored from cache key "v0-rust-test-Darwin-arm64-2d9a0fc5-a175d5a8" full match: false.
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0167520Z ##[group]Run cargo fmt --all -- --check
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0167810Z ^[[36;1mcargo fmt --all -- --check^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0203920Z shell: /bin/bash -e {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0204110Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0204310Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0204900Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0205120Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0205330Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0205510Z   CACHE_ON_FAILURE: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.0205710Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8393520Z ##[group]Run cargo clippy --all-targets --no-deps --locked -- -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8394030Z ^[[36;1mcargo clippy --all-targets --no-deps --locked -- -D warnings^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8431010Z shell: /bin/bash -e {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8431220Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8431510Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8431750Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8432830Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8433490Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8433970Z   CACHE_ON_FAILURE: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:05.8434460Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:06.1626340Z ^[[1m^[[92m    Updating^[[0m crates.io index
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:06.5237130Z ^[[1m^[[92m Downloading^[[0m crates ...
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:07.4196920Z ^[[1m^[[92m  Downloaded^[[0m fs2 v0.4.3
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:07.4899730Z ^[[1m^[[92m    Checking^[[0m fs2 v0.4.3
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:08.0699490Z ^[[1m^[[92m    Checking^[[0m mote v0.1.0 (/Users/runner/work/mote/mote)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.0179320Z ^[[1m^[[92m    Finished^[[0m `dev` profile [unoptimized + debuginfo] target(s) in 18.04s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1031380Z ##[group]Run cargo test --all-targets --locked
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1033240Z ^[[36;1mcargo test --all-targets --locked^[[0m
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1159540Z shell: /bin/bash -e {0}
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1160240Z env:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1160550Z   CARGO_TERM_COLOR: always
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1160930Z   RUSTFLAGS: -D warnings
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1161350Z   CARGO_HOME: /Users/runner/.cargo
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1161700Z   CARGO_INCREMENTAL: 0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1162130Z   CACHE_ON_FAILURE: false
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.1162420Z ##[endgroup]
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:24.9925610Z ^[[1m^[[92m   Compiling^[[0m fs2 v0.4.3
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:13:25.2348010Z ^[[1m^[[92m   Compiling^[[0m mote v0.1.0 (/Users/runner/work/mote/mote)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.8376670Z ^[[1m^[[92m    Finished^[[0m `test` profile [unoptimized + debuginfo] target(s) in 1m 02s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9261460Z ^[[1m^[[92m     Running^[[0m unittests src/lib.rs (target/debug/deps/mote-2bce8f061c4f0b64)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9526620Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9529310Z running 94 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9667390Z test candidate::landability_reason_tests::blocking_is_independent_from_class_and_reason_presence ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9669790Z test canonical::tests::empty_collections ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9670560Z test canonical::tests::escapes_basic_specials ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9671050Z test canonical::tests::escapes_control_chars ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9671560Z test candidate::landability_reason_tests::legacy_reason_json_derives_additive_fields_from_its_code ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9672130Z test canonical::tests::nested_objects_and_arrays ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9672490Z test canonical::tests::round_trip_is_idempotent ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9676380Z test canonical::tests::numbers_are_compact ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9681580Z test canonical::tests::sorts_keys ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9682680Z test canonical::tests::unicode_passes_through_as_utf8 ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9715820Z test candidate::landability_reason_tests::every_reason_code_has_one_stable_class_and_remains_blocking ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9729670Z test discussion_pulse::tests::old_unread_survives_activity_window_and_boundary_is_inclusive ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9735540Z test discussion_pulse::tests::explicit_attention_dimensions_survive_mark_read_until_their_own_lifecycle_closes ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9747830Z test discussion_pulse::tests::one_actor_cannot_create_a_burst ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9748390Z test discussion_pulse::tests::retracted_and_superseded_posts_are_not_current_activity ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9749050Z test discussion_pulse::tests::busy_and_solitary_topics_remain_visible_in_separate_lanes ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9749600Z test discussion_pulse::tests::self_replies_do_not_clear_no_external_reply ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:26.9750250Z test discussion_pulse::tests::solitary_new_respects_cursor_self_post_and_first_external_reply_boundaries ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0076310Z test events::tests::message_event_contains_full_payload_and_stable_schema ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0162910Z test events::tests::derived_reservation_expiry_is_cursorable_exactly_once_and_close_suppresses_it ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0338620Z test ids::tests::counter_is_unique_per_invocation ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0340650Z test ids::tests::hash6_is_six_hex_chars ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0341840Z test ids::tests::id_prefixes ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0343070Z test ids::tests::names_sort_lex_in_time_order ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0344150Z test ids::tests::op_name_round_trip ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0345120Z test ids::tests::parse_accepts_json_suffix ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0350890Z test ids::tests::parse_rejects_bad_hex_in_counter ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0351360Z test ids::tests::parse_rejects_non_digit_pid ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0351800Z test ids::tests::parse_rejects_short_name ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0352210Z test ids::tests::parse_rejects_short_timestamp ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0352590Z test ids::tests::timestamp_formats_match_spec ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0361550Z test ids::tests::timestamp_zero_subsec ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0364510Z test ids::tests::validate_external_bead_id_accepts_typical_external_ids ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0367650Z test ids::tests::validate_external_bead_id_rejects_bad_inputs ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0368850Z test ids::tests::validate_external_bead_id_rejects_too_long ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0469100Z test op::tests::create_round_trip ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0473300Z test op::tests::dep_add_default_kind ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0473880Z test op::tests::note_kind_validator ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0479180Z test op::tests::op_kind_names ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0479780Z test op::tests::patch_with_expect ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0484460Z test op::tests::rejects_unknown_kind ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0486730Z test op::tests::rejects_unknown_status ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0487130Z test op::tests::rel_add_default_kind ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0487680Z test paths::tests::normalize_basics ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0488180Z test paths::tests::normalize_collapses_double_slashes ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0488630Z test paths::tests::normalize_rejects_absolute ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0489400Z test paths::tests::normalize_rejects_dotdot ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0491570Z test paths::tests::normalize_rejects_empty ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0491940Z test paths::tests::overlap_dir_vs_dir ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0496220Z test paths::tests::overlap_disjoint_files ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0496830Z test paths::tests::overlap_prd_examples ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0497800Z test paths::tests::overlap_trailing_slash_irrelevant ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0498330Z test reducer::tests::create_then_patch_disjoint_fields_succeeds ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0503400Z test reducer::tests::dep_self_dependency_rejected ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0505280Z test reducer::tests::patch_same_field_race_only_one_accepted ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0513820Z test reducer::tests::replay_is_deterministic ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0529450Z test reducer::tests::tag_add_idempotent ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0555280Z test repo::tests::actor_flag_trims_whitespace ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0574770Z test repo::tests::actor_flag_wins_over_env ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0588820Z test repo::tests::discover_errors_when_absent ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0603070Z test repo::tests::discover_walks_up ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0615490Z test repo::tests::init_creates_layout ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0635170Z test repo::tests::init_twice_fails ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0657820Z test events::tests::prefix_replay_matches_a_fresh_replay_of_every_prefix_in_any_order ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0668250Z test server::tests::console_cookie_is_found_without_confusing_neighboring_names ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0691050Z test repo::tests::list_op_filenames_is_sorted ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0786780Z test server::tests::launch_token_is_128_random_bits_persisted_privately ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0787820Z test server::tests::token_comparison_handles_equal_unequal_and_different_lengths ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0853210Z test tui::tests::agent_view_is_explicit_and_useful_at_narrow_widths ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0859080Z test tui::tests::candidate_detail_distinguishes_unavailable_git_evidence_from_landable ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0861380Z test tui::tests::changing_discussion_topic_resets_post_cursor_and_scroll ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.0999530Z test tui::tests::discussion_decisions_show_citations_and_textual_question_status ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1003330Z test tui::tests::discussion_headers_expose_superseded_and_retracted_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1004170Z test tui::tests::discussion_page_keys_scroll_post_pane_without_moving_topic_selection ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1008200Z test tui::tests::discussion_post_lines_include_full_bodies_and_all_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1009650Z test tui::tests::discussion_pulse_uses_textual_non_color_lane_labels ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1010960Z test tui::tests::focused_posts_pane_jumps_post_to_post ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1139850Z test tui::tests::jumping_posts_puts_the_target_header_at_the_top_of_the_pane ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1146980Z test tui::tests::next_unread_post_wraps_around ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1147570Z test tui::tests::orphan_replies_still_appear_once ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1152690Z test tui::tests::page_scroll_keeps_cursor_on_the_topmost_visible_post ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1153230Z test tui::tests::post_navigation_is_inert_without_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1153750Z test tui::tests::post_start_offsets_point_at_each_header_row ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1154480Z test tui::tests::replies_are_indented_under_their_parent ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1158870Z test tui::tests::short_ts_compacts_rfc3339 ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1159590Z test tui::tests::unfocused_posts_pane_still_moves_topics ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1160220Z test tui::tests::wrap_line_breaks_words_longer_than_the_pane ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1160700Z test tui::tests::wrap_line_fits_the_pane_and_keeps_indentation ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1241610Z test tui::tests::wrap_line_handles_empty_and_zero_width ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1244990Z test tui::tests::wrapped_body_rows_never_exceed_the_pane_width ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1314200Z test watch::tests::periodic_snapshot_time_refreshes_presence_after_lease_expiry ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.1318030Z test watch::tests::snapshot_candidate_schema_retains_structured_landability_reasons ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4279180Z ^[[1m^[[92m     Running^[[0m unittests src/main.rs (target/debug/deps/mote-49e5ecf6a662ea43)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4279830Z test server::tests::one_shared_snapshot_is_refreshed_after_publication ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4381150Z ^[[1m^[[92m     Running^[[0m tests/actor_identity.rs (target/debug/deps/actor_identity-43aeaa42f185f3e5)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4381840Z test events::tests::fallback_tick_wakes_a_tailer_without_fs_notifications ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4484050Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4562990Z test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4570310Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4586050Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4593440Z running 0 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4598880Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4605400Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4610830Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4611220Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.4611650Z running 4 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.5558880Z test empty_human_inbox_names_actor_and_source_without_changing_json_shape ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.5964630Z test changing_local_actor_cannot_retag_an_activated_session ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.7415970Z test local_identity_fails_closed_for_writes_when_sessions_are_concurrent ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8282840Z test actor_list_inbox_count_invariant_survives_mixed_send_ack_and_reply ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8283290Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8283500Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8284390Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8286110Z ^[[1m^[[92m     Running^[[0m tests/actor_status.rs (target/debug/deps/actor_status-d467e8a5210f3799)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8510990Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.8511280Z running 4 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9246130Z test injected_time_derives_live_mixed_and_expired_without_making_heartbeat_work ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9304420Z test recipient_only_is_untracked_until_ack_and_read_markers_are_interactions ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9324830Z test cli_schema_is_stable_embedded_in_actor_list_and_passive_queries_append_nothing ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9523720Z test work_and_attention_reuse_tracker_and_mailbox_dispositions ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9524130Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9528150Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9528700Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9529110Z ^[[1m^[[92m     Running^[[0m tests/authority.rs (target/debug/deps/authority-2317ee5cfeb1e710)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9601390Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9603030Z running 3 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9844450Z test missing_or_modified_authority_data_fails_closed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:27.9888330Z test bypassing_publisher_cannot_inject_an_earlier_operation ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0053600Z test activation_preserves_prefix_and_admits_late_operations_after_it ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0054100Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0054500Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0054930Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0056910Z ^[[1m^[[92m     Running^[[0m tests/candidate_policy_amendments.rs (target/debug/deps/candidate_policy_amendments-8f2c70ac516bda8a)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0247140Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.0247400Z running 4 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1116860Z test removing_then_readding_a_reviewer_does_not_revive_their_old_approval ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1130570Z test amendment_is_authorizer_owned_cas_and_cannot_remove_every_requirement ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1482090Z test authorizer_amends_named_reviewers_without_discarding_remaining_approval ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1611190Z test supersession_reports_every_review_that_does_not_carry ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1611720Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1612060Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1612770Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1613660Z ^[[1m^[[92m     Running^[[0m tests/candidate_protocol.rs (target/debug/deps/candidate_protocol-0b40e49e1ff57ff5)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1664760Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.1666430Z running 36 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.2279820Z test authorization_race_and_idempotency_fail_closed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.2437510Z test abandoned_ancestor_blocks_only_when_introduced_after_base_and_ambiguity_fails_closed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.3096090Z test abandoned_reconciliation_requires_an_exact_audited_override_and_preserves_history ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.6662980Z test candidate_cli_reconciliation_rejects_non_ancestor_target ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:28.7370670Z test candidate_cli_reconciles_out_of_band_without_rewriting_governance ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.1282140Z test candidate_cli_records_an_explicit_operator_override_without_claiming_authorizer_identity ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.1546230Z test candidate_cli_happy_path_and_json_schema ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.2034070Z test candidate_reservation_rejects_undeclared_paths_and_terminal_candidates ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.2392760Z test concurrent_revoke_invalidates_only_reservations_already_active_at_its_replay_position ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.2722130Z test concurrent_v2_snapshots_that_omit_each_other_remain_stale ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.3026880Z test conflicting_determinate_pair_observations_fail_closed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.3415580Z test candidate_cli_records_an_idempotent_git_only_ancestry_override ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.3594820Z test cross_repository_override_requires_a_current_exact_object_bridge ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.4315530Z test explicit_operator_override_is_audited_and_does_not_impersonate_the_authorizer ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.4894260Z test explicit_operator_override_requires_complete_clocks_without_breaking_legacy_authorizer_replay ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.5106520Z test external_receipts_bind_exact_oid_and_allow_required_producers_to_share_a_digest ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.8651750Z test candidate_cli_recovers_a_legacy_abandonment_without_rewriting_it ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9132240Z test happy_path_consumes_authorization_and_is_replay_deterministic ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9553510Z test hidden_pending_ancestor_blocks_until_superseded_by_descendant ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9891020Z test later_snapshot_omission_does_not_erase_an_explicit_pair_fact ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9917480Z test legacy_candidate_reconcile_payload_defaults_to_no_override_basis ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9924760Z test legacy_candidate_supersede_payload_defaults_to_owner_mode ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9925790Z test legacy_git_ancestry_payload_defaults_to_one_directional_schema ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:29.9948730Z test legacy_store_replays_with_empty_candidate_map ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.0262540Z test newer_v2_receipt_exposes_a_hidden_ancestor_of_an_older_candidate ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.0570530Z test newer_v2_receipt_resolves_an_unrelated_older_candidate_without_refreshing_it ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.0735540Z test ordinary_supersession_still_accepts_the_predecessor_authorizer ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.2383420Z test git_probe_distinguishes_already_in_base_introduced_and_unrelated_relations ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.2749930Z test out_of_band_reconciliation_preserves_policy_and_resolves_descendants ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.3025270Z test reciprocal_v2_evidence_with_the_wrong_known_base_cannot_resolve_a_pair ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.3280670Z test review_cas_and_terminal_abandon_are_one_way ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.3523590Z test stale_pair_diagnostic_falls_back_honestly_for_legacy_receipts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.4789280Z test reachability_probe_fails_closed_for_identity_ref_and_object_gaps ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.5318090Z test successor_authorizer_can_recover_only_with_exact_complete_containment_evidence ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.5415150Z test evidence_refresh_clears_abandoned_commit_already_in_base_without_rewriting_history ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7313500Z test superseded_candidate_ancestry_has_a_fail_closed_audited_refresh_path ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7313900Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7314220Z test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7314590Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7321500Z ^[[1m^[[92m     Running^[[0m tests/candidate_repository_portability.rs (target/debug/deps/candidate_repository_portability-c8545de31d0f8690)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7482210Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.7482830Z running 5 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.9871630Z test landing_repository_binding_is_authorizer_owned_and_compare_and_set ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:30.9958580Z test availability_gate_is_typed_and_parent_anchored ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.6110770Z test legacy_source_bound_candidate_can_be_explicitly_rebound_and_terminalized ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.6348030Z test operator_reconciles_across_repositories_without_rewriting_provenance ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7686570Z test standalone_proposal_blocks_until_shared_repository_has_object_then_lands ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7691110Z ^[[1m^[[92m     Running^[[0m tests/candidate_role_reviews.rs (target/debug/deps/candidate_role_reviews-e503c16f14c94507)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7691600Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7691960Z test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7693730Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7744980Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.7746650Z running 8 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.8233670Z test a_later_overlapping_reservation_makes_a_role_approval_ineligible ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.8547060Z test a_role_block_expires_with_its_assignment_and_reassignment_can_satisfy_quorum ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.8988060Z test cli_role_review_uses_exact_assignment_and_retries_without_appending ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:31.9000450Z test legacy_policy_stays_compatible_and_role_policy_wire_fails_closed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.0172020Z test named_and_role_slots_are_distinct_and_exclusions_are_rechecked ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.0222760Z test quorum_counts_distinct_bound_reviews_and_expiry_reopens_the_gap ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.0518530Z test supersession_removes_contextual_role_demand_and_terminal_review_is_rejected ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2053940Z test cli_propose_accepts_the_paired_role_and_count_policy ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2054480Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2055150Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2055660Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2058640Z ^[[1m^[[92m     Running^[[0m tests/candidate_target_scope.rs (target/debug/deps/candidate_target_scope-f46d415d6dc35f5c)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2225530Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.2225780Z running 12 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.7554510Z test direct_target_is_blocked_until_exact_scope_then_becomes_landable ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.7562510Z test landing_repository_binding_advance_makes_prior_scope_stale ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:32.8094760Z test divergent_recorded_base_cannot_hide_candidate_side_paths ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:33.5573470Z test landing_result_with_same_path_content_substitution_is_rejected ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:33.5676180Z test landing_result_with_an_unscoped_actual_effect_is_rejected ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:33.7121910Z test linear_target_advancement_cannot_reuse_an_older_scope_preimage ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:34.1581470Z test rename_scope_conservatively_contains_source_and_destination ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:34.4021510Z test reducer_rejects_a_landing_tree_that_disagrees_with_scope ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:34.4476740Z test repository_and_binding_identity_are_derived_and_reducer_checked ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:34.8133350Z test target_scope_refuses_candidate_already_reachable_from_target ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:34.8640410Z test target_advancement_invalidates_the_recorded_landing_preimage ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0432840Z test target_side_rename_expands_scope_to_the_actual_destination ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0433450Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0434350Z test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.82s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0434800Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0443870Z ^[[1m^[[92m     Running^[[0m tests/claims_and_msgs.rs (target/debug/deps/claims_and_msgs-903b325858dc6b6d)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0523750Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0526170Z running 23 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.0983450Z test claim_accepts_human_ttl_and_retains_seconds_on_wire ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.1671630Z test a6_msg_send_inbox_ack_round_trip ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.2140380Z test claim_release_round_trip_via_cli ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.2544920Z test discussion_board_post_list_topics_and_reply ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.2547870Z test discussion_board_rejects_cross_topic_reply ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.2775760Z test discussion_board_rejects_missing_reply_parent ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.3606350Z test discussion_board_unread_cursor_tracks_new_external_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.4187800Z test discussion_list_and_search_limit_caps_sticky_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.4513500Z test discussion_mark_read_empty_topic_reports_no_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.4934070Z test discussion_list_and_search_limit_keep_stickies_with_newest_hits ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.4990910Z test discussion_post_accepts_body_flag_and_rejects_ambiguous_text ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.5368710Z test discussion_search_topic_filter_keeps_results_in_scope ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.5520480Z test discussion_sticky_is_idempotent_and_rejects_unknown_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.7058810Z test discussion_thread_view_and_topic_read_cursor_support_forum_workflow ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.8159580Z test discussion_topic_creation_search_activity_and_sticky_posts ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.8285080Z test discussion_supersession_and_retraction_are_author_owned_and_deterministic ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.8590420Z test discussion_topic_new_body_creates_visible_initial_post ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.8777530Z test discussion_topics_upgrade_implicit_once_and_reject_duplicate_explicit_create ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:35.9472650Z test msg_thread_filters_by_issue_and_kind ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:36.0435820Z test discussion_unread_pages_are_chronological_stable_and_markable_through ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:36.0657990Z test msg_thread_shows_both_directions_including_sent_and_acked ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:36.0849820Z test ready_excludes_foreign_claimed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2605830Z test a5_claim_lease_expiry_yields_to_next_actor ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2606270Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2606710Z test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2618310Z ^[[1m^[[92m     Running^[[0m tests/cli_ergonomics.rs (target/debug/deps/cli_ergonomics-f1fd79990cb4507c)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2618740Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2737250Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2738190Z running 5 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.2890500Z test ambiguous_discussion_positionals_are_rejected_with_named_topic_recovery ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.3002940Z test observed_message_near_misses_name_both_safe_forms ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.3207120Z test help_exposes_shortest_safe_forms_without_hiding_canonical_send ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4301460Z test one_discussion_positional_keeps_its_existing_body_meaning ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4308060Z ^[[1m^[[92m     Running^[[0m tests/cmd_done_race.rs (target/debug/deps/cmd_done_race-1e194f3f4b754f49)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4308580Z test send_and_assign_are_thin_aliases_for_the_canonical_operations ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4309020Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4309410Z test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4309900Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4367540Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.4371030Z running 2 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:37.6439550Z test cmd_done_succeeds_in_calm_window ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1096870Z test cmd_done_loses_close_race_to_concurrent_writer ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1198940Z ^[[1m^[[92m     Running^[[0m tests/coord.rs (target/debug/deps/coord-04644fab0825639f)
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1199360Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1300280Z test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1400240Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1516640Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1618180Z running 14 tests
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.1723320Z test a7_path_overlap_examples ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.2136550Z test a4_begin_race_exactly_one_succeeds ... FAILED
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.2338850Z test begin_compensates_when_claim_fails ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.2440170Z test begin_marks_open_work_doing_and_removes_it_from_ready ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.2759150Z test concurrent_same_actor_duplicate_attempts_converge_to_exactly_one ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.2863490Z test cli_smoke_done_compound ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.2970410Z test expired_orphan_cannot_be_adopted_and_closed_claim_cannot_be_renewed ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.3508270Z test preflight_reports_overlaps_and_clear_paths ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.3679750Z test orphan_adoption_cas_race_accepts_exactly_one ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.4537090Z test reservation_accepts_human_ttl_and_rejects_overflow ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.4670420Z test reserve_blocks_overlapping_from_other_actor ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.4778050Z test orphaned_reservation_is_visible_blocking_and_adoptable_with_provenance ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5064090Z test who_has_finds_overlapping_holders ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5075640Z test reserve_rejects_same_actor_overlap_with_existing_reservation_diagnostic ... ok
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5183040Z ^[[1m^[[91merror^[[0m: test failed, to rerun pass `--test coord`
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5186570Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5206780Z failures:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5207680Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5208770Z ---- a4_begin_race_exactly_one_succeeds stdout ----
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5209500Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5216450Z thread 'a4_begin_race_exactly_one_succeeds' (26513) panicked at tests/coord.rs:333:5:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5244410Z exactly one begin must succeed: a.success=true b.success=true a.stderr= b.stderr=
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5245160Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5245620Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5246640Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5247050Z failures:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5247430Z     a4_begin_race_exactly_one_succeeds
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5247800Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5248250Z test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5248730Z 
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5285430Z ##[error]Process completed with exit code 101.
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:38.5667030Z Post job cleanup.
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.1972540Z [command]/opt/homebrew/bin/git version
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2084150Z git version 2.55.0
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2115470Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/37f45795-7b02-4bc7-9445-630adf7ac647/.gitconfig'
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2132390Z Temporarily overriding HOME='/Users/runner/work/_temp/37f45795-7b02-4bc7-9445-630adf7ac647' before making global git config changes
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2134540Z Adding repository directory to the temporary git global config as a safe directory
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2136530Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/mote/mote
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2337260Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.2363820Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.4997290Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.5100530Z http.https://github.com/.extraheader
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.5368680Z [command]/opt/homebrew/bin/git config --local --unset-all http.https://github.com/.extraheader
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.5489810Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.7111030Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.7427470Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:39.9258820Z Cleaning up orphan processes
+macos-latest / stable	UNKNOWN STEP	2026-10-06T23:14:42.8141410Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

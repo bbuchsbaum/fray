@@ -1,0 +1,49 @@
+   Compiling mote v0.1.0 (/private/tmp/mote-63454fe-contract-check)
+warning: unused imports: `CandidateRevokeOp`, `Op`, and `candidate::AuthorizationStatus`
+ --> tests/review_regressions.rs:3:5
+  |
+3 |     candidate::AuthorizationStatus,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 |     ids,
+5 |     op::{CandidateRevokeOp, Op},
+  |          ^^^^^^^^^^^^^^^^^  ^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `revoke` is never used
+   --> tests/review_regressions.rs:183:8
+    |
+ 60 | impl Fixture {
+    | ------------ method in this implementation
+...
+183 |     fn revoke(&self) -> Command {
+    |        ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `wait_signal` is never used
+   --> tests/review_regressions.rs:211:4
+    |
+211 | fn wait_signal(path: &Path) {
+    |    ^^^^^^^^^^^
+
+warning: `mote` (test "review_regressions") generated 3 warnings (run `cargo fix --test "review_regressions"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.53s
+     Running tests/review_regressions.rs (target/debug/deps/review_regressions-e95c9f97c6317f9f)
+
+running 1 test
+REVIEW_IO {"active_after_retry":false,"active_existed":true,"durable_phase":"Updated","exit":0,"result":{"actor":"lander","candidate_id":"cand-5PQNMCMXEZQ15D0RW4JX2ZZ30C","current_oid":"caf1fc944f1fc09c1117a471676832b3378ee286","detail":"io error: Permission denied (os error 13)","git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpRwyIy0/.mote/authority/landing-active.json","new_oid":"caf1fc944f1fc09c1117a471676832b3378ee286","old_oid":"c94038268510c3df284f4694b1e64fc7441c9f97","outcome":"landed","phase":"Confirmed","repository_id":"repo-2096367c24c593233cba1762a736948aeefa64a735878b404f2c814dfaf7c6e3","retry":false,"target_current":true,"target_ref":"refs/heads/main"},"retry":{"actor":"lander","candidate_id":"cand-5PQNMCMXEZQ15D0RW4JX2ZZ30C","current_oid":"caf1fc944f1fc09c1117a471676832b3378ee286","detail":null,"git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpRwyIy0/.mote/authority/landing-11364f7bcc36cb442e4852bae336c0aaf144fd58e2f43735424e6e5e317e48af.json","new_oid":"caf1fc944f1fc09c1117a471676832b3378ee286","old_oid":"c94038268510c3df284f4694b1e64fc7441c9f97","outcome":"landed","phase":"Confirmed","repository_id":"repo-2096367c24c593233cba1762a736948aeefa64a735878b404f2c814dfaf7c6e3","retry":true,"target_current":true,"target_ref":"refs/heads/main"},"retry_exit":0,"writer_exit":2,"writer_stderr":"mote: op rejected: landing recovery required; retry the recorded candidate land request before publishing other mutations\n"}
+
+thread 'review_regression_confirmed_journal_io_failure_is_nonzero' (103370149) panicked at tests/review_regressions.rs:262:5:
+journal I/O failure incorrectly returned success: {"actor":"lander","candidate_id":"cand-5PQNMCMXEZQ15D0RW4JX2ZZ30C","current_oid":"caf1fc944f1fc09c1117a471676832b3378ee286","detail":"io error: Permission denied (os error 13)","git_updated":true,"git_updated_unknown":false,"idempotency_key":"landing","journal":"/var/folders/9h/nkjq6vss7mqdl4ck7q1hd8ph0000gp/T/.tmpRwyIy0/.mote/authority/landing-active.json","new_oid":"caf1fc944f1fc09c1117a471676832b3378ee286","old_oid":"c94038268510c3df284f4694b1e64fc7441c9f97","outcome":"landed","phase":"Confirmed","repository_id":"repo-2096367c24c593233cba1762a736948aeefa64a735878b404f2c814dfaf7c6e3","retry":false,"target_current":true,"target_ref":"refs/heads/main"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test review_regression_confirmed_journal_io_failure_is_nonzero ... FAILED
+
+failures:
+
+failures:
+    review_regression_confirmed_journal_io_failure_is_nonzero
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.54s
+
+error: test failed, to rerun pass `--test review_regressions`

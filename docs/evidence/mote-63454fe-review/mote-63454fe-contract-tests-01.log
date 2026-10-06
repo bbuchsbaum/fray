@@ -1,0 +1,175 @@
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling zerocopy v0.8.48
+   Compiling bitflags v2.11.1
+   Compiling getrandom v0.3.4
+   Compiling rustversion v1.0.22
+   Compiling strsim v0.11.1
+   Compiling fnv v1.0.7
+   Compiling heck v0.5.0
+   Compiling parking_lot_core v0.9.12
+   Compiling signal-hook v0.3.18
+   Compiling log v0.4.29
+   Compiling ident_case v1.0.1
+   Compiling serde_core v1.0.228
+   Compiling rustix v0.38.44
+   Compiling scopeguard v1.2.0
+   Compiling utf8parse v0.2.2
+   Compiling smallvec v1.15.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling anstyle-parse v1.0.0
+   Compiling cc v1.2.61
+   Compiling lock_api v0.4.14
+   Compiling paste v1.0.15
+   Compiling rustix v1.1.4
+   Compiling instability v0.3.10
+   Compiling anstyle-query v1.1.5
+   Compiling getrandom v0.4.2
+   Compiling either v1.15.0
+   Compiling foldhash v0.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling itoa v1.0.18
+   Compiling anstyle v1.0.14
+   Compiling zmij v1.0.21
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling anstream v1.0.0
+   Compiling itertools v0.13.0
+   Compiling hashbrown v0.15.5
+   Compiling blake3 v1.8.5
+   Compiling instant v0.1.13
+   Compiling autocfg v1.5.0
+   Compiling same-file v1.0.6
+   Compiling unicode-segmentation v1.13.2
+   Compiling serde_json v1.0.149
+   Compiling errno v0.3.14
+   Compiling mio v1.2.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.9.5
+   Compiling parking_lot v0.12.5
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-mio v0.2.5
+   Compiling anyhow v1.0.102
+   Compiling serde v1.0.228
+   Compiling static_assertions v1.1.0
+   Compiling ryu v1.0.23
+   Compiling indoc v2.0.7
+   Compiling unicode-width v0.1.14
+   Compiling clap_lex v1.1.0
+   Compiling unicode-truncate v1.1.0
+   Compiling clap_builder v4.6.0
+   Compiling crossterm v0.28.1
+   Compiling syn v2.0.117
+   Compiling filetime v0.2.29
+   Compiling castaway v0.2.4
+   Compiling fsevent-sys v4.1.0
+   Compiling num-traits v0.2.19
+   Compiling walkdir v2.5.0
+   Compiling notify-types v1.0.1
+   Compiling lru v0.12.5
+   Compiling arrayvec v0.7.6
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling unicode-width v0.2.0
+   Compiling memchr v2.8.0
+   Compiling cassowary v0.3.0
+   Compiling fastrand v2.4.1
+   Compiling once_cell v1.21.4
+   Compiling notify v7.0.0
+   Compiling jiff v0.2.24
+   Compiling wait-timeout v0.2.1
+   Compiling tempfile v3.27.0
+   Compiling fs2 v0.4.3
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling rand_xorshift v0.4.0
+   Compiling compact_str v0.8.1
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling ppv-lite86 v0.2.21
+   Compiling darling_core v0.20.11
+   Compiling rand_chacha v0.9.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.9.4
+   Compiling rand v0.8.6
+   Compiling strum_macros v0.26.4
+   Compiling clap_derive v4.6.1
+   Compiling serde_derive v1.0.228
+   Compiling ulid v1.2.1
+   Compiling proptest v1.11.0
+   Compiling darling_macro v0.20.11
+   Compiling strum v0.26.3
+   Compiling darling v0.20.11
+   Compiling clap v4.6.1
+   Compiling ratatui v0.29.0
+   Compiling mote v0.1.0 (/private/tmp/mote-63454fe-contract-check)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.05s
+     Running tests/authority.rs (target/debug/deps/authority-91343ceeae28a654)
+
+running 3 tests
+test missing_or_modified_authority_data_fails_closed ... ok
+test bypassing_publisher_cannot_inject_an_earlier_operation ... ok
+test activation_preserves_prefix_and_admits_late_operations_after_it ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/coord.rs (target/debug/deps/coord-55273acab8af1d1e)
+
+running 14 tests
+test a7_path_overlap_examples ... ok
+test reservation_accepts_human_ttl_and_rejects_overflow ... ok
+test concurrent_same_actor_duplicate_attempts_converge_to_exactly_one ... ok
+test reserve_blocks_overlapping_from_other_actor ... ok
+test reserve_rejects_same_actor_overlap_with_existing_reservation_diagnostic ... ok
+test who_has_finds_overlapping_holders ... ok
+test preflight_reports_overlaps_and_clear_paths ... ok
+test begin_marks_open_work_doing_and_removes_it_from_ready ... ok
+test expired_orphan_cannot_be_adopted_and_closed_claim_cannot_be_renewed ... ok
+test begin_compensates_when_claim_fails ... ok
+test a4_begin_race_exactly_one_succeeds ... ok
+test cli_smoke_done_compound ... ok
+test orphan_adoption_cas_race_accepts_exactly_one ... ok
+test orphaned_reservation_is_visible_blocking_and_adoptable_with_provenance ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+
+     Running tests/fenced_landing.rs (target/debug/deps/fenced_landing-b4e4c8b55cedd90a)
+
+running 9 tests
+test revoke_before_authority_boundary_and_non_grantee_leave_git_unchanged ... ok
+test changed_ref_after_git_update_reports_truth_and_does_not_reset ... ok
+test moved_preimage_before_any_git_attempt_aborts_and_unblocks_writers ... ok
+test late_earlier_stamped_revoke_cannot_rewrite_committed_authority ... ok
+test exact_landing_and_byte_identical_retry ... ok
+test rejected_confirmation_never_claims_git_was_unchanged ... ok
+test revocation_between_final_read_and_ref_update_is_fenced ... ok
+test killed_process_releases_lock_but_retains_authority_for_recovery ... ok
+test restart_at_every_durable_landing_boundary ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.18s
+
+     Running tests/handoff_authority.rs (target/debug/deps/handoff_authority-9d0c9a55b4310ec5)
+
+running 11 tests
+test no_precondition_pair_is_silently_completed ... ok
+test nonholder_and_raw_claim_cas_do_not_bypass_authority ... ok
+test public_claim_token_does_not_authorize_release_or_release_a_replacement ... ok
+test stale_precheck_cannot_transfer_replacement_claim_or_write_note ... ok
+test reservation_release_is_atomic_with_successful_handoff ... ok
+test expired_claim_and_changed_retry_payload_are_explicit ... ok
+test competing_handoffs_have_one_winner_and_retry_does_not_transfer_again ... ok
+test competing_carrier_adoptions_have_one_winner_with_exact_token ... ok
+test crash_at_each_publication_step_reuses_exact_bytes ... ok
+test restart_after_new_lease_expires_reports_historical_transfer_only ... ok
+test handoff_leaves_carrier_orphaned_and_adoption_requires_live_ttl ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+
