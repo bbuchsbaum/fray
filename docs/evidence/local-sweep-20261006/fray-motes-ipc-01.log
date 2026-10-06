@@ -1,0 +1,43 @@
+test_batch_receipts_cli_rejects_wrong_store_without_partial_ack (__main__.Integration.test_batch_receipts_cli_rejects_wrong_store_without_partial_ack) ... ok
+test_busy_and_idle_controllers_refresh_presence_without_model_polling (__main__.Integration.test_busy_and_idle_controllers_refresh_presence_without_model_polling) ... ok
+test_child_failure_does_not_report_a_live_controller_or_ack (__main__.Integration.test_child_failure_does_not_report_a_live_controller_or_ack) ... ok
+test_claim_race_has_exactly_one_winner (__main__.Integration.test_claim_race_has_exactly_one_winner) ... ok
+test_cli_and_claude_hook_contract (__main__.Integration.test_cli_and_claude_hook_contract) ... ok
+test_cli_byte_budget (__main__.Integration.test_cli_byte_budget) ... ok
+test_conversation_with_two_managers_and_scoped_peers_survives_restart (__main__.Integration.test_conversation_with_two_managers_and_scoped_peers_survives_restart) ... ok
+test_crash_restart_preserves_committed_heads_and_inbox (__main__.Integration.test_crash_restart_preserves_committed_heads_and_inbox) ... ok
+test_drive_stops_when_child_ignores_its_receipts (__main__.Integration.test_drive_stops_when_child_ignores_its_receipts) ... ok
+test_drive_supplies_context_to_child (__main__.Integration.test_drive_supplies_context_to_child) ... ok
+test_drive_wakes_from_idle_and_supplies_new_attention (__main__.Integration.test_drive_wakes_from_idle_and_supplies_new_attention) ... ok
+test_duplicate_controller_and_child_timeout_are_visible (__main__.Integration.test_duplicate_controller_and_child_timeout_are_visible) ... ok
+test_empty_drive_does_not_invoke_child_but_explicit_bootstrap_does (__main__.Integration.test_empty_drive_does_not_invoke_child_but_explicit_bootstrap_does) ... ok
+test_enter_keeps_roster_available_to_child_session_start (__main__.Integration.test_enter_keeps_roster_available_to_child_session_start) ... ok
+test_explicit_all_selection_processes_discovery_and_logs_no_token_estimate (__main__.Integration.test_explicit_all_selection_processes_discovery_and_logs_no_token_estimate) ... ok
+test_find_discovers_boards_without_creating_or_switching_them (__main__.Integration.test_find_discovers_boards_without_creating_or_switching_them) ... ok
+test_hooks_do_not_reinject_context_inside_drive (__main__.Integration.test_hooks_do_not_reinject_context_inside_drive) ... ok
+test_invalid_shutdown_returns_error_and_keeps_connection_usable (__main__.Integration.test_invalid_shutdown_returns_error_and_keeps_connection_usable) ... ok
+test_involved_wait_ignores_broadcasts_but_wakes_for_outgoing_reply (__main__.Integration.test_involved_wait_ignores_broadcasts_but_wakes_for_outgoing_reply) ... ok
+test_long_body_files_readable_threads_and_filtered_inbox (__main__.Integration.test_long_body_files_readable_threads_and_filtered_inbox) ... ok
+test_malformed_frame_does_not_kill_daemon (__main__.Integration.test_malformed_frame_does_not_kill_daemon) ... ok
+test_old_daemon_is_rejected_without_shutdown_or_registration (__main__.Integration.test_old_daemon_is_rejected_without_shutdown_or_registration) ... ok
+test_oversize_receipt_becomes_a_pointer_instead_of_aborting (__main__.Integration.test_oversize_receipt_becomes_a_pointer_instead_of_aborting) ... ok
+test_pairing_help_and_pending_roster_cleanup (__main__.Integration.test_pairing_help_and_pending_roster_cleanup) ... ok
+test_pairing_reply_ack_warning_and_thread_revision (__main__.Integration.test_pairing_reply_ack_warning_and_thread_revision) ... ok
+test_partial_progress_drains_backlog_without_requiring_one_huge_turn (__main__.Integration.test_partial_progress_drains_backlog_without_requiring_one_huge_turn) ... ok
+test_peer_hints_respect_brief_budget_and_failed_output_does_not_consume (__main__.Integration.test_peer_hints_respect_brief_budget_and_failed_output_does_not_consume) ... ok
+test_peer_only_hook_notice_and_stop_nonblocking (__main__.Integration.test_peer_only_hook_notice_and_stop_nonblocking) ... ok
+test_reply_refs_survive_restart_and_are_searchable (__main__.Integration.test_reply_refs_survive_restart_and_are_searchable) ... ok
+test_same_key_retry_after_restart (__main__.Integration.test_same_key_retry_after_restart) ... ok
+test_selected_manager_does_not_stall_on_unrelated_retained_receipts (__main__.Integration.test_selected_manager_does_not_stall_on_unrelated_retained_receipts) ... ok
+test_snapshot_cli_and_review_candidate_round_trip (__main__.Integration.test_snapshot_cli_and_review_candidate_round_trip) ... ok
+test_unpresented_backlog_cannot_hide_an_ignored_packet (__main__.Integration.test_unpresented_backlog_cannot_hide_an_ignored_packet) ... ok
+test_wait_wakes_for_committed_work (__main__.Integration.test_wait_wakes_for_committed_work) ... ok
+test_wait_wakes_when_scope_change_seeds_existing_attention (__main__.Integration.test_wait_wakes_when_scope_change_seeds_existing_attention) ... ok
+test_watch_reconnect_checks_protocol_before_resubscribing (__main__.Integration.test_watch_reconnect_checks_protocol_before_resubscribing) ... ok
+test_watch_replays_then_follows (__main__.Integration.test_watch_replays_then_follows) ... ok
+test_watch_startup_race_never_loses_events (__main__.Integration.test_watch_startup_race_never_loses_events) ... ok
+
+----------------------------------------------------------------------
+Ran 38 tests in 43.161s
+
+OK

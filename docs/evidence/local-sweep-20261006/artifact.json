@@ -1,0 +1,7 @@
+{
+  "source_sha": "9be4977905d018bd081081c8407a7546e2aecae7",
+  "binary_sha256": "4ab56b765aa8fd84fed95cb52d9a344e3f4f2139aa2c806e2deb37246a61b825",
+  "version": "fray 0.2.1 (9be4977905d0)",
+  "budget": "Local synthetic data; 30 peers, four watches; 60s warmup +7200s measure, outer timeout7500s; no paid hosts or external writes",
+  "outputs": "/private/tmp/fray-qualification-9be4977/soak"
+}

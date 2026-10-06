@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:13:16.602964+00:00",
+  "finished_utc": "2026-10-06T20:13:59.213858+00:00",
+  "duration_seconds": 42.610356,
+  "command": [
+    "python3",
+    "-W",
+    "error::ResourceWarning",
+    "scripts/drive_integration.py",
+    "target/debug/fray",
+    "Drive.test_child_using_the_terminal_fails_fast_instead_of_hanging"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-drive-tty-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 120.0,
+  "log_bytes": 3614
+}

@@ -1,0 +1,187 @@
+{
+  "runs": 36,
+  "tests_per_run": 38,
+  "seconds": 85.08833091706038,
+  "results": [
+    {
+      "run": 0,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-00.log"
+    },
+    {
+      "run": 1,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-01.log"
+    },
+    {
+      "run": 2,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-02.log"
+    },
+    {
+      "run": 3,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-03.log"
+    },
+    {
+      "run": 4,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-04.log"
+    },
+    {
+      "run": 5,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-05.log"
+    },
+    {
+      "run": 6,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-06.log"
+    },
+    {
+      "run": 7,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-07.log"
+    },
+    {
+      "run": 8,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-08.log"
+    },
+    {
+      "run": 9,
+      "exit": 0,
+      "log": "/tmp/fray-motes-36way/run-09.log"
+    },
+    {
+      "run": 10,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-10.log"
+    },
+    {
+      "run": 11,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-11.log"
+    },
+    {
+      "run": 12,
+      "exit": 0,
+      "log": "/tmp/fray-motes-36way/run-12.log"
+    },
+    {
+      "run": 13,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-13.log"
+    },
+    {
+      "run": 14,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-14.log"
+    },
+    {
+      "run": 15,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-15.log"
+    },
+    {
+      "run": 16,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-16.log"
+    },
+    {
+      "run": 17,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-17.log"
+    },
+    {
+      "run": 18,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-18.log"
+    },
+    {
+      "run": 19,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-19.log"
+    },
+    {
+      "run": 20,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-20.log"
+    },
+    {
+      "run": 21,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-21.log"
+    },
+    {
+      "run": 22,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-22.log"
+    },
+    {
+      "run": 23,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-23.log"
+    },
+    {
+      "run": 24,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-24.log"
+    },
+    {
+      "run": 25,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-25.log"
+    },
+    {
+      "run": 26,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-26.log"
+    },
+    {
+      "run": 27,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-27.log"
+    },
+    {
+      "run": 28,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-28.log"
+    },
+    {
+      "run": 29,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-29.log"
+    },
+    {
+      "run": 30,
+      "exit": 0,
+      "log": "/tmp/fray-motes-36way/run-30.log"
+    },
+    {
+      "run": 31,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-31.log"
+    },
+    {
+      "run": 32,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-32.log"
+    },
+    {
+      "run": 33,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-33.log"
+    },
+    {
+      "run": 34,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-34.log"
+    },
+    {
+      "run": 35,
+      "exit": 101,
+      "log": "/tmp/fray-motes-36way/run-35.log"
+    }
+  ]
+}

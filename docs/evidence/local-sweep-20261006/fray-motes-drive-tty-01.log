@@ -1,0 +1,28 @@
+test_child_using_the_terminal_fails_fast_instead_of_hanging (__main__.Drive.test_child_using_the_terminal_fails_fast_instead_of_hanging) ... ok
+test_group_ignoring_term_is_killed_and_verified (__main__.Drive.test_group_ignoring_term_is_killed_and_verified) ... ok
+test_interrupt_mode_restarts_the_turn_with_the_objection (__main__.Drive.test_interrupt_mode_restarts_the_turn_with_the_objection) ... ok
+test_new_objection_is_seen_behind_many_presented_urgent_items (__main__.Drive.test_new_objection_is_seen_behind_many_presented_urgent_items) ... ok
+test_objection_during_running_turn_is_reported_queued_not_presented (__main__.Drive.test_objection_during_running_turn_is_reported_queued_not_presented) ... ok
+test_oversized_receipt_becomes_fetchable_pointer_beside_other_attention (__main__.Drive.test_oversized_receipt_becomes_fetchable_pointer_beside_other_attention) ... ok
+test_pointer_with_control_character_title_fits_minimum_budget (__main__.Drive.test_pointer_with_control_character_title_fits_minimum_budget) ... ok
+test_restart_refuses_while_a_previous_owned_group_lives (__main__.Drive.test_restart_refuses_while_a_previous_owned_group_lives) ... ok
+test_runner_death_or_interrupt_still_stops_its_group (__main__.Drive.test_runner_death_or_interrupt_still_stops_its_group) ... ok
+test_successful_turn_does_not_leave_a_background_writer (__main__.Drive.test_successful_turn_does_not_leave_a_background_writer) ... ok
+test_timeout_stops_wrapper_and_grandchild_but_not_detached_or_unrelated (__main__.Drive.test_timeout_stops_wrapper_and_grandchild_but_not_detached_or_unrelated) ... ok
+test_a_git_worktree_of_the_repository_is_accepted (keepalive_integration.Keepalive.test_a_git_worktree_of_the_repository_is_accepted) ... ok
+test_a_sandboxed_daemon_refuses (keepalive_integration.Keepalive.test_a_sandboxed_daemon_refuses) ... ok
+test_budget_pauses_visibly_and_takes_no_turns (keepalive_integration.Keepalive.test_budget_pauses_visibly_and_takes_no_turns) ... ok
+test_busy_pending_attention_blocks_without_wal_spin (keepalive_integration.Keepalive.test_busy_pending_attention_blocks_without_wal_spin) ... ok
+test_cards_too_large_for_the_packet_are_never_acked_or_paid_for (keepalive_integration.Keepalive.test_cards_too_large_for_the_packet_are_never_acked_or_paid_for) ... ok
+test_claude_forks_then_resumes_answers_as_the_agent_and_survives_clear (keepalive_integration.Keepalive.test_claude_forks_then_resumes_answers_as_the_agent_and_survives_clear) ... ok
+test_codex_first_fork_refreshes_a_late_source_transcript_total (keepalive_integration.Keepalive.test_codex_first_fork_refreshes_a_late_source_transcript_total) ... ok
+test_codex_reads_its_fork_from_the_stream_and_refuses_cards_outside_its_packet (keepalive_integration.Keepalive.test_codex_reads_its_fork_from_the_stream_and_refuses_cards_outside_its_packet) ... ok
+test_hook_busy_fences_an_idle_keepalive_until_end_and_stop_states_are_durable (keepalive_integration.Keepalive.test_hook_busy_fences_an_idle_keepalive_until_end_and_stop_states_are_durable) ... ok
+test_hook_prompt_surfaces_away_actions_before_reporting_them (keepalive_integration.Keepalive.test_hook_prompt_surfaces_away_actions_before_reporting_them) ... ok
+test_requests_are_refused_unless_bound_in_the_repository_and_unarmed (keepalive_integration.Keepalive.test_requests_are_refused_unless_bound_in_the_repository_and_unarmed) ... ok
+test_stop_lets_a_running_turn_finish_then_exits (keepalive_integration.Keepalive.test_stop_lets_a_running_turn_finish_then_exits) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 42.532s
+
+OK

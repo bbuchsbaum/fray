@@ -1,0 +1,16 @@
+test_daemon_sigkill_running_driver_recovers_within_heartbeat_bound (scripts.drive_integration.Drive.test_daemon_sigkill_running_driver_recovers_within_heartbeat_bound) ... FAIL
+
+======================================================================
+FAIL: test_daemon_sigkill_running_driver_recovers_within_heartbeat_bound (scripts.drive_integration.Drive.test_daemon_sigkill_running_driver_recovers_within_heartbeat_bound)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/fray-outstanding-motes/scripts/drive_integration.py", line 269, in test_daemon_sigkill_running_driver_recovers_within_heartbeat_bound
+    self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0 : fray: controller_busy: a live controller already owns this identity; use a different --as name
+
+
+----------------------------------------------------------------------
+Ran 1 test in 30.254s
+
+FAILED (failures=1)

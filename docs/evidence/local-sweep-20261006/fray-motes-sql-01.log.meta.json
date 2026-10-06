@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T19:34:25.464350+00:00",
+  "finished_utc": "2026-10-06T19:34:25.540730+00:00",
+  "duration_seconds": 0.076336,
+  "command": [
+    "python3",
+    "scripts/check_sql.py"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-sql-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 120.0,
+  "log_bytes": 1425
+}

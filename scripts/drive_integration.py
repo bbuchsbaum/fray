@@ -245,6 +245,56 @@ class Drive(unittest.TestCase):
                 self.call("leave", "bob")
                 self.call("join", "bob")
 
+    def test_daemon_sigkill_requires_owner_release_before_recovering_pending_ask(self):
+        wrapper = self.script("crash-wrapper.py", WRAPPER)
+        pids_file = pathlib.Path(self.home) / "crash-pids.json"
+        pending = self.cli("alice", "send", "bob", "Recover this exact ask", "--ask")
+        runner = self.keep(subprocess.Popen(
+            self.drive("--bootstrap", "--max-turns", "1", "--child-timeout", "60",
+                       child=[wrapper, str(pids_file)]),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        pids = self.pids(pids_file)
+        self.await_controller("bob", "running")
+        self.server.kill(); self.server.wait(timeout=5)
+        # The driver's documented 30s controller heartbeat, plus its bounded
+        # RPC time, is the recovery bound; a 10s observation is inconclusive.
+        stdout, stderr = runner.communicate(timeout=45)
+        self.assertNotEqual(runner.returncode, 0, stdout + stderr)
+        self.assert_gone(pids["wrapper"], pids["grandchild"], timeout=8)
+        self.launch()
+        child = self.controller("bob")["detail"]["child"]
+        self.assertEqual(child["pgid"], pids["wrapper"])
+        with self.assertRaises(ProcessLookupError, msg="owned process group survived daemon crash"):
+            os.kill(-pids["wrapper"], 0)
+        # The 120-second live lease is deliberately not revoked merely because
+        # the group is empty; a premature retry remains safely refused.
+        premature = subprocess.run(
+            self.drive("--bootstrap", "--max-turns", "1", "--idle-timeout", "0",
+                       "--release-orphan", str(pids["wrapper"]),
+                       child=[str(AGENT), str(pathlib.Path(self.home) / "recovered.jsonl")]),
+            text=True, capture_output=True, timeout=15)
+        self.assertNotEqual(premature.returncode, 0)
+        self.assertIn("controller_busy", premature.stderr)
+        self.assertFalse((pathlib.Path(self.home) / "recovered.jsonl").exists())
+        inbox = self.call("inbox", "bob")
+        self.assertEqual(inbox["total"], 1)
+        receipt = inbox["items"][0]["receipt"]
+        self.assertEqual(
+            receipt,
+            {"store_id": pending["store_id"], "agent": "bob", "id": pending["card"]["id"], "through_seq": pending["event_seq"]},
+        )
+        self.call("leave", "bob")
+        record = pathlib.Path(self.home) / "recovered.jsonl"
+        retry = subprocess.run(
+            self.drive("--bootstrap", "--max-turns", "1", "--idle-timeout", "0",
+                       child=[str(AGENT), str(record)]),
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        turns = [json.loads(line) for line in record.read_text().splitlines()]
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["attention"]["items"][0]["receipt"], receipt)
+        self.assertEqual(self.call("inbox", "bob")["total"], 0)
+
     def test_restart_refuses_while_a_previous_owned_group_lives(self):
         orphan = self.keep(subprocess.Popen(["sleep", "60"], process_group=0))
         self.call(

@@ -1,0 +1,38 @@
+{
+  "validation_kind": "schema_and_SQL_only",
+  "sqlite_version": "3.53.4",
+  "static_statements_prepared": 193,
+  "checks_passed": 22,
+  "checks": [
+    "static SQL prepares against the actual schema",
+    "FTS indexes current card insertion",
+    "FTS replaces obsolete head text",
+    "FTS finds new head text",
+    "history index preserves historical text",
+    "off-topic ordinary event does not interrupt bob",
+    "steward receives off-topic activity",
+    "new unassigned work is discoverable outside topic filters",
+    "incidental receipt does not subscribe to later events",
+    "100 updates coalesce into a single pending row",
+    "acknowledging an older delivery leaves the newer head pending",
+    "acknowledging through the exact pending sequence clears attention",
+    "acknowledgment cursor is monotonic",
+    "acknowledgment does not close the work item",
+    "actionable annotations can create linked durable questions",
+    "newcomer snapshot excludes closed history",
+    "newcomer snapshot includes active heads",
+    "FTS supports prefix and boolean queries",
+    "rollback keeps head and current FTS consistent",
+    "idempotency keys unique per actor",
+    "database structural integrity",
+    "database referential integrity"
+  ],
+  "not_tested": [
+    "Rust compilation",
+    "Rust tests",
+    "Rust parameter bindings",
+    "IPC runtime",
+    "latency",
+    "coding-agent host integration"
+  ]
+}

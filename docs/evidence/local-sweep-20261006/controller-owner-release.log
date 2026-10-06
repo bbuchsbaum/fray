@@ -1,0 +1,6 @@
+test_daemon_sigkill_requires_owner_release_before_recovering_pending_ask (scripts.drive_integration.Drive.test_daemon_sigkill_requires_owner_release_before_recovering_pending_ask) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 30.520s
+
+OK

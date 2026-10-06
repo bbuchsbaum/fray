@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T19:34:47.942900+00:00",
+  "finished_utc": "2026-10-06T19:34:52.419623+00:00",
+  "duration_seconds": 4.476641,
+  "command": [
+    "/private/tmp/fray-motes-wake-venv/bin/python",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "integrations/codex-wake",
+    "-v"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-native-wake-02.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 180.0,
+  "log_bytes": 6376
+}

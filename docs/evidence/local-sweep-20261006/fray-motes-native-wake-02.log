@@ -1,0 +1,52 @@
+test_active_steers_expected_turn_only (test_wake.AdapterTests.test_active_steers_expected_turn_only) ... {"time": 1791315288.057387, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/steer", "turn_id": "turn", "receipts": 1}
+ok
+test_approval_and_input_waits_remain_pending (test_wake.AdapterTests.test_approval_and_input_waits_remain_pending) ... ok
+test_backlog_combines_exact_receipts_without_merging_delivered_entries (test_wake.AdapterTests.test_backlog_combines_exact_receipts_without_merging_delivered_entries) ... {"time": 1791315288.061503, "event": "delivered", "delivery": "a57525d1bc2e2d61b20ee8b1ad51db29", "method": "turn/start", "turn_id": "turn", "receipts": 3}
+ok
+test_backlog_prompt_receipts_are_bounded (test_wake.AdapterTests.test_backlog_prompt_receipts_are_bounded) ... ok
+test_controller_reconnects_defers_approval_and_reaps_watcher (test_wake.AdapterTests.test_controller_reconnects_defers_approval_and_reaps_watcher) ... {"time": 1791315288.075712, "event": "reconnecting", "attempt": 1, "reason": "ConnectionError"}
+{"time": 1791315290.102677, "event": "target_verified", "thread": "thread", "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}
+{"time": 1791315290.1184142, "event": "watch_started", "pid": 92719, "expires_ms": 1791315303070}
+{"time": 1791315291.023749, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "woken-turn", "receipts": 1}
+{"time": 1791315291.02387, "event": "delivery_limit", "count": 1}
+ok
+test_disconnect_during_host_reads_prevents_start_and_steer (test_wake.AdapterTests.test_disconnect_during_host_reads_prevents_start_and_steer) ... ok
+test_explicit_turn_race_can_reread_then_start (test_wake.AdapterTests.test_explicit_turn_race_can_reread_then_start) ... {"time": 1791315291.045274, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_identity_and_store_changes_rejected (test_wake.AdapterTests.test_identity_and_store_changes_rejected) ... ok
+test_idle_starts_same_thread_without_policy_overrides (test_wake.AdapterTests.test_idle_starts_same_thread_without_policy_overrides) ... {"time": 1791315291.052207, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_legacy_pending_journal_is_split_without_redelivering_completed_entries (test_wake.AdapterTests.test_legacy_pending_journal_is_split_without_redelivering_completed_entries) ... ok
+test_lock_prevents_second_adapter (test_wake.AdapterTests.test_lock_prevents_second_adapter) ... ok
+test_lost_response_blocks_restart_not_duplicate_delivery (test_wake.AdapterTests.test_lost_response_blocks_restart_not_duplicate_delivery) ... ok
+test_real_unix_websocket_routes_responses_ignores_approval (test_wake.AdapterTests.test_real_unix_websocket_routes_responses_ignores_approval) ... {"time": 1791315291.088235, "event": "host_request_pending", "method": "item/commandExecution/requestApproval"}
+ok
+test_reconnect_dedup_uses_receipts_not_batches (test_wake.AdapterTests.test_reconnect_dedup_uses_receipts_not_batches) ... ok
+test_success_survives_restart_and_new_batch (test_wake.AdapterTests.test_success_survives_restart_and_new_batch) ... {"time": 1791315291.093913, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_turn_completed_between_reads_sends_nothing (test_wake.AdapterTests.test_turn_completed_between_reads_sends_nothing) ... ok
+test_unloaded_thread_never_created_or_resumed (test_wake.AdapterTests.test_unloaded_thread_never_created_or_resumed) ... ok
+test_wake_uses_configured_binary_and_session_for_receipt_commands (test_wake.AdapterTests.test_wake_uses_configured_binary_and_session_for_receipt_commands) ... {"time": 1791315291.1007528, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_wrong_workspace_cannot_mutate_target (test_wake.AdapterTests.test_wrong_workspace_cannot_mutate_target) ... ok
+test_expired_batches_still_leave_actionable_exact_receipts (test_wake_integration.RealFrayTests.test_expired_batches_still_leave_actionable_exact_receipts) ... {"time": 1791315291.271001, "event": "delivered", "delivery": "4841840508fb16410cf721b6fca977be", "method": "turn/start", "turn_id": "turn", "receipts": 32}
+Executing <Task finished name='Task-113' coro=<RealFrayTests.test_expired_batches_still_leave_actionable_exact_receipts() done, defined at /private/tmp/fray-outstanding-motes/integrations/codex-wake/test_wake_integration.py:113> result=None created at /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py:110> took 0.194 seconds
+ok
+test_leave_during_host_read_prevents_dispatch (test_wake_integration.RealFrayTests.test_leave_during_host_read_prevents_dispatch) ... {"time": 1791315291.404612, "event": "target_verified", "thread": "thread", "status": {"type": "idle"}}
+{"time": 1791315291.407766, "event": "watch_started", "pid": 92912, "expires_ms": 1791315301400}
+fray: not_joined: "manager" has not joined; run fray --as NAME join
+ok
+test_real_ready_listener_delivers_and_is_reaped (test_wake_integration.RealFrayTests.test_real_ready_listener_delivers_and_is_reaped) ... {"time": 1791315291.754944, "event": "target_verified", "thread": "thread", "status": {"type": "idle"}}
+{"time": 1791315291.758802, "event": "watch_started", "pid": 92936, "expires_ms": 1791315301749}
+{"time": 1791315291.968516, "event": "delivered", "delivery": "2da6ba34a435261989f9038e8b5f2c6e", "method": "turn/start", "turn_id": "wake-turn", "receipts": 1}
+{"time": 1791315291.9686139, "event": "delivery_limit", "count": 1}
+ok
+test_recovered_delivery_does_not_wake_after_leave (test_wake_integration.RealFrayTests.test_recovered_delivery_does_not_wake_after_leave) ... {"time": 1791315292.101658, "event": "target_verified", "thread": "thread", "status": {"type": "idle"}}
+{"time": 1791315292.1049001, "event": "watch_started", "pid": 92960, "expires_ms": 1791315302096}
+fray: not_joined: "manager" has not joined; run fray --as NAME join
+ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 4.277s
+
+OK

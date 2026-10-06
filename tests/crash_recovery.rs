@@ -160,6 +160,21 @@ fn sigkill_restart_preserves_pending_delivery_stale_ack_and_idempotency() {
     let id = sent["card"]["id"].as_i64().unwrap();
     let old_receipt =
         bob.call("inbox", "bob", json!({"selection":"all"}), None)["items"][0]["receipt"].clone();
+    let consumed = alice.call(
+        "send",
+        "alice",
+        json!({"to":"bob","body":"Already consumed before the crash"}),
+        None,
+    );
+    let consumed_id = consumed["card"]["id"].as_i64().unwrap();
+    let consumed_receipt = bob.call("inbox", "bob", json!({"selection":"all"}), None)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["card"]["id"] == consumed_id)
+        .unwrap()["receipt"]
+        .clone();
+    bob.call("ack", "bob", json!({"receipts":[consumed_receipt]}), None);
     let store_id = sent["store_id"].clone();
     drop(alice);
     drop(bob);
@@ -171,6 +186,21 @@ fn sigkill_restart_preserves_pending_delivery_stale_ack_and_idempotency() {
         alice.call("ping", "", json!({}), None)["store_id"],
         store_id
     );
+    let recovered = bob.call("inbox", "bob", json!({"selection":"all"}), None);
+    assert!(recovered["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["card"]["id"] != consumed_id));
+    let consumed_ack: i64 = daemon
+        .connect()
+        .query_row(
+            "SELECT ack_seq FROM deliveries WHERE agent='bob' AND card_id=?1",
+            [consumed_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(consumed_ack, consumed["event_seq"].as_i64().unwrap());
     let changed = alice.call(
         "patch",
         "alice",

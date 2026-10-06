@@ -1,0 +1,12 @@
+test_finite_wait_keeps_sequential_rpc_connection_usable (__main__.Reliability.test_finite_wait_keeps_sequential_rpc_connection_usable) ... ok
+test_half_close_cancels_wait_and_does_not_ack (__main__.Reliability.test_half_close_cancels_wait_and_does_not_ack) ... ok
+test_immediate_wait_uses_reserved_short_rpc_capacity (__main__.Reliability.test_immediate_wait_uses_reserved_short_rpc_capacity) ... ok
+test_inbound_bytes_are_protocol_errors_for_finite_and_infinite_waits (__main__.Reliability.test_inbound_bytes_are_protocol_errors_for_finite_and_infinite_waits) ... ok
+test_killed_finite_waits_release_slots_without_waiting_for_deadline (__main__.Reliability.test_killed_finite_waits_release_slots_without_waiting_for_deadline) ... ok
+test_long_waits_reserve_capacity_for_send_inbox_and_ack (__main__.Reliability.test_long_waits_reserve_capacity_for_send_inbox_and_ack) ... ok
+test_low_descriptor_limit_preserves_busy_and_short_rpc_capacity (__main__.Reliability.test_low_descriptor_limit_preserves_busy_and_short_rpc_capacity) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 2.569s
+
+OK

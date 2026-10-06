@@ -7,6 +7,52 @@ focused tests, crash/restore checks, stress limits, and outstanding qualificatio
 Paid comparison remains deferred. Mote authority gaps and real keepalive sandbox
 qualification remain open; no broad epic completion or release is claimed.
 
+The implementation landed on local `main` at
+`9be4977905d018bd081081c8407a7546e2aecae7`, with independent exact-commit approvals
+from `storage_review` and `keepalive_snapshot_review`. No remote push or shared
+daemon restart was performed. Formatting, locked all-target checking, Clippy
+with warnings denied, and all 426 Rust tests over 46 targets passed, including
+the installed Mote integration. Host-neutral IPC passed 38 tests, attention 28,
+descriptor/cancellation reliability 7, and drive/keepalive 23. Native-wake's
+23 Python tests also passed; these are transport fixtures, not paid host trials.
+The SQL scanner passed its 193 prepared statements and 22 invariant checks.
+
+Raw logs, environment versions, and their provenance are retained in
+[local sweep evidence](evidence/local-sweep-20261006/manifest.json). The initial
+sandboxed terminal job-control test failed because `stty` was denied terminal
+ioctl access; the owned-terminal rerun passed all 23 lifecycle cases. An
+old-daemon attention failure revealed an unsupported doctor probe, now fixed
+and covered by the passing old-protocol monitor/rewake fixture.
+
+Reproduce the local reliability gates with synthetic data:
+
+```sh
+cargo test --locked --test crash_recovery --test recovery
+python3 -W error::ResourceWarning scripts/drive_integration.py target/release/fray
+python3 scripts/soak.py target/release/fray --out /tmp/fray-soak-evidence
+```
+
+The soak defaults are 30 persistent peers, four fully drained watches, 60 seconds
+warmup and 7,200 seconds measured traffic. Every send's exact receipt is checked
+before acknowledgement and every watch's event sequence is checked for gaps
+and duplicates. Predeclared maxima are 256 descriptors, 256 MiB RSS, 64 MiB WAL,
+and 100 ms publish p95, with no delivery error, timeout, duplicate or escaped
+`SQLITE_BUSY`. Short runs explicitly remain unqualified. The frozen artifact's
+identity is retained in [artifact.json](evidence/local-sweep-20261006/artifact.json).
+The full result will be recorded after the running gate completes.
+
+The SIGKILL gates also verify a consumed delivery's persisted `ack_seq` and
+absence from the recovered inbox. The managed-runner crash fixture reaps its
+runner, verifies its owned process group is empty, and observes safe refusal of
+a replacement while the original 120-second controller lease is live.
+`--release-orphan` does not revoke that lease. After verifying the original
+runner and group have stopped, the operator explicitly issues
+`fray --as NAME leave`, then starts a fresh drive run. The fixture verifies the
+original exact receipt tuple survives, one replacement child receives it, and
+only its acknowledgement consumes it. This is operator-assisted local recovery;
+automatic lease-expiry and native-host recovery remain unqualified. The observed
+cleanup time was about 30.25 seconds in this specimen.
+
 ## No silent stalls (2026-10-01)
 
 `docs/design/no-silent-stalls.md` slices R1 to R5, on branch

@@ -1,0 +1,10 @@
+   Compiling fray v0.2.1 (/private/tmp/fray-outstanding-motes)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running tests/crash_recovery.rs (target/debug/deps/crash_recovery-f3b755d21a396c2d)
+
+running 2 tests
+test sigkill_restart_preserves_pending_delivery_stale_ack_and_idempotency ... ok
+test interrupted_daemon_and_client_requests_reconcile_as_one_complete_mutation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+

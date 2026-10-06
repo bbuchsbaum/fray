@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-06T20:14:37.369636+00:00",
+  "finished_utc": "2026-10-06T20:15:06.437151+00:00",
+  "duration_seconds": 29.0672,
+  "command": [
+    "python3",
+    "-W",
+    "error::ResourceWarning",
+    "scripts/attention_integration.py",
+    "target/debug/fray"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/tmp/fray-motes-attention-02.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 600.0,
+  "log_bytes": 4410
+}

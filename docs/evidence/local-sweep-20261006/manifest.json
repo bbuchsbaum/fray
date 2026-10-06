@@ -1,0 +1,112 @@
+[
+  {
+    "path": "artifact.json",
+    "sha256": "fc4aa38c8fb957cbcba9c8ef6530f4b4e789ef2569db03d18725f18e94773067",
+    "source": "/private/tmp/fray-qualification-9be4977/artifact.json"
+  },
+  {
+    "path": "controller-owner-release.log",
+    "sha256": "b44d451d1955b791f2de1c13eb63c418099fbef6318370c9b7a0807e0cc79995",
+    "source": "/tmp/fray-bd-01M3S1M4KJD1VVSTJ3EW0VSPAJ-drive-crash-receipts.log"
+  },
+  {
+    "path": "controller-premature-retry.log",
+    "sha256": "814435899b73a1a15d54ca9cd183ed612276862aecdf2c53dc8d2b64c62d1e99",
+    "source": "/tmp/fray-bd-01M3S1M4KJD1VVSTJ3EW0VSPAJ-drive-crash.log"
+  },
+  {
+    "path": "environment.json",
+    "sha256": "e383cf108ba91b676c71d9992e20dea53cc6cbbd0f6e9a0432778b545de285db",
+    "source": "captured locally"
+  },
+  {
+    "path": "fray-motes-36way-report.json",
+    "sha256": "e4446c1aed58c85827d5af0716584195016a5beb046933e0d1d29ca02b996c85",
+    "source": "/tmp/fray-motes-36way/report.json"
+  },
+  {
+    "path": "fray-motes-36way-serial-report.json",
+    "sha256": "d1fbc716032affefa762ac5d1007863e0d40e80575fde8c52846d57dfa2bced4",
+    "source": "/tmp/fray-motes-36way-serial/report.json"
+  },
+  {
+    "path": "fray-motes-attention-02.log",
+    "sha256": "8e367c34fdeb14857311cc0997fb25dbdb2851faf95ca3b9d22e3b774e662fa1",
+    "source": "/tmp/fray-motes-attention-02.log"
+  },
+  {
+    "path": "fray-motes-attention-02.log.meta.json",
+    "sha256": "8d38af9f73dac7b8986ff124e53aa7a9820df821ce72f9c1aeccf2d9d8a18313",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-crash-consumed-01.log",
+    "sha256": "9b7045b910f91b235ebc8cbf8f48c6bf79951507e992988166e882bafbc7d240",
+    "source": "/tmp/fray-motes-crash-consumed-01.log"
+  },
+  {
+    "path": "fray-motes-crash-consumed-01.log.meta.json",
+    "sha256": "0b0acfbec898b767330ecb57b51e5ee909c22890d89392078bf4e8f0ef1156d8",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-drive-tty-01.log",
+    "sha256": "f2b3a2f2d6e724cfff0870edf163f591e4cc86b68493696445a1ccde32ff59ec",
+    "source": "/tmp/fray-motes-drive-tty-01.log"
+  },
+  {
+    "path": "fray-motes-drive-tty-01.log.meta.json",
+    "sha256": "4337a7ef9ad037da7ca9fe5400f9565e85e437c6390ef50957a6799011a1b120",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-final-checks-01.log",
+    "sha256": "8bdc27df5d533b62e721cc05571b91e1ae27ee46fe074be6f3251b7a1d847ab5",
+    "source": "/tmp/fray-motes-final-checks-01.log"
+  },
+  {
+    "path": "fray-motes-final-checks-01.log.meta.json",
+    "sha256": "54be9506ec782bfd8aaaca06b0f0e69831d7d335a9ff8dc29726ca3cb5d6745e",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-ipc-01.log",
+    "sha256": "61a4b26055cdf866759ed09ee621d54dd952833a7d4997b32665e989e4c0f48d",
+    "source": "/tmp/fray-motes-ipc-01.log"
+  },
+  {
+    "path": "fray-motes-ipc-01.log.meta.json",
+    "sha256": "38637eca7747004de5d9d9edd41ca5157077a9cf7b9fe2f79f792d50a2e40614",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-native-wake-02.log",
+    "sha256": "2ab1db497000c03e8c3d8a736561206d85af47c937701cd1598470fc73bfe118",
+    "source": "/tmp/fray-motes-native-wake-02.log"
+  },
+  {
+    "path": "fray-motes-native-wake-02.log.meta.json",
+    "sha256": "36e8f5ee0e08556bd3ee8687b67e167b7130ac0df2a8e62a59ca0aa7bae31fa4",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-reliability-01.log",
+    "sha256": "50c45bb3fdbd00184e29dc2441f2f42b5c0d8f07c37bf9c73c8200e9749f58b6",
+    "source": "/tmp/fray-motes-reliability-01.log"
+  },
+  {
+    "path": "fray-motes-reliability-01.log.meta.json",
+    "sha256": "cc61d1ad8c47065e2b6a139f97763ffc7e4435b9ef45b64975c4ac1fb723260d",
+    "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-sql-01.log",
+    "sha256": "d51f86584dfeffffa6b70a93411a49264536db6ef1c3d4c276dd3d98d46f5195",
+    "source": "/tmp/fray-motes-sql-01.log"
+  },
+  {
+    "path": "fray-motes-sql-01.log.meta.json",
+    "sha256": "858c1ded884b72fb3edef6fc7f144e3d7b3cd55d130553d4cbdd5784da536e9e",
+    "source": "raw log metadata"
+  }
+]
