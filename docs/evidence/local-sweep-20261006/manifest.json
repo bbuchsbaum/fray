@@ -50,6 +50,16 @@
     "source": "raw log metadata"
   },
   {
+    "path": "fray-motes-drive-final-01.log",
+    "sha256": "7f7d8dcb6a47afdc8b10ed29350d23c66332c1ad8e51b43af315b854ae79afa1",
+    "source": "/tmp/fray-motes-drive-final-01.log"
+  },
+  {
+    "path": "fray-motes-drive-final-01.log.meta.json",
+    "sha256": "537817cf4a4c1d30756a75e99c5f3033e65a391f6030f05ca6862a124186e7e5",
+    "source": "/tmp/fray-motes-drive-final-01.log.meta.json"
+  },
+  {
     "path": "fray-motes-drive-tty-01.log",
     "sha256": "f2b3a2f2d6e724cfff0870edf163f591e4cc86b68493696445a1ccde32ff59ec",
     "source": "/tmp/fray-motes-drive-tty-01.log"
@@ -68,6 +78,16 @@
     "path": "fray-motes-final-checks-01.log.meta.json",
     "sha256": "54be9506ec782bfd8aaaca06b0f0e69831d7d335a9ff8dc29726ca3cb5d6745e",
     "source": "raw log metadata"
+  },
+  {
+    "path": "fray-motes-final-checks-02.log",
+    "sha256": "46a582a9cc45d33749080e19412cc2db86102444df8de3b4c1b014538caced47",
+    "source": "/tmp/fray-motes-final-checks-02.log"
+  },
+  {
+    "path": "fray-motes-final-checks-02.log.meta.json",
+    "sha256": "ba346a75acf70772541aa0cbd6009e2c71b9f1dc75d93f3bda02213b3376fbdc",
+    "source": "/tmp/fray-motes-final-checks-02.log.meta.json"
   },
   {
     "path": "fray-motes-ipc-01.log",

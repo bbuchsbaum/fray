@@ -28,7 +28,9 @@ Reproduce the local reliability gates with synthetic data:
 
 ```sh
 cargo test --locked --test crash_recovery --test recovery
-python3 -W error::ResourceWarning scripts/drive_integration.py target/release/fray
+cargo build --locked
+python3 -W error::ResourceWarning scripts/drive_integration.py target/debug/fray
+cargo build --locked --release
 python3 scripts/soak.py target/release/fray --out /tmp/fray-soak-evidence
 ```
 
@@ -50,8 +52,15 @@ runner and group have stopped, the operator explicitly issues
 `fray --as NAME leave`, then starts a fresh drive run. The fixture verifies the
 original exact receipt tuple survives, one replacement child receives it, and
 only its acknowledgement consumes it. This is operator-assisted local recovery;
-automatic lease-expiry and native-host recovery remain unqualified. The observed
-cleanup time was about 30.25 seconds in this specimen.
+automatic lease-expiry and native-host recovery remain unqualified. The focused
+recovery test completed in 30.520 seconds; cleanup time was not measured separately.
+
+The lifecycle suite requires a debug build: its sandbox-refusal and deliberately
+tiny packet-budget specimens use debug-only test overrides. An optimized-binary
+run passed 22/24 cases and failed those two specimens because release builds
+intentionally ignore those overrides. That failed log is retained; it does not
+qualify either release sandbox behavior or native hosts. The resource soak uses
+the separately frozen optimized binary.
 
 ## No silent stalls (2026-10-01)
 
