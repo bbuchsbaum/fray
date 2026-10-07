@@ -167,7 +167,7 @@ enum Cmd {
         /// Existing CARRIER=RESERVATION pair; repeat for separate carriers.
         #[arg(long)]
         carrier: Vec<String>,
-        #[arg(long, default_value_t = 28800)]
+        #[arg(long, default_value_t = 28800, value_parser=clap::value_parser!(u64).range(1..=86400))]
         reservation_ttl: u64,
         #[arg(long,conflicts_with_all=["id","to","state","next"])]
         resume: Option<String>,

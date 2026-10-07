@@ -352,6 +352,14 @@ pub fn handoff(context: &Context<'_>, explicit: Value, key: &str) -> Result<Valu
                 return Err(Error::invalid("reservation carrier must differ from the work issue; acceptance closes only carriers"));
             }
             let rv = string(pair, "reservation")?;
+            if pair["ttl_s"]
+                .as_u64()
+                .is_none_or(|t| !(1..=86400).contains(&t))
+            {
+                return Err(Error::invalid(
+                    "carrier adoption TTL must be 1..86400 seconds before handoff",
+                ));
+            }
             let observed = reservation(context, rv)?;
             if observed["actor"] != context.actor || observed["entity"] != carrier {
                 return Err(Error::new(

@@ -13,6 +13,64 @@ fn call(s: &mut Store, actor: &str, op: &str, args: Value) -> Value {
 fn candidate(id: &str, commit: char) -> Value {
     json!({"candidate_id":id,"entity":"work","proposer":"writer","identity":{"store_id":"st-test","commit_oid":commit.to_string().repeat(40),"base_oid":"a".repeat(40)},"phase":{"value":"pending","op_id":"phase"},"policy":{"reviewers":["reader"],"authorizer":"owner"},"reviews":{},"supersession":{"successor_id":null}})
 }
+
+#[test]
+fn committed_workflow_response_lookup_is_exact_and_actor_scoped_across_sessions() {
+    let (mut s, _, _) = fixture();
+    let args = json!({"to":"reader","title":"Recover","body":"Exact","candidate_view":candidate("mc-receipt",'c'),"store_id":"st-test"});
+    let mut request = Request::new("mote_review_request", "writer", args.clone())
+        .with_session(Some("codex:first".into()));
+    request.key = Some("receipt-key".into());
+    let saved = s.execute_at(&request, NOW).unwrap();
+    let replacement = Request::new("join", "writer", json!({"takeover":true}))
+        .with_session(Some("codex:second".into()));
+    s.execute_at(&replacement, NOW + 1).unwrap();
+    let replacement = Request::new(
+        "mote_rpc_receipt",
+        "writer",
+        json!({"key":"receipt-key","op":"mote_review_request","args":args}),
+    )
+    .with_session(Some("codex:second".into()));
+    let recovered = s.execute_at(&replacement, NOW + 2).unwrap();
+    assert_eq!(recovered["result"], saved);
+    assert_eq!(recovered["original_session"], "codex:first");
+    for (key, op, mut payload) in [
+        ("missing", "mote_review_request", args.clone()),
+        ("receipt-key", "dispatch_offer", args.clone()),
+        ("receipt-key", "mote_review_request", args.clone()),
+    ] {
+        if op == "mote_review_request" && key == "receipt-key" {
+            payload["body"] = json!("Different");
+        }
+        let result = run(
+            &mut s,
+            "writer",
+            "mote_rpc_receipt",
+            json!({"key":key,"op":op,"args":payload}),
+        );
+        if key == "missing" {
+            assert_eq!(result.unwrap()["found"], false);
+        } else {
+            assert_eq!(result.unwrap_err().code, "idempotency_conflict");
+        }
+    }
+    assert_eq!(
+        call(
+            &mut s,
+            "other",
+            "mote_rpc_receipt",
+            json!({"key":"receipt-key","op":"mote_review_request","args":args})
+        )["found"],
+        false
+    );
+    assert!(run(
+        &mut s,
+        "writer",
+        "mote_rpc_receipt",
+        json!({"key":"receipt-key","op":"claim","args":args})
+    )
+    .is_err());
+}
 fn fixture() -> (Store, i64, Value) {
     let mut s = Store::memory().unwrap();
     for actor in ["writer", "reader", "other"] {

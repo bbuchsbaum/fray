@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix="fray-dc-",dir="/tmp") as tmp:
     def save():state_path.write_text(json.dumps(state))
     save();env=os.environ.copy()
     for k in ("FRAY_HOME","FRAY_AGENT","FRAY_SESSION","MOTE_ACTOR","MOTE_SESSION","CLAUDE_SESSION_ID","CODEX_THREAD_ID"):env.pop(k,None)
-    env.update(FRAY_MOTE_BIN=str(stub),MOTE_STORE=str(store),FAKE_STATE=str(state_path))
+    env.update(FRAY_MOTE_BIN=str(stub),MOTE_STORE=str(store),FAKE_STATE=str(state_path),FRAY_SESSION="codex:transport-first")
     def fray(actor,*args,success=True):
         out=subprocess.run([FRAY,"--home",str(home),"--as",actor,"--json",*args],cwd=root,env=env,capture_output=True,text=True,timeout=20)
         assert (out.returncode==0)==success,(args,out.stdout,out.stderr)
@@ -69,10 +69,21 @@ with tempfile.TemporaryDirectory(prefix="fray-dc-",dir="/tmp") as tmp:
         stop()
         with sqlite3.connect(home/"state.db") as db:db.execute("UPDATE mote_operations SET state='pending',result=NULL WHERE actor='alice' AND key='accept'")
         state=json.loads(state_path.read_text());state["claims"]["work"]["token"]="renewed";state["histories"]["work"].append({"accepted":True,"kind":"claim","op_id":"renewed"});save()
-        start();recovered=fray("alice","operation","resume","accept")
+        start();env["FRAY_SESSION"]="codex:transport-second";fray("alice","join","--takeover")
+        recovered=fray("alice","operation","resume","accept")
         assert recovered["state"]=="completed" and recovered["result"]["historical_receipt"],recovered
         assert recovered["result"]["claim_observation"]["token"]=="acquired-alice" and recovered["result"]["current_claim"]["token"]=="renewed",recovered
-        checks.append("committed confirmation plus lost finalization and renewal replays exact bytes")
+        checks.append("committed confirmation plus lost finalization/renewal/new host session recovers exact saved response")
+        stop()
+        with sqlite3.connect(home/"state.db") as db:
+            db.execute("UPDATE mote_operations SET state='pending',result=NULL WHERE actor='alice' AND key='accept'")
+            db.execute("DELETE FROM requests WHERE actor='alice' AND json_extract(request,'$.op')='dispatch_status'")
+        start();env["FRAY_SESSION"]="codex:transport-third";fray("alice","join","--takeover")
+        refused=fray("alice","operation","resume","accept",success=False)
+        assert refused["error"]["code"]=="dispatch_session_ended",refused
+        assert fray("alice","operation","show","accept")["state"]=="pending"
+        assert len(json.loads(state_path.read_text())["histories"]["work"])==2
+        checks.append("no committed response plus ended attempt refuses without old-session replay or claim reacquisition")
         state["reservations"]=[{"reservation_id":"rv-self","actor":"alice","entity":"work","paths":["src/a"],"lease_until_ts":"2030-01-01T00:00:00Z"}];save()
         denied=fray("alice","--key","self-carrier","handoff",card,"--to","bob","--state","Half","--next","Finish","--carrier","work=rv-self",success=False)
         assert denied["error"]["code"]=="invalid" and "must differ" in denied["error"]["message"],denied

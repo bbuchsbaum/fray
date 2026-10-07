@@ -212,6 +212,10 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             }
         }
         let capability = match wire_request.op.as_str() {
+            "mote_rpc_receipt" => Some((
+                "mote_rpc_receipts",
+                "committed Mote workflow response recovery",
+            )),
             op if op.starts_with("dispatch_") => Some(("dispatch", "Mote-backed dispatch")),
             op if op.starts_with("mote_operation_") || op.starts_with("mote_review_") => {
                 Some(("mote_workflows", "recoverable Mote workflows"))

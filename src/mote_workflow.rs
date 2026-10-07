@@ -18,6 +18,52 @@ pub fn digest(value: &Value) -> Result<String> {
     Ok(sha256::hex(hash.finalize()))
 }
 
+/// Read a committed workflow response without replaying its old host session.
+/// The ordinary request signature and uncommitted mutation fences stay intact.
+pub fn rpc_receipt(conn: &Connection, actor: &str, args: &Value) -> Result<Value> {
+    check_fields(args, &["key", "op", "args"])?;
+    crate::store::registered(conn, actor)?;
+    let op = string(args, "op")?;
+    if ![
+        "mote_review_request",
+        "mote_review_successor",
+        "dispatch_offer",
+        "dispatch_status",
+    ]
+    .contains(&op)
+    {
+        return Err(Error::invalid(
+            "receipt lookup is limited to journaled Mote workflow RPCs",
+        ));
+    }
+    let key = string(args, "key")?;
+    text(key, "key", 128, false)?;
+    let saved: Option<(String, String)> = conn
+        .query_row(
+            "SELECT request,response FROM requests WHERE actor=? AND key=?",
+            params![actor, key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((request, response)) = saved else {
+        return Ok(json!({"found":false}));
+    };
+    let request: Request = serde_json::from_str(&request)?;
+    if request.actor != actor
+        || request.op != op
+        || request.args != args["args"]
+        || request.key.is_some()
+    {
+        return Err(Error::new(
+            "idempotency_conflict",
+            "committed workflow receipt has different exact operation/arguments",
+        ));
+    }
+    Ok(
+        json!({"found":true,"result":serde_json::from_str::<Value>(&response)?,"original_session":request.session}),
+    )
+}
+
 pub fn operation(conn: &Connection, actor: &str, key: &str) -> Result<Value> {
     type OperationRow = (String, String, String, i64, String, String, Option<String>);
     let row: Option<OperationRow> = conn.query_row(
@@ -427,9 +473,24 @@ impl<'a> Context<'a> {
         client::rpc(self.home, &Request::new(op, self.actor, args), 10)
     }
     pub fn rpc_keyed(&self, op: &str, args: Value, key: &str) -> Result<Value> {
-        let mut request = Request::new(op, self.actor, args);
+        let lookup = || self.rpc("mote_rpc_receipt", json!({"op":op,"args":args,"key":key}));
+        let prior = lookup()?;
+        if prior["found"] == true {
+            return Ok(prior["result"].clone());
+        }
+        let mut request = Request::new(op, self.actor, args.clone());
         request.key = Some(key.to_owned());
-        client::rpc(self.home, &request, 10)
+        match client::rpc(self.home, &request, 10) {
+            Err(error) if error.code == "idempotency_conflict" => {
+                let prior = lookup()?;
+                if prior["found"] == true {
+                    Ok(prior["result"].clone())
+                } else {
+                    Err(error)
+                }
+            }
+            result => result,
+        }
     }
     pub fn read(&self, args: &[&str]) -> Result<Value> {
         match mote::run(&self.store, Some(self.actor), args, mote::read_timeout()) {
@@ -920,8 +981,13 @@ fn execute_land(context: &Context<'_>, mut op: Value) -> Result<Value> {
     let receipt = receipt(&outcome);
     op = context.checkpoint(&op, "landing_attempt", receipt.clone())?;
     let data = &receipt["data"];
+    let historical = data["outcome"] == "historically_confirmed"
+        && data["receipt_context"] == "archived_receipt";
     if !matches!(outcome, mote::Outcome::Ok(_))
-        || data["outcome"] != "landed"
+        || !(data["outcome"] == "landed" || historical)
+        || data["phase"] != "Confirmed"
+        || !data["detail"].is_null()
+        || data["git_updated"] != true
         || data["target_current"] != true
         || data["new_oid"] != op["payload"]["new_oid"]
         || data["old_oid"] != op["payload"]["before"]
@@ -936,13 +1002,18 @@ fn execute_land(context: &Context<'_>, mut op: Value) -> Result<Value> {
     let candidate = context
         .read(&["candidate", "show", string(&op["payload"], "candidate_id")?])
         .map_err(|e| pending(&op, &format!("landing candidate readback failed: {e}")))?;
-    if current != op["payload"]["new_oid"] || candidate["phase"]["value"] != "landed" {
+    if current != op["payload"]["new_oid"]
+        || candidate["phase"]["value"] != "landed"
+        || candidate["candidate_id"] != op["payload"]["candidate_id"]
+        || candidate["identity"]["store_id"] != context.store.store_id
+        || candidate["identity"]["commit_oid"] != op["payload"]["new_oid"]
+    {
         return Err(pending(
             &op,
             "landing receipt is historical or target moved before final readback",
         ));
     }
-    context.finalize(&op,json!({"confirmed":true,"receipt":receipt,"current_oid":current,"candidate":candidate,"pushed":false}))
+    context.finalize(&op,json!({"confirmed":true,"historical_receipt":historical,"receipt":receipt,"current_oid":current,"candidate":candidate,"pushed":false}))
 }
 
 pub fn resume(context: &Context<'_>, key: &str) -> Result<Value> {

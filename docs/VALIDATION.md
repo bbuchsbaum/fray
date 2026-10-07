@@ -15,21 +15,23 @@ disappearance reconciliation, and recoverable carrier close/adopt. Exact client
 journals preserve failed requests/receipts; historical retries do not renew
 claims, reservations or approvals. See the [revision 6 contract](design/mote-adapter.md).
 
-The final source passed 450 Rust tests over 50 targets, formatting, locked
+The final source passed 452 Rust tests over 50 targets, formatting, locked
 all-target checking, Clippy with warnings denied, and build. The independent SQL
-scanner prepared 236 statements against both schemas and passed 22 invariants.
+scanner prepared 237 statements against both schemas and passed 22 invariants.
 Always-run synthetic public-CLI courts cover mixed holder/token reads, bounded
 churn refusal, exact confirmation recovery after renewal, unsafe self-carrier
 refusal, admitted history suppression, earlier-spelled anchors, future raw ids
 with due reservation warnings and timeout cursor preservation.
 
-Real disposable Mote/Git/Fray courts passed nine review/landing and six
+Real disposable Mote/Git/Fray courts passed eleven review/landing and six
 dispatch/handoff cases. These include nonzero admitted-review recovery with no
 premature Fray verdict, object/successor/approve/land, revoked authorization,
-base advancement without reviewer wake, concurrent accepts with one actual
+base advancement without reviewer wake, actual client SIGKILL after Mote archive
+with historical recovery/drift refusal, cross-session committed-response recovery,
+invalid adoption TTL refusal, concurrent accepts with one actual
 claim, interrupted handoff/close/adopt, competing adoption, carrier expiry and
 actual bounded claim-expiry requeue. During a paused Mote landing an unrelated
-Fray RPC returned in 18.2 ms. This is a bounded observation, not a latency SLA.
+Fray RPC returned promptly; the exact duration is retained in each court log. This is a bounded observation, not a latency SLA.
 
 Required Python suites cover native-wake transport fixtures (23), ordinary IPC
 (38), attention (28) and descriptor/cancellation reliability (7). They do not

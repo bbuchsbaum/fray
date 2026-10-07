@@ -1,5 +1,5 @@
 """Real, disposable Fray/Mote/Git acceptance court; no models or shared stores."""
-import json, os, pathlib, subprocess, sys, tempfile, time
+import json, os, pathlib, signal as signals, subprocess, sys, tempfile, time
 
 FRAY, MOTE = map(lambda p: str(pathlib.Path(p).resolve()), sys.argv[1:3])
 checks = []
@@ -124,6 +124,47 @@ def court():
             again=fray("lander","operation","resume","land-final")
             assert again["historical_receipt"] and again["target_current"]
             checks.append("exact-key landing retry reads historical receipt without another Git mutation")
+            # Kill this court's Fray client after Mote has archived success but
+            # before its wrapper returns any receipt to the client.
+            (root/"work.txt").write_text("recovery\n");git("commit","-qam","recovery")
+            third=git("rev-parse","HEAD")
+            mote("writer","new","--id","recovery-work","Recovery");mote("writer","claim","recovery-work","--ttl","600")
+            recovery=mote("writer","candidate","propose","--issue","recovery-work","--base",second,"--path","work.txt","--authorizer","author","--reviewer","reader","--idempotency-key","recovery-candidate")
+            recovery_id=recovery["candidate_id"]
+            mote("reader","candidate","review",recovery_id,"approve","--idempotency-key","recovery-approve")
+            mote("author","candidate","authorize",recovery_id,"--grantee","lander","--idempotency-key","recovery-auth")
+            mote("author","candidate","evidence","target-scope",recovery_id,"--target","main","--idempotency-key","recovery-scope")
+            ready_file=root/"archived-ready";wrapper=root/"hold-landing-receipt"
+            wrapper.write_text("#!/usr/bin/env python3\nimport json,os,pathlib,subprocess,sys,time\np=subprocess.run(["+repr(MOTE)+",*sys.argv[1:]],capture_output=True)\nif 'candidate' in sys.argv and 'land' in sys.argv and p.returncode==0:\n pathlib.Path("+repr(str(ready_file))+").write_text(json.dumps({'pid':os.getpid(),'parent':os.getppid()}))\n time.sleep(25)\nsys.stdout.buffer.write(p.stdout);sys.stderr.buffer.write(p.stderr);sys.exit(p.returncode)\n")
+            wrapper.chmod(0o755)
+            crashed=subprocess.Popen([FRAY,"--home",str(home),"--as","lander","--json","--key","lost-landing","land",recovery_id,"--target","main"],cwd=root,env=env|{"FRAY_MOTE_BIN":str(wrapper)},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            owned_wrapper=None
+            try:
+                deadline=time.monotonic()+15
+                while not ready_file.exists():assert crashed.poll() is None;assert time.monotonic()<deadline;time.sleep(.01)
+                owned_wrapper=json.loads(ready_file.read_text());assert owned_wrapper["parent"]==crashed.pid and os.getpgid(owned_wrapper["pid"])==owned_wrapper["pid"]
+                assert git("rev-parse","main")==third
+                crashed.kill();crashed.wait(timeout=10)
+                os.killpg(owned_wrapper["pid"],signals.SIGKILL)
+                owned_wrapper=None
+                pending=fray("lander","operation","show","lost-landing")
+                assert pending["state"]=="pending" and not pending["observations"],pending
+                checks.append("actual client SIGKILL after Mote archive leaves exact pending request with no receipt checkpoint")
+                git("update-ref","refs/heads/main",second,third)
+                drift=fray("lander","operation","resume","lost-landing",success=False)
+                assert drift[0]!=0 and drift[1]["error"]["details"]["operation"]["state"]=="pending",drift
+                assert git("rev-parse","main")==second
+                git("update-ref","refs/heads/main",third,second)
+                recovered=fray("lander","operation","resume","lost-landing")
+                assert recovered["state"]=="completed" and recovered["result"]["historical_receipt"] and recovered["result"]["receipt"]["data"]["outcome"]=="historically_confirmed",recovered
+                checks.append("archived nonzero drift refuses without reset; exact-target restoration recovers historical completion")
+            finally:
+                if crashed.poll() is None:crashed.kill();crashed.wait(timeout=10)
+                if owned_wrapper:
+                    try:os.killpg(owned_wrapper["pid"],signals.SIGKILL)
+                    except ProcessLookupError:pass
+                if crashed.stdout:crashed.stdout.close()
+                if crashed.stderr:crashed.stderr.close()
         finally:
             if server.poll() is None:
                 try:fray("","stop")

@@ -43,7 +43,8 @@ Strict commands require `mote.authority-status.v1`, the bound store id, enabled
 authority version 1, a nonempty genesis digest, `stable_claim_order`, and the
 operation's advertised capability (`holder_checked_handoff` or
 `checked_landing_results`). Reads never activate authority. Fray's daemon must
-advertise `mote_workflows`, `mote_admission_order` and `dispatch` as applicable.
+advertise `mote_workflows`, `mote_rpc_receipts`, `mote_admission_order` and
+`dispatch` as applicable.
 
 All writers sharing a store must use the upgraded protocol on a filesystem
 with working local POSIX locks. After upgrading them, an operator may explicitly
@@ -73,6 +74,9 @@ fray handoff --resume KEY
 
 Inspection works without a reachable Mote binary. Resume uses the saved request,
 never a freshly read CAS token. Pending journals are retained through compaction.
+A committed workflow RPC response can be read back across a legitimate host
+session change only under the same actor/key/op/exact args. A lookup miss uses
+the normal session-fenced mutation; an ended acceptance attempt stays refused.
 A completed retry is a historical receipt accompanied by current observations
 where available; it is not renewed authority or a renewed lease.
 
@@ -141,7 +145,10 @@ candidate/reviews. There is no push. The read-only check observes eligibility an
 matching target evidence; the mutation revalidates authorization, preimage,
 repository and Git scope under Mote's publication fence. Nonzero or unknown
 confirmation retains the full recovery receipt, including whether Git changed;
-Fray never silently resets Git. Exit 0 is additionally checked against the exact
+Fray never silently resets Git. If Mote already archived success before the
+client died, an exact exit-zero/current `historically_confirmed` receipt can
+complete the pending operation as explicitly historical. Drift/nonzero/cleanup
+errors stay pending. Exit 0 is additionally checked against the exact
 candidate, actor, key, old/new OIDs and current Git/Mote readbacks.
 
 ## Dispatch and recoverable carrier handoff
@@ -177,7 +184,8 @@ Terminal cards cannot be reopened by a delayed confirmation.
 
 Handoff first saves an addressed structured packet, then sends Mote the exact
 expected holder/token and key without `--release`. The source must have one Mote
-work reference. Existing carrier reservations retain their id and live path set;
+work reference. Adoption TTL is validated as 1..86400 seconds before preparing a transfer.
+Existing carrier reservations retain their id and live path set;
 a carrier must differ from the work issue because acceptance closes carriers.
 After confirmed work transfer, the recipient accepts each carrier by closing it,
 reading its orphan clock, adopting with that exact clock and an explicit TTL,
