@@ -35,6 +35,14 @@ conservative later notice. Cancellation cannot roll back an already-started Mote
 mutation; committed results remain inspectable. Exact successor peer verdicts
 are recorded through Fray review #109 and the corresponding Mote issue histories.
 
+Astra independently approved corrected Fray source `19084e8` and Mote `b114f4b`,
+passed 17 focused tests, and resolved all three original objections. Clean builds
+of those immutable sources passed 10 dispatch/handoff and 11 review/landing real
+CLI cases. Their binary hashes and receipts, plus the exact source verdict, are
+retained in the correction artifact. A final evidence-only successor changes
+none of the 111 hashed product/test/script inputs; its own exact-SHA peer verdict
+is recorded in the tracker and shared review rather than inferred from this report.
+
 ## Local Mote authority workflows (2026-10-06)
 
 Mote prerequisites are independently approved local commit

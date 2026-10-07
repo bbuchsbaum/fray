@@ -1,0 +1,16 @@
+{
+  "fray_source_sha": "19084e8291864e12387b47be6632a455a720888d",
+  "mote_source_sha": "b114f4b731a9f6836116054df7084a7dff0e90e7",
+  "binaries": {
+    "fray": {
+      "path": "/private/tmp/fray-outstanding-motes/target/debug/fray",
+      "sha256": "c0f99b79fa3074c96cc31c61f3fc8888346881a5570c9a9616db4364591611ee",
+      "version": "fray 0.2.1 (19084e829186)"
+    },
+    "mote": {
+      "path": "/private/tmp/mote-fray-prerequisites/target/debug/mote",
+      "sha256": "3f7f4a17e38b2b5e37f3bb3fd8a23abd1dbb276be40da24c39aaed2fa9dff4d9",
+      "version": "mote 0.1.0"
+    }
+  }
+}

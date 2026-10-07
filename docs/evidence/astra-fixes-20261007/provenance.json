@@ -30,7 +30,7 @@
   },
   "limits": [
     "Full Rust qualification preceded two test-only clone-to-slice lint changes; the affected admission suite passed again in fray-required-02.log.",
-    "Qualification logs precede the immutable Fray source commit; source-inputs.json binds their final product inputs.",
+    "Required qualification preceded the immutable source commit; a clean postcommit build and all21 real CLI cases passed. Source-inputs.json matches the final evidence-only successor.",
     "No push, install, shared daemon restart, original-store authority migration, hosted CI, native host qualification or paid trials.",
     "Admission duplicate suppression covers same-sync transitions; after a crash between ingestion and reconciliation, conservative later notices remain possible."
   ],
@@ -62,6 +62,44 @@
     "dispatch-real-02.log": {
       "archive": "dispatch-real-02.log.gz",
       "sha256": "320c88e750fbcb4eb1fda4fc25688c9d19bf642e97db3fcc4351df5b4dc60b6a"
+    },
+    "fray-postcommit-build.log": {
+      "archive": "fray-postcommit-build.log.gz",
+      "sha256": "77f5c4bb9899370ce539fd3950cfb29304fc2bd7481ed0cb93771d52ffd81921"
+    },
+    "mote-postcommit-build.log": {
+      "archive": "mote-postcommit-build.log.gz",
+      "sha256": "d5ef8cb93b9ba4b3646eed6fd37588caaaa8998f8874375d12298a79e91919b2"
+    },
+    "dispatch-postcommit.log": {
+      "archive": "dispatch-postcommit.log.gz",
+      "sha256": "320c88e750fbcb4eb1fda4fc25688c9d19bf642e97db3fcc4351df5b4dc60b6a"
+    },
+    "review-landing-postcommit.log": {
+      "archive": "review-landing-postcommit.log.gz",
+      "sha256": "52f7cb0ef99ece298fc3309f5356deeefd6b4ddc69ed73f64d6fe4f0f4e3a52d"
+    },
+    "astra-targeted-default-cache.log": {
+      "archive": "astra-targeted-default-cache.log.gz",
+      "sha256": "39b6e1df82a5e9cc85cc704deb0c0cca104de80526d7b1f2880e4d23df646209"
+    },
+    "astra-targeted.log": {
+      "archive": "astra-targeted.log.gz",
+      "sha256": "0b1a93d59ed118e8825eec82732ebdb7081d69015b58d2ea918d4dcf53ff18f2"
     }
+  },
+  "fray_source_sha": "19084e8291864e12387b47be6632a455a720888d",
+  "peer_review": {
+    "verdict": "APPROVE",
+    "reviewer": "astra_fresh_review",
+    "fray_source_sha": "19084e8291864e12387b47be6632a455a720888d",
+    "mote_source_sha": "b114f4b731a9f6836116054df7084a7dff0e90e7",
+    "fray_card": 109,
+    "event_seq": 559,
+    "resolved_objection": 110
+  },
+  "postcommit_real_cli_cases": {
+    "dispatch_handoff": 10,
+    "review_landing": 11
   }
 }

@@ -1,0 +1,19 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--test",
+    "dispatch",
+    "--test",
+    "mote_admission",
+    "--",
+    "--skip",
+    "public_admission_feed_compatibility_court"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "candidate": "19084e8291864e12387b47be6632a455a720888d",
+  "exit_code": 0,
+  "elapsed_seconds": 11.066019058227539
+}

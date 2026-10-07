@@ -26,3 +26,11 @@ are in [the revision 7 contract](../../design/mote-adapter.md).
 `a86803de31e890ac6e4331c9961705cabcde2fcb`. Extract it and apply it only in an
 isolated Mote checkout at that base. Its raw SHA256 is in `provenance.json`.
 Never activate a test binary against an original live store.
+
+The exact source-pair APPROVE report is `astra-fix-review.md` (Fray `19084e8`,
+Mote `b114f4b`). Postcommit build and 21 real CLI receipts are retained separately;
+the landing court completed after the report and does not silently alter it.
+`postcommit-provenance.json` binds the independently buildable source SHAs to the
+actual binary hashes. The final evidence-only successor has identical product
+inputs. Its own exact-SHA approval is recorded in the shared review and tracker;
+the earlier source verdict is not automatically transferred.

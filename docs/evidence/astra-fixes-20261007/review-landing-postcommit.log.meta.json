@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T10:53:17.003039+00:00",
+  "finished_utc": "2026-10-07T10:53:26.121224+00:00",
+  "duration_seconds": 9.118114,
+  "command": [
+    "python3",
+    "scripts/mote_workflow_integration.py",
+    "target/debug/fray",
+    "/private/tmp/mote-fray-prerequisites/target/debug/mote"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-astra-fixes-20261007/review-landing-postcommit.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 180.0,
+  "log_bytes": 1306
+}

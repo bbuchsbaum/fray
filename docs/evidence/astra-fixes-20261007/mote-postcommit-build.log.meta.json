@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T10:50:05.781594+00:00",
+  "finished_utc": "2026-10-07T10:50:16.411124+00:00",
+  "duration_seconds": 10.629744,
+  "command": [
+    "cargo",
+    "build",
+    "--locked",
+    "--offline"
+  ],
+  "cwd": "/private/tmp/mote-fray-prerequisites",
+  "log": "/private/tmp/fray-astra-fixes-20261007/mote-postcommit-build.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 120.0,
+  "log_bytes": 300
+}
