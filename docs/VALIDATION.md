@@ -1,5 +1,25 @@
 # Validation
 
+## Structured Mote failure receipts (2026-10-06)
+
+Fray implementation `a20432b21ef2d75274077fd54bd3a630d6015ee8` preserves a
+complete structured command receipt when Mote exits unsuccessfully or is
+signalled. Journal paths, exact old/new/current Git OIDs, uncertainty flags,
+and replacement holder/token remain available to the caller. The reported
+exit is retained; this receipt does not confirm a successful mutation. Usage
+errors, legacy rejections, successful transport results and preflight behavior
+retain their existing classification.
+
+All 22 Mote transport tests passed, including the bound subprocess's real
+exit-2 receipt and Git-updated/unknown/current-holder cases. Formatting,
+locked all-target checking, Clippy with warnings denied, all 428 Rust tests
+over 46 targets, and build passed. [Raw logs and source provenance](evidence/fray-authority-receipts-20261006/manifest.json)
+are retained. This step does not complete the authoritative review, landing or
+handoff workflows. Their upstream gates remain documented in
+[Mote integration gates](MOTE_CAPABILITY_GAPS.md). Timeouts still report an
+unconfirmed failure without recovering buffered output; consumer recovery
+must use the journaled request and authoritative readback.
+
 ## Local Mote sweep (2026-10-06)
 
 The [sweep evidence](LOCAL_SWEEP_20261006.md) separates local implementation,

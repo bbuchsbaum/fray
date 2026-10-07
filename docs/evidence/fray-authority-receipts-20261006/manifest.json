@@ -1,0 +1,27 @@
+[
+  {
+    "path": "fray-authority-receipt-tests-01.log",
+    "sha256": "c58609becc90fc2efaa3de947933417b5f4bba4ceb3f02353bc8215be977c22c",
+    "source": "/private/tmp/fray-authority-receipt-tests-01.log"
+  },
+  {
+    "path": "fray-authority-receipt-tests-01.log.meta.json",
+    "sha256": "3209ed8cfafe52db10f2badc713bddf1f6ed025c2c618ca66e3cad4ff91f49c5",
+    "source": "/private/tmp/fray-authority-receipt-tests-01.log.meta.json"
+  },
+  {
+    "path": "fray-authority-receipt-required-01.log",
+    "sha256": "3192b00c1b0bbef621a239e6cdeba058c8be4b5280cb34526555c436abf350ce",
+    "source": "/private/tmp/fray-authority-receipt-required-01.log"
+  },
+  {
+    "path": "fray-authority-receipt-required-01.log.meta.json",
+    "sha256": "25fee017b7acb53152f80b9d0d79ff15f184338d5403841ee318ea69a4198686",
+    "source": "/private/tmp/fray-authority-receipt-required-01.log.meta.json"
+  },
+  {
+    "path": "provenance.json",
+    "sha256": "d6fc32a789849d9e28ce30ea531a62313da4b5d1b315145eb77074dac590f7c3",
+    "source": "exact source commit and observed raw test/check logs"
+  }
+]

@@ -1,0 +1,31 @@
+   Compiling fray v0.2.1 (/private/tmp/fray-outstanding-motes)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.89s
+     Running tests/mote.rs (target/debug/deps/mote-32a758259565a44e)
+
+running 22 tests
+test outcomes_are_classified_from_exit_code_stderr_and_json_together ... ok
+test an_ancestor_board_pairs_with_its_sibling_store ... ok
+test a_board_binds_once_and_refuses_a_different_store ... ok
+test a_board_that_is_not_this_repositorys_is_never_paired_implicitly ... ok
+test real_mote_rejections_conflicts_events_and_usage_errors_classify_correctly ... ok
+test authority_failure_receipt_survives_the_bound_subprocess_transport ... ok
+test a_repository_nested_in_another_is_not_mistaken_for_a_submodule ... ok
+test a_worktree_outside_the_checkout_finds_the_main_worktrees_store ... ok
+test unsuccessful_authority_receipts_preserve_recovery_and_current_ownership ... ok
+test a_linked_worktree_of_a_bare_repository_must_name_its_store ... ok
+test preflight_conflicts_and_events_come_back_as_results ... ok
+test a_changed_store_id_is_refused_not_followed ... ok
+test bare_repositories_and_submodules_must_name_their_store ... ok
+test a_submodule_inside_a_linked_worktree_must_name_its_store ... ok
+test the_store_actor_and_json_are_always_explicit ... ok
+test the_deadline_holds_when_a_leftover_process_keeps_mote_pipes_open ... ok
+test status_without_mote_says_not_adopted ... ok
+test status_names_a_bad_mote_store_and_warns_when_mote_is_missing ... ok
+test status_against_the_real_mote_when_installed ... ok
+test status_refuses_an_unsupported_mote_and_warns_on_a_second_actor ... ok
+test status_binds_reads_and_refuses_a_swapped_store ... ok
+kill: 50579: No such process
+test a_timeout_stops_and_reaps_the_whole_mote_process_group ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.05s
+

@@ -1,0 +1,18 @@
+{
+  "source_sha": "a20432b21ef2d75274077fd54bd3a630d6015ee8",
+  "scope": "Structured unsuccessful Mote command receipt preservation only; no strict landing/handoff completion",
+  "focused_mote_tests": 22,
+  "required_rust_tests": 428,
+  "test_targets": 46,
+  "failed": 0,
+  "ignored": 0,
+  "checks": [
+    "fmt --check",
+    "check --locked --all-targets",
+    "clippy --locked --all-targets -- -D warnings",
+    "test --locked --all-targets",
+    "build --locked"
+  ],
+  "upstream_mote_gates_still_open": true,
+  "original_mote_source_unchanged": true
+}

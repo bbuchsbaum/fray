@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T00:22:28.402681+00:00",
+  "finished_utc": "2026-10-07T00:22:37.096634+00:00",
+  "duration_seconds": 8.693847,
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--test",
+    "mote"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-authority-receipt-tests-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 600.0,
+  "log_bytes": 1858
+}
