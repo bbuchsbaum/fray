@@ -873,6 +873,90 @@ fn candidate(
             "reasons":codes.iter().map(|c| json!({"blocking":true,"code":c,"detail":"d"})).collect::<Vec<_>>()}})
 }
 
+#[test]
+fn local_base_movement_notifies_only_author_and_evidence_runner_then_clears() {
+    let t = Temp::new("base-probe");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&t.0)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "next"]);
+    let next = git(&["rev-parse", "HEAD"]);
+    git(&["update-ref", "refs/heads/main", &base, &next]);
+    fs::create_dir_all(t.0.join(".mote")).unwrap();
+    let store = mote::Store {
+        path: t.0.join(".mote"),
+        store_id: "st-A".into(),
+    };
+    let mut c = candidate(
+        true,
+        &[],
+        json!({"carol":{"verdict":"approve"}}),
+        "pending",
+        "POL1",
+    );
+    c["identity"] = json!({"store_id":"st-A","landing_repository_id":"repo-local","landing_repository_op_id":"binding","commit_oid":next,"base_oid":base});
+    c["evidence"] = json!([{"op_id":"scope-1","producer":"alice","outcome":"pass","payload":{"kind":"git_target_scope","repository_id":"repo-local","landing_repository_op_id":"binding","object_format":"sha1","candidate_oid":next,"candidate_base_oid":base,"target_ref_full_name":"refs/heads/main","observed_target_oid":base}}]);
+    let review_keys = mote::candidate_items(&c);
+    let mut b = board();
+    at(&mut b, "carol", "join", json!({})).unwrap();
+    let initial = mote::candidate_base_items(&c, &store);
+    assert_eq!(
+        to_and_keys(&initial)
+            .iter()
+            .map(|(to, _)| to.as_str())
+            .collect::<Vec<_>>(),
+        vec!["bob", "alice"]
+    );
+    ingest(&mut b, Value::Null, "c0", initial).unwrap();
+    git(&["update-ref", "refs/heads/main", &next, &base]);
+    let moved = mote::candidate_base_items(&c, &store);
+    assert!(moved
+        .iter()
+        .all(|i| i["title"].as_str().unwrap().contains("base moved")));
+    ingest(&mut b, json!("c0"), "c0", moved.clone()).unwrap();
+    assert!(ingest(&mut b, json!("c0"), "c0", moved).unwrap()["created"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(mote::candidate_items(&c), review_keys);
+    assert!(mote_titles(&mut b, "carol").is_empty());
+    c["evidence"][0]["op_id"] = json!("scope-2");
+    c["evidence"][0]["payload"]["observed_target_oid"] = json!(next);
+    let refreshed = mote::candidate_base_items(&c, &store);
+    ingest(&mut b, json!("c0"), "c0", refreshed.clone()).unwrap();
+    let state:String=b.conn.query_row("SELECT state FROM mote_subjects WHERE store_id='st-A' AND recipient='bob' AND subject=?",[refreshed[0]["subject"].as_str().unwrap()],|r|r.get(0)).unwrap();
+    assert_eq!(state, refreshed[0]["key"].as_str().unwrap());
+    assert!(refreshed[0]["title"]
+        .as_str()
+        .unwrap()
+        .contains("matches recorded evidence"));
+    c["evidence"][0]["payload"]["landing_repository_op_id"] = json!("old-binding");
+    assert!(mote::candidate_base_items(&c, &store).is_empty());
+    c["evidence"][0]["payload"]["landing_repository_op_id"] = json!("binding");
+    c["evidence"][0]["payload"]["observed_target_oid"] =
+        json!("ffffffffffffffffffffffffffffffffffffffff");
+    assert!(mote::candidate_base_items(&c, &store).is_empty());
+}
+
 fn to_and_keys(items: &[Value]) -> Vec<(String, String)> {
     items
         .iter()

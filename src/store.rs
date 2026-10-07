@@ -272,6 +272,7 @@ impl Store {
         })?;
         conn.execute_batch("BEGIN IMMEDIATE")?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        conn.execute_batch(include_str!("dispatch.sql"))?;
         conn.execute("INSERT OR IGNORE INTO delivery_routes(agent,card_id,routed_at_ms) SELECT agent,card_id,NULL FROM deliveries", [])?;
         conn.execute("INSERT OR IGNORE INTO peer_generations(agent,generation,session,joined_ms) SELECT name,1,(SELECT session FROM sessions WHERE agent=agents.name AND ended_ms IS NULL AND session NOT GLOB 'keepalive:*' ORDER BY last_seen_ms DESC LIMIT 1),joined_ms FROM agents WHERE enabled=1",[])?;
         if version == 1 {
@@ -411,6 +412,9 @@ impl Store {
                 | "lane_release"
                 | "set_status"
                 | "mote_bind"
+                | "mote_operation_prepare"
+                | "mote_operation_checkpoint"
+                | "mote_operation_finalize"
                 | "mote_ingest"
                 | "mote_sync_failed"
                 | "mote_requests_sync"
@@ -418,10 +422,18 @@ impl Store {
                 | "peer_present"
                 | "review_request"
                 | "review_subject"
+                | "mote_review_request"
+                | "mote_review_successor"
                 | "keepalive_stop"
                 | "keepalive_usage"
                 | "keepalive_claim"
                 | "terminal_turn"
+                | "dispatch_offer"
+                | "dispatch_accept"
+                | "dispatch_handoff_packet"
+                | "dispatch_handoff_record"
+                | "dispatch_sync"
+                | "dispatch_status"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
@@ -788,7 +800,7 @@ fn check_lease(c: &Card, actor: &str, fence: i64, now: i64, allow_expired: bool)
     }
     Ok(())
 }
-fn emit(
+pub(crate) fn emit(
     conn: &Connection,
     actor: &str,
     op: &str,
@@ -837,7 +849,7 @@ fn emit(
     }
     Ok(json!({"card":card,"event_seq":seq}))
 }
-fn create_card(
+pub(crate) fn create_card(
     conn: &Connection,
     actor: &str,
     args: &Value,
@@ -862,10 +874,18 @@ fn create_card(
         true,
     )
 }
-fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
     let a = &req.args;
     let actor = req.actor.as_str();
     match req.op.as_str() {
+        op if op.starts_with("dispatch_") => crate::dispatch::mutate(conn, req, now),
+        "mote_review_request" => crate::mote_workflow::review_request(conn, req, now),
+        "mote_review_successor" => crate::mote_workflow::successor(conn, req, now),
+        "mote_operation_prepare" => {
+            crate::mote_workflow::prepare(conn, actor, req.session.as_deref(), a, now)
+        }
+        "mote_operation_checkpoint" => crate::mote_workflow::checkpoint(conn, actor, a, now),
+        "mote_operation_finalize" => crate::mote_workflow::finalize(conn, actor, a, now),
         "join" => {
             check_fields(a, &["role", "topics", "takeover", "continued"])?;
             let existing: Option<(String, String, bool)> = conn
@@ -1191,6 +1211,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "review_subject" => {
             check_fields(a, &["id", "expect", "at"])?;
             let c = get_card(conn, integer(a, "id")?)?;
+            if crate::mote_workflow::review_binding(conn, c.id)?.is_some() {
+                return Err(Error::invalid("Mote candidate subjects are immutable; use review successor after Mote supersession"));
+            }
             if c.author != actor {
                 return Err(Error::new(
                     "not_author",
@@ -1285,7 +1308,10 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 Some("resolved" | "superseded" | "withdrawn")
             ) && !c.terminal()
                 && objection_origin(conn, c.id)?.is_some();
-            if closing_objection && actor != c.author && actor != OWNER {
+            if closing_objection
+                && objection_origin(conn, c.id)?.is_some_and(|(objector, _)| objector != actor)
+                && actor != OWNER
+            {
                 return Err(Error::new("objection_authority", "only the objector or owner may close this objection; reply with evidence or ask them to resolve it"));
             }
             if c.lease_owner.is_some() && !closing_objection {
@@ -1638,6 +1664,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "claim" | "renew" | "release" => {
             check_fields(a, &["id", "fence", "ttl"])?;
             let c = get_card(conn, integer(a, "id")?)?;
+            if req.op=="claim" && conn.query_row("SELECT EXISTS(SELECT 1 FROM dispatch_offers WHERE id=?1) OR EXISTS(SELECT 1 FROM dispatch_handoffs WHERE id=?1)",[c.id],|r|r.get::<_,bool>(0))? {
+                return Err(Error::invalid("use fray accept for Mote-backed offers/handoff packets; card leases do not claim Mote work"));
+            }
             // Leasing an owner card would edit it and redirect objections to
             // the leaseholder instead of the owner.
             if owner_controlled(&c) && actor != OWNER && req.op != "release" {
@@ -2172,7 +2201,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // Binds this board to one Mote store, once (docs/design/mote-adapter.md
             // section 2). A later bind to a different store is refused, never
             // silently followed.
-            check_fields(a, &["store", "store_id"])?;
+            check_fields(a, &["store", "store_id", "cursor_mode", "genesis_digest"])?;
             let store = string(a, "store")?;
             let store_id = string(a, "store_id")?;
             text(store, "store", 4096, false)?;
@@ -2191,13 +2220,15 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                         ),
                     ));
                 }
-                return Ok(json!({"binding":bound,"new":false}));
+                configure_mote_ordering(conn, a)?;
+                return Ok(json!({"binding":mote_binding(conn)?,"new":false}));
             }
             conn.execute(
                 "INSERT INTO meta(key,value) VALUES('mote_store',?1),('mote_store_id',?2)",
                 params![store, store_id],
             )?;
-            Ok(json!({"binding":{"store":store,"store_id":store_id},"new":true}))
+            configure_mote_ordering(conn, a)?;
+            Ok(json!({"binding":mote_binding(conn)?,"new":true}))
         }
         "mote_ingest" => {
             // Mote events become attention exactly once per recipient, and the
@@ -2212,6 +2243,8 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     "items",
                     "claims",
                     "reconcile",
+                    "sync_revision",
+                    "initialized",
                 ],
             )?;
             let store_id = string(a, "store_id")?;
@@ -2223,6 +2256,13 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 ));
             }
             let current = bound["cursor"].as_str().map(str::to_owned);
+            let admission = bound["cursor_mode"] == "admission_v1";
+            if admission && a["sync_revision"] != bound["sync_revision"] {
+                return Err(Error::new(
+                    "mote_cursor_moved",
+                    "admission sync generation changed; no cards written",
+                ));
+            }
             let after = match a.get("after") {
                 None | Some(Value::Null) => None,
                 Some(_) => Some(string(a, "after")?.to_owned()),
@@ -2236,9 +2276,28 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                     ),
                 ));
             }
-            let cursor = string(a, "cursor")?;
-            text(cursor, "cursor", 200, false)?;
-            if current.as_deref().is_some_and(|c| cursor < c) {
+            let cursor = if admission {
+                match &a["cursor"] {
+                    Value::Null => None,
+                    Value::String(s) => Some(s.as_str()),
+                    _ => return Err(Error::invalid("admission cursor must be a raw ID or null")),
+                }
+            } else {
+                Some(string(a, "cursor")?)
+            };
+            if admission && current.is_some() && cursor.is_none() {
+                return Err(Error::invalid(
+                    "an initialized raw cursor cannot be cleared",
+                ));
+            }
+            if let Some(cursor) = cursor {
+                text(cursor, "cursor", 200, false)?;
+            }
+            if !admission
+                && current
+                    .as_deref()
+                    .is_some_and(|c| cursor.is_some_and(|cursor| cursor < c))
+            {
                 return Err(Error::invalid("the Mote cursor only moves forward"));
             }
             let items = a["items"]
@@ -2260,6 +2319,11 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             // Claim transitions, in event order, become cards here, where the
             // previous holder is known consistently with the cursor.
             let mut items: Vec<Value> = items.clone();
+            let claim_table = if admission {
+                "mote_feed_claims"
+            } else {
+                "mote_claims"
+            };
             for c in &claims {
                 check_fields(c, &["entity", "to", "by", "op_id", "released", "seed"])?;
                 let entity = string(c, "entity")?;
@@ -2269,7 +2333,9 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 let by = c["by"].as_str().unwrap_or("");
                 let stored: Option<(Option<String>, String)> = conn
                     .query_row(
-                        "SELECT holder,op_id FROM mote_claims WHERE store_id=? AND entity=?",
+                        &format!(
+                            "SELECT holder,op_id FROM {claim_table} WHERE store_id=? AND entity=?"
+                        ),
                         params![store_id, entity],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
@@ -2279,18 +2345,32 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 // sync); its older transitions must not be compared against a
                 // holder that newer ones already set, or they would invent a
                 // change of hands.
-                if stored
-                    .as_ref()
-                    .is_some_and(|(_, seen)| op_id <= seen.as_str())
+                if !admission
+                    && stored
+                        .as_ref()
+                        .is_some_and(|(_, seen)| op_id <= seen.as_str())
+                {
+                    continue;
+                }
+                if admission
+                    && conn.execute(
+                        "INSERT OR IGNORE INTO mote_claim_events(store_id,op_id) VALUES(?,?)",
+                        params![store_id, op_id],
+                    )? == 0
                 {
                     continue;
                 }
                 let previous = stored.map(|(holder, _)| holder);
                 let holder = if c["released"] == true { None } else { to };
                 conn.execute(
-                    "INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",
+                    &format!("INSERT INTO {claim_table}(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id"),
                     params![store_id, entity, holder, op_id],
                 )?;
+                if admission && c["seed"] == true {
+                    // Baseline both views quietly. Otherwise the next live
+                    // board reconciliation invents a handoff from no holder.
+                    conn.execute("INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",params![store_id,entity,holder,op_id])?;
+                }
                 if c["seed"] == true || c["released"] == true {
                     continue;
                 }
@@ -2471,10 +2551,18 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 )?;
                 created.push(id);
             }
-            conn.execute(
-                "INSERT INTO meta(key,value) VALUES('mote_cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [cursor],
-            )?;
+            if let Some(cursor) = cursor {
+                conn.execute("INSERT INTO meta(key,value) VALUES('mote_cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[cursor])?;
+            } else {
+                conn.execute("DELETE FROM meta WHERE key='mote_cursor'", [])?;
+            }
+            if admission {
+                conn.execute("INSERT INTO meta(key,value) VALUES('mote_cursor_initialized',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[if a["initialized"]==false {"false"}else{"true"}])?;
+                conn.execute(
+                    "UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='mote_sync_revision'",
+                    [],
+                )?;
+            }
             conn.execute("DELETE FROM meta WHERE key='mote_sync_timeouts'", [])?;
             // When any agent last synced: background runners pace themselves
             // on this, so a board syncs about once per interval, not once per
@@ -2486,7 +2574,7 @@ fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             unknown.sort();
             unknown.dedup();
             Ok(
-                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"raced":raced,"cursor":cursor,"synced_by":actor}),
+                json!({"created":created,"duplicate":duplicate,"unknown_recipients":unknown,"invalid":invalid,"raced":raced,"cursor":cursor,"synced_by":actor,"sync_revision":mote_binding(conn)?["sync_revision"]}),
             )
         }
         "mote_requests_sync" => {
@@ -2840,7 +2928,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["dispatch","mote_admission_order","mote_workflows","peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -3121,6 +3209,11 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
             check_fields(a, &[])?;
             Ok(json!({"binding":mote_binding(conn)?}))
         }
+        "mote_operation_get" => {
+            check_fields(a, &["key"])?;
+            Ok(json!({"operation":crate::mote_workflow::operation(conn,actor,string(a,"key")?)?}))
+        }
+        op if op.starts_with("dispatch_") => crate::dispatch::read(conn, req, now),
         "stuck_requests" => {
             // R3, read only: what is stuck now, and whether anyone is ticking.
             check_fields(a, &[])?;
@@ -3586,6 +3679,30 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// The Mote store this board is bound to, or null.
+fn configure_mote_ordering(conn: &Connection, args: &Value) -> Result<()> {
+    let Some(mode) = args.get("cursor_mode").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if mode != "admission_v1" {
+        return Err(Error::invalid("explicit cursor mode must be admission_v1"));
+    }
+    let digest = string(args, "genesis_digest")?;
+    text(digest, "genesis_digest", 100, false)?;
+    let old = mote_binding(conn)?;
+    if old["cursor_mode"] == "admission_v1" {
+        if old["genesis_digest"] != digest {
+            return Err(Error::new(
+                "mote_store_mismatch",
+                "authority genesis changed under existing binding",
+            ));
+        }
+        return Ok(());
+    }
+    conn.execute("INSERT INTO meta(key,value) VALUES('mote_cursor_mode','admission_v1'),('mote_authority_genesis',?),('mote_cursor_initialized','false'),('mote_sync_revision','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",[digest])?;
+    conn.execute("DELETE FROM meta WHERE key='mote_cursor'", [])?;
+    Ok(())
+}
+
 fn mote_binding(conn: &Connection) -> Result<Value> {
     let get = |key: &str| -> Result<Option<String>> {
         Ok(conn
@@ -3595,6 +3712,10 @@ fn mote_binding(conn: &Connection) -> Result<Value> {
     Ok(match (get("mote_store")?, get("mote_store_id")?) {
         (Some(store), Some(store_id)) => json!({"store":store,"store_id":store_id,
             "cursor":get("mote_cursor")?,
+            "cursor_mode":get("mote_cursor_mode")?.unwrap_or_else(||"legacy_filename".into()),
+            "cursor_initialized":get("mote_cursor_initialized")?.as_deref()==Some("true") || get("mote_cursor")?.is_some(),
+            "sync_revision":get("mote_sync_revision")?.and_then(|n|n.parse::<i64>().ok()).unwrap_or(0),
+            "genesis_digest":get("mote_authority_genesis")?,
             "consecutive_timeouts":get("mote_sync_timeouts")?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0),
             "last_sync_ms":get("mote_last_sync_ms")?.and_then(|n| n.parse::<i64>().ok())}),
         _ => Value::Null,
@@ -4067,10 +4188,16 @@ fn compact_events(events: &[Value]) -> Vec<Value> {
 const FOLLOW_UP_LIMIT: usize = 50;
 
 fn objection_origin(conn: &Connection, id: i64) -> Result<Option<(String, i64)>> {
-    Ok(conn.query_row("SELECT parent.actor,parent.card_id FROM events child JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE child.card_id=? AND child.op='post' AND parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection' ORDER BY child.seq LIMIT 1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    Ok(conn.query_row("SELECT coalesce(json_extract(child.payload,'$.detail.source_objector'),parent.actor),coalesce(json_extract(child.payload,'$.detail.parent_card'),parent.card_id) FROM events child LEFT JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE child.card_id=? AND child.op='post' AND ((parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection') OR (json_extract(child.payload,'$.detail.kind')='objection' AND json_extract(child.payload,'$.detail.source_objector') IS NOT NULL)) ORDER BY child.seq LIMIT 1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
 }
 
-fn force_delivery(conn: &Connection, to: &str, card: i64, seq: i64, now: i64) -> Result<()> {
+pub(crate) fn force_delivery(
+    conn: &Connection,
+    to: &str,
+    card: i64,
+    seq: i64,
+    now: i64,
+) -> Result<()> {
     conn.execute("INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)", params![to,now])?;
     conn.execute("INSERT INTO deliveries(agent,card_id,pending_seq) VALUES(?,?,?) ON CONFLICT(agent,card_id) DO UPDATE SET pending_seq=max(pending_seq,excluded.pending_seq)", params![to,card,seq])?;
     Ok(())
@@ -4108,7 +4235,7 @@ fn objection_notice(
 /// Compact, bounded current objection state; immutable origins cannot be
 /// erased by editing a title, kind or routing tag.
 fn objection_presentation(conn: &Connection, id: i64, value: &mut Value) -> Result<()> {
-    let mut query = conn.prepare("SELECT c.id,c.status,parent.actor,(SELECT e.actor FROM events e WHERE e.card_id=c.id AND json_extract(e.payload,'$.detail.objection_resolved_by') IS NOT NULL ORDER BY e.seq DESC LIMIT 1) FROM events child JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') JOIN cards c ON c.id=child.card_id WHERE child.op='post' AND parent.card_id=? AND json_extract(parent.payload,'$.detail.kind')='objection' ORDER BY c.id LIMIT 6")?;
+    let mut query = conn.prepare("SELECT c.id,c.status,coalesce(json_extract(child.payload,'$.detail.source_objector'),parent.actor),(SELECT e.actor FROM events e WHERE e.card_id=c.id AND json_extract(e.payload,'$.detail.objection_resolved_by') IS NOT NULL ORDER BY e.seq DESC LIMIT 1) FROM events child LEFT JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') JOIN cards c ON c.id=child.card_id WHERE child.op='post' AND coalesce(json_extract(child.payload,'$.detail.parent_card'),parent.card_id)=? AND ((parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection') OR (json_extract(child.payload,'$.detail.kind')='objection' AND json_extract(child.payload,'$.detail.source_objector') IS NOT NULL)) ORDER BY c.id LIMIT 6")?;
     let mut rows = query.query_map([id], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"status":r.get::<_,String>(1)?,"objector":r.get::<_,String>(2)?,"resolved_by":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if !rows.is_empty() {
         let more = rows.len() > 5;
@@ -4158,7 +4285,7 @@ fn full_text(conn: &Connection, card: &Card) -> Result<String> {
 /// Open follow-ups on `card` that originated as objections (not questions).
 fn open_objections(conn: &Connection, card: i64) -> Result<Vec<i64>> {
     let mut s = conn.prepare(&format!(
-        "SELECT c.id FROM cards c JOIN events child ON child.card_id=c.id AND child.op='post' JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE {ACTIVE} AND parent.card_id=? AND parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection' ORDER BY c.id"
+        "SELECT c.id FROM cards c JOIN events child ON child.card_id=c.id AND child.op='post' LEFT JOIN events parent ON parent.seq=json_extract(child.payload,'$.detail.annotation_seq') WHERE {ACTIVE} AND coalesce(json_extract(child.payload,'$.detail.parent_card'),parent.card_id)=? AND ((parent.op='annotate' AND json_extract(parent.payload,'$.detail.kind')='objection') OR (json_extract(child.payload,'$.detail.kind')='objection' AND json_extract(child.payload,'$.detail.source_objector') IS NOT NULL)) ORDER BY c.id"
     ))?;
     let ids = s
         .query_map([card], |r| r.get(0))?

@@ -12,6 +12,7 @@ source = (ROOT / 'src/store.rs').read_text()
 conn = sqlite3.connect(':memory:')
 conn.execute('PRAGMA foreign_keys=ON')
 conn.executescript((ROOT / 'src/schema.sql').read_text())
+conn.executescript((ROOT / 'src/dispatch.sql').read_text())
 checks = []
 
 def check(name, condition):
@@ -28,7 +29,7 @@ def extract(prefix):
 
 # Compile every actual static SQL literal used in the Rust implementation.
 statements = []
-sql_source = source + '\n' + '\n'.join((ROOT / path).read_text() for path in ['src/presence.rs', 'src/review.rs'])
+sql_source = source + '\n' + '\n'.join((ROOT / path).read_text() for path in ['src/presence.rs', 'src/review.rs', 'src/dispatch.rs', 'src/mote_workflow.rs'])
 for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', sql_source):
     value = json.loads('"' + match.group(1).replace('\n', '\\n') + '"')
     if not re.match(r'^(SELECT|INSERT|UPDATE|DELETE)\b', value) or re.search(r'\{[A-Za-z_][^{}]*\}', value) or value.rstrip().endswith('='):

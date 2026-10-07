@@ -212,6 +212,10 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             }
         }
         let capability = match wire_request.op.as_str() {
+            op if op.starts_with("dispatch_") => Some(("dispatch", "Mote-backed dispatch")),
+            op if op.starts_with("mote_operation_") || op.starts_with("mote_review_") => {
+                Some(("mote_workflows", "recoverable Mote workflows"))
+            }
             "peers" | "peer_present" => Some(("peer_discovery", "session peer discovery")),
             "review_request" | "review_subject" => {
                 Some(("review_subjects", "version-bound peer review"))
@@ -279,6 +283,14 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             _ => None,
         };
         let mut capabilities: Vec<_> = capability.into_iter().collect();
+        if req.op == "mote_bind" && req.args.get("cursor_mode").is_some()
+            || req.op == "mote_ingest" && req.args.get("sync_revision").is_some()
+        {
+            capabilities.push((
+                "mote_admission_order",
+                "admission-ordered Mote synchronization",
+            ));
+        }
         if req.op == "annotate" && req.args.get("review_verdict").is_some() {
             capabilities.push(("review_subjects", "version-bound peer verdict"));
         }

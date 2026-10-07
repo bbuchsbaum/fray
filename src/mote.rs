@@ -534,7 +534,7 @@ pub fn claim_transitions(events: &[Value]) -> Vec<Value> {
             let entity = data["entity"].as_str()?;
             let op_id = e["op_id"].as_str()?;
             match e["type"].as_str()? {
-                "claim.acquired" => Some(serde_json::json!({
+                "claim.acquired" | "claim.transferred" => Some(serde_json::json!({
                     "entity": entity, "to": data["to"].as_str()?, "by": e["actor"], "op_id": op_id,
                 })),
                 "claim.released" => Some(serde_json::json!({
@@ -744,6 +744,90 @@ pub fn candidate_items(c: &Value) -> Vec<Value> {
         // Final: a slower sync can never replace it with an older state.
         for item in &mut items {
             item["final"] = serde_json::json!(true);
+        }
+    }
+    items
+}
+
+/// Local advisory Git observation, not Mote evidence or repository identity.
+/// Mote's target-scope CLI probes the store's parent, so a linked worktree's
+/// unrelated cwd never decides which target this attention describes.
+pub fn candidate_base_items(c: &Value, store: &Store) -> Vec<Value> {
+    if c["phase"]["value"] != "pending" || c["identity"]["store_id"] != store.store_id {
+        return vec![];
+    }
+    let Some(root) = store.path.parent().and_then(|p| p.canonicalize().ok()) else {
+        return vec![];
+    };
+    let Some(format) = git(&root, &["rev-parse", "--show-object-format"]) else {
+        return vec![];
+    };
+    let mut items = Vec::new();
+    for evidence in c["evidence"].as_array().into_iter().flatten() {
+        let p = &evidence["payload"];
+        if evidence["outcome"] != "pass"
+            || p["kind"] != "git_target_scope"
+            || p["repository_id"] != c["identity"]["landing_repository_id"]
+            || p["landing_repository_op_id"] != c["identity"]["landing_repository_op_id"]
+            || p["candidate_oid"] != c["identity"]["commit_oid"]
+            || p["candidate_base_oid"] != c["identity"]["base_oid"]
+            || p["object_format"] != format
+        {
+            continue;
+        }
+        let Some(reference) = p["target_ref_full_name"]
+            .as_str()
+            .filter(|r| r.starts_with("refs/heads/"))
+        else {
+            continue;
+        };
+        let Some(current) = git(
+            &root,
+            &["rev-parse", "--verify", "--end-of-options", reference],
+        ) else {
+            continue;
+        };
+        let Some(old) = p["observed_target_oid"].as_str() else {
+            continue;
+        };
+        let oids = [
+            Some(current.as_str()),
+            Some(old),
+            p["candidate_oid"].as_str(),
+            p["candidate_base_oid"].as_str(),
+        ];
+        let len = if format == "sha1" {
+            40
+        } else if format == "sha256" {
+            64
+        } else {
+            continue;
+        };
+        if !oids.into_iter().all(|o| {
+            o.is_some_and(|o| {
+                o.len() == len
+                    && o.bytes().all(|b| b.is_ascii_hexdigit())
+                    && git(&root, &["cat-file", "-e", &format!("{o}^{{commit}}")]).is_some()
+            })
+        }) {
+            continue;
+        }
+        let (Some(id), Some(op)) = (c["candidate_id"].as_str(), evidence["op_id"].as_str()) else {
+            continue;
+        };
+        let stale = current != old;
+        let subject = format!("cand-local-base:{id}:{reference}");
+        let key = format!("{subject}:{}", short_hash(&format!("{op}:{old}:{current}")));
+        let mut told = Vec::new();
+        for recipient in [c["proposer"].as_str(), evidence["producer"].as_str()]
+            .into_iter()
+            .flatten()
+        {
+            if told.contains(&recipient) {
+                continue;
+            }
+            told.push(recipient);
+            items.push(serde_json::json!({"key":key,"subject":subject,"recipient":recipient,"title":if stale {format!("Fray: {id} base moved; local target evidence differs")}else{format!("Fray: {id} local target matches recorded evidence")},"summary":format!("Local {} in {} is {current}; Mote evidence {op} observed {old}. {} This is local advisory attention, not a verified repository identity or a change to Mote reviews/landability. Check `mote candidate show {id}` and refresh target-scope evidence before landing.",reference,root.display(),if stale {"Integration evidence needs a fresh observation."}else{"The local mismatch is cleared."}),"priority":if stale{1}else{0},"refs":[id,c["entity"]]}));
         }
     }
     items

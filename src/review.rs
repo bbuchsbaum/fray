@@ -18,7 +18,14 @@ pub fn version(value: &str) -> Result<&str> {
 }
 
 pub fn subject(conn: &Connection, id: i64) -> Result<Option<Value>> {
-    Ok(conn.query_row("SELECT baseline,candidate,subject_rev,mote_ref FROM review_subjects WHERE card_id=?", [id], |r| Ok(json!({"baseline":r.get::<_,String>(0)?,"candidate":r.get::<_,String>(1)?,"subject_rev":r.get::<_,i64>(2)?,"mote_ref":r.get::<_,Option<String>>(3)?,"advisory":true}))).optional()?)
+    let mut result = conn.query_row("SELECT baseline,candidate,subject_rev,mote_ref FROM review_subjects WHERE card_id=?", [id], |r| Ok(json!({"baseline":r.get::<_,String>(0)?,"candidate":r.get::<_,String>(1)?,"subject_rev":r.get::<_,i64>(2)?,"mote_ref":r.get::<_,Option<String>>(3)?,"advisory":true}))).optional()?;
+    if let (Some(subject), Some(binding)) =
+        (&mut result, crate::mote_workflow::review_binding(conn, id)?)
+    {
+        subject["advisory"] = json!(false);
+        subject["mote_candidate"] = binding;
+    }
+    Ok(result)
 }
 
 pub fn context(conn: &Connection, id: i64, history: bool) -> Result<Value> {
@@ -29,7 +36,10 @@ pub fn context(conn: &Connection, id: i64, history: bool) -> Result<Value> {
     let limit = if history { 21 } else { 1 };
     let mut verdicts = query.query_map(params![id,limit],|r| Ok(json!({"event_seq":r.get::<_,i64>(0)?,"reviewer":r.get::<_,String>(1)?,"subject_rev":r.get::<_,i64>(2)?,"version":r.get::<_,String>(3)?,"verdict":r.get::<_,String>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for verdict in &mut verdicts {
-        verdict["stale"] = json!(verdict["subject_rev"] != result["subject_rev"]);
+        verdict["stale"] = json!(
+            verdict["subject_rev"] != result["subject_rev"]
+                || !result["mote_candidate"]["successor_card"].is_null()
+        );
     }
     // The compact header must describe the peer currently asked to review,
     // rather than letting an unsolicited verdict replace that peer's result.
@@ -42,7 +52,10 @@ pub fn context(conn: &Connection, id: i64, history: bool) -> Result<Value> {
             |r| Ok(json!({"event_seq":r.get::<_,i64>(0)?,"reviewer":r.get::<_,String>(1)?,"subject_rev":r.get::<_,i64>(2)?,"version":r.get::<_,String>(3)?,"verdict":r.get::<_,String>(4)?})),
         ).optional()?;
         if let Some(verdict) = &mut latest {
-            verdict["stale"] = json!(verdict["subject_rev"] != result["subject_rev"]);
+            verdict["stale"] = json!(
+                verdict["subject_rev"] != result["subject_rev"]
+                    || !result["mote_candidate"]["successor_card"].is_null()
+            );
         }
         latest.unwrap_or(Value::Null)
     } else {
@@ -52,6 +65,11 @@ pub fn context(conn: &Connection, id: i64, history: bool) -> Result<Value> {
         result["verdicts_more"] = json!(verdicts.len() > 20);
         verdicts.truncate(20);
         result["verdicts"] = json!(verdicts);
+    }
+    if result["advisory"] == false {
+        result["recorded_receipts_only"] = json!(true);
+        result["current_authority"] =
+            json!("Mote candidate state; Fray verdicts are accepted historical receipts");
     }
     Ok(result)
 }
@@ -65,6 +83,9 @@ pub fn prepare_verdict(conn: &Connection, id: i64, actor: &str, args: &Value) ->
     let at = version(string(args, "at")?)?;
     let current =
         subject(conn, id)?.ok_or_else(|| Error::new("not_review", "card has no review subject"))?;
+    if current["advisory"] == false {
+        return Err(Error::invalid("use review candidate-verdict for this Mote subject; an advisory verdict cannot replace Mote acceptance"));
+    }
     let expected = integer(args, "expect")?;
     if current["subject_rev"] != expected || current["candidate"] != at {
         return Err(Error::new(

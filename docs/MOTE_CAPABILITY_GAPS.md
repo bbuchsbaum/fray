@@ -1,11 +1,23 @@
 # Mote authority integration gates
 
-The 2026-10-06 local sweep preserves the acceptance contracts of
+The 2026-10-06 local integration preserves the acceptance contracts of
 `bd-01M3RZ9BCSBBSS6WXRCSWQ33KV` (review/landing) and
-`bd-01M3RZ9C15BSCYGHT1SYFBRV52` (dispatch/handoff). These features are not
-complete. No mutating `fray land`, `accept`, or `handoff` is advertised.
+`bd-01M3RZ9C15BSCYGHT1SYFBRV52` (dispatch/handoff). The three reproduced
+gates at `63454fe` are corrected in local Mote commit
+`a86803de31e890ac6e4331c9961705cabcde2fcb`, independently approved at that
+exact SHA. All 423 active Mote tests passed (two pre-existing ignored), with
+formatting, Clippy and rustdoc warnings denied.
 
-## Upstream implementation review: `63454fe`
+Fray now capability-gates explicit immutable candidate review, fenced nonempty
+fast-forward landing, dispatch and recoverable carrier adoption. Client
+journals retain exact requests and failed receipts; Mote stays authoritative.
+See the [revision 6 contract](design/mote-adapter.md) and
+[qualification evidence](evidence/fray-mote-workflows-20261006/manifest.json).
+No Mote/Fray push, installed-binary replacement, live store activation or paid
+trial occurred. Upgraded writers sharing one local POSIX-locked store remain a
+deployment requirement; historical hosted CI is not current-head qualification.
+
+## Historical upstream implementation review: `63454fe`
 
 Mote commit `63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1` adds the requested
 single-store publication fence, actor-specific landing, and expected-holder/token
@@ -54,7 +66,9 @@ The new API also requires upgraded writers sharing one store and working local
 POSIX locks. Landing supports a nonempty fast-forward to the immutable reviewed
 candidate; a merge result requires its own candidate and reviews. Reservations
 remain separate from claim handoff, and adoption retries need authoritative
-readback. Fray's strict features remain blocked pending the findings above.
+readback. The findings above blocked integration at that historical commit.
+The local successor fixes confirmed-journal errors, final target drift and
+activation before both `begin` and `claim`; original failure evidence is retained.
 
 ## Historical findings at `fd53f0a`
 

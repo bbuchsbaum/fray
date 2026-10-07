@@ -1,7 +1,6 @@
 //! Bounded, best-effort worktree snapshots.  This is deliberately not an
 //! adversary-resistant or filesystem-atomic snapshot primitive.
-#[path = "sha256.rs"]
-mod sha256;
+use crate::sha256;
 
 use crate::model::{Error, Result};
 use serde::{Deserialize, Serialize};

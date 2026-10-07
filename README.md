@@ -223,9 +223,10 @@ History compaction is opt-in and requires an offline board. Preview with
 `fray prune --older-than 30d --dry-run`; see [retention](docs/RETENTION.md) before
 executing it. This sweep never prunes a shared board.
 
-Authoritative candidate landing and structured claim handoff remain blocked on
-[Mote authority capabilities](docs/MOTE_CAPABILITY_GAPS.md). Standalone Fray
-review evidence does not authorize a Mote landing.
+Explicit Mote candidate review, fenced local landing, dispatch and recoverable
+carrier handoff require the [qualified Mote authority capabilities](docs/MOTE_CAPABILITY_GAPS.md).
+Standalone Fray review evidence remains advisory. See the
+[adapter contract](docs/design/mote-adapter.md) for commands and recovery.
 
 ## Shared context and managers
 
@@ -337,7 +338,7 @@ board:
 
 On first use it binds the board to that store's id. From then on a different
 store at the same path is refused, never followed. Fray runs `mote` itself,
-always passing an explicit `--store`, `--json` and `--actor`. It never runs
+passing explicit `--store` and `--json`, and `--actor` except on unfiltered events. It never runs
 `mote` from the daemon. If Mote is missing, unsupported or unreachable, that
 is reported and reads degrade to advisory.
 
@@ -358,13 +359,42 @@ or concurrent syncs, because the cursor only moves forward, under
 compare-and-set. The cards are authored by the reserved `mote` identity, so
 they reach the agent that ran the sync too. The first sync starts at the
 latest event and never replays history. A Mote actor that has not joined the
-board is reported, not notified. After three timed-out syncs in a row the
-cursor moves to the latest event. `FRAY_MOTE_READ_TIMEOUT_MS` overrides the
+board is reported, not notified. Enabled authority stores use admission order,
+with raw op-id anchors, revision CAS and separate reservation projections;
+timeouts leave that exact cursor unchanged. Legacy stores retain their historical
+three-timeout tail reseed. `FRAY_MOTE_READ_TIMEOUT_MS` overrides the
 10 s read timeout. Every sync also compares claims with Mote's live board, which is
 the truth when it is read. A change the event feed missed, through a late op,
 a reseed or a release, is reported by what changed ("you now hold E", "E is
 now held by bob"), never by guessing who did it. A release is recorded
 quietly.
+
+Strict workflows require upgraded Mote writers sharing the store and enabled
+authority v1; a version string is insufficient. Reads never enable authority.
+No installed binary or existing store was migrated by the local sweep.
+
+```sh
+fray --key review-1 review candidate CANDIDATE --to reader --title 'Review' 'Check behavior'
+fray --key verdict-1 review candidate-verdict CARD approve --at git:OID --expect 1 'Verified'
+fray land CANDIDATE --target main --check
+fray --key landing-1 land CANDIDATE --target main --before OLD_OID
+fray --key offer-1 send --to anyone-free 'Bounded work' --mote ISSUE --tag rust
+fray --key accept-1 accept CARD --expect 1
+fray --key handoff-1 handoff CARD --to peer --state 'Half done' --next 'Finish' --carrier CARRIER=RV
+fray --key adopt-1 accept HANDOFF_CARD
+fray operation show KEY
+fray operation resume KEY
+```
+
+Landing is a nonempty local fast-forward through Mote's fence, with no push.
+Superseded candidates need new reviews. Local integration-evidence mismatch
+notifies the author/evidence producer without re-waking reviewers. Offers and
+ACKs do not grant ownership: explicit accept requires Mote readback. A disappeared
+peer produces a notice immediately; requeue waits for observed release/expiry.
+Carrier close/adopt never unreserves paths, but continuity requires live TTL and
+successful readbacks. Competing adoption or expiry reports loss to both parties.
+Keys preserve exact requests and receipts for recovery; old retries do not renew
+claims, reservations or approvals.
 
 Mote requests (`mote msg send --to NAME --kind request TEXT`) are tracked by
 state, not by event. Each sync lists the open requests and turns each one

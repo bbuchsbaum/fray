@@ -1,4 +1,27 @@
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Outbound request journals and observations, never a second Mote ledger.
+CREATE TABLE IF NOT EXISTS mote_operations (
+    actor TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,
+    payload TEXT NOT NULL CHECK(json_valid(payload)), digest TEXT NOT NULL,
+    session TEXT, rev INTEGER NOT NULL, state TEXT NOT NULL,
+    observations TEXT NOT NULL CHECK(json_valid(observations)),
+    result TEXT CHECK(result IS NULL OR json_valid(result)),
+    created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+    PRIMARY KEY(actor,key)
+);
+CREATE TABLE IF NOT EXISTS mote_review_subjects (
+    card_id INTEGER PRIMARY KEY REFERENCES cards(id),
+    store_id TEXT NOT NULL, candidate_id TEXT NOT NULL,
+    proposer TEXT NOT NULL, observed_candidate TEXT NOT NULL CHECK(json_valid(observed_candidate)),
+    predecessor_card INTEGER, successor_card INTEGER
+);
+CREATE TABLE IF NOT EXISTS mote_feed_claims (
+    store_id TEXT NOT NULL, entity TEXT NOT NULL, holder TEXT, op_id TEXT NOT NULL,
+    PRIMARY KEY(store_id,entity)
+);
+CREATE TABLE IF NOT EXISTS mote_claim_events (
+    store_id TEXT NOT NULL, op_id TEXT NOT NULL, PRIMARY KEY(store_id,op_id)
+);
 CREATE TABLE IF NOT EXISTS agents (
     name TEXT PRIMARY KEY,
     role TEXT NOT NULL DEFAULT 'worker',

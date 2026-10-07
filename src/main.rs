@@ -129,6 +129,54 @@ enum Cmd {
         #[command(subcommand)]
         command: ReviewCmd,
     },
+    /// Land a reviewed immutable candidate locally through Mote's fenced fast-forward.
+    Land {
+        candidate: String,
+        #[arg(long, default_value = "main")]
+        target: String,
+        #[arg(long)]
+        before: Option<String>,
+        #[arg(long)]
+        check: bool,
+    },
+    /// Inspect or resume an exact durable outbound request.
+    Operation {
+        #[command(subcommand)]
+        command: OperationCmd,
+    },
+    /// Explicitly accept a routed offer or handoff packet; ACK never owns work.
+    Accept {
+        id: i64,
+        #[arg(long, default_value_t = 1)]
+        expect: i64,
+        #[arg(long)]
+        progress: Option<String>,
+    },
+    /// Transfer a Mote work claim with a durable packet and live carriers.
+    Handoff {
+        #[arg(required_unless_present = "resume")]
+        id: Option<i64>,
+        #[arg(long, required_unless_present = "resume")]
+        to: Option<String>,
+        #[arg(long, required_unless_present = "resume")]
+        state: Option<String>,
+        #[arg(long, required_unless_present = "resume")]
+        next: Option<String>,
+        #[arg(long)]
+        evidence: Vec<String>,
+        /// Existing CARRIER=RESERVATION pair; repeat for separate carriers.
+        #[arg(long)]
+        carrier: Vec<String>,
+        #[arg(long, default_value_t = 28800)]
+        reservation_ttl: u64,
+        #[arg(long,conflicts_with_all=["id","to","state","next"])]
+        resume: Option<String>,
+    },
+    /// Reconcile offer expiry and disappearance against current Mote ownership.
+    Dispatch {
+        #[command(subcommand)]
+        command: DispatchCmd,
+    },
     /// Show peer registrations not yet presented to this host session.
     Peers,
     /// Print the shared agent skill, or install it into this project's host directories.
@@ -179,8 +227,11 @@ enum Cmd {
     },
     /// Send a public note or question to a peer. BODY '-' reads stdin.
     Send {
-        to: String,
-        #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+        to: Option<String>,
+        /// Alternative to the positional recipient; supports --to anyone-free.
+        #[arg(long = "to")]
+        to_named: Option<String>,
+        #[arg(conflicts_with = "body_file")]
         body: Option<String>,
         /// Read a UTF-8 message from a file (maximum 8,000 bytes).
         #[arg(long)]
@@ -202,6 +253,15 @@ enum Cmd {
         /// it, an unanswered ask is overdue and escalated.
         #[arg(long, value_parser = parse_duration_ms, requires = "ask")]
         respond_within: Option<u64>,
+        /// Existing unclaimed Mote work, required for anyone-free offers.
+        #[arg(long)]
+        mote: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long, default_value_t = 300)]
+        offer_ttl: i64,
+        #[arg(long, default_value_t = 300)]
+        claim_ttl: i64,
     },
     /// Reply in a conversation. Questions and objections open linked questions.
     Reply {
@@ -580,6 +640,44 @@ enum SnapshotCmd {
 
 #[derive(Subcommand)]
 enum ReviewCmd {
+    /// Request peer review of an explicit immutable Mote candidate.
+    Candidate {
+        candidate: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        title: String,
+        #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
+    /// Submit to Mote first; record Fray evidence only after confirmed acceptance.
+    CandidateVerdict {
+        id: i64,
+        #[arg(value_parser=["approve","object","blocked"])]
+        verdict: String,
+        #[arg(long)]
+        at: String,
+        #[arg(long)]
+        expect: i64,
+        #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+        #[arg(long)]
+        evidence: Vec<String>,
+        #[arg(long)]
+        from_role: Option<String>,
+    },
+    /// Create a new immutable review round after Mote confirms supersession.
+    Successor {
+        id: i64,
+        #[arg(long)]
+        candidate: String,
+        #[arg(long)]
+        expect: i64,
+    },
     /// Open a request with a frozen scope/baseline and an immutable candidate reference.
     Request {
         #[arg(long)]
@@ -622,6 +720,16 @@ enum ReviewCmd {
         #[arg(long)]
         ack_batch: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum OperationCmd {
+    Show { key: String },
+    Resume { key: String },
+}
+#[derive(Subcommand)]
+enum DispatchCmd {
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -668,6 +776,11 @@ enum GuardCmd {
 
 #[derive(Subcommand)]
 enum MoteCmd {
+    /// Deliberately migrate a store after every writer has been upgraded.
+    AuthorityEnable {
+        #[arg(long, required = true)]
+        all_writers_upgraded: bool,
+    },
     /// Which Mote store this board uses, whether it is reachable, and the
     /// binding. Binds the board to the store on first use.
     Status,
@@ -1174,39 +1287,124 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     };
     let store_id = mote::store_id(&path)?;
     mote::version()?;
-    let binding = send(
-        home,
-        actor,
-        "mote_bind",
-        json!({"store":path.display().to_string(),"store_id":store_id}),
-        None,
-        10,
-    )?["binding"]
-        .clone();
     let store = mote::Store {
-        path,
+        path: path.clone(),
         store_id: store_id.clone(),
     };
+    let authority = match mote::run(
+        &store,
+        Some(actor),
+        &["authority", "status"],
+        mote::read_timeout(),
+    ) {
+        mote::Outcome::Ok(status) if status["schema"] == "mote.authority-status.v1" => Some(status),
+        mote::Outcome::Ok(_) | mote::Outcome::Invalid(_) => None,
+        other => {
+            return Err(Error::new(
+                "mote_unavailable",
+                format!("cannot establish event ordering: {other:?}"),
+            ))
+        }
+    };
+    let admission = authority
+        .as_ref()
+        .is_some_and(|s| s["enabled"] == true && s["authority_version"] == 1);
+    let mut bind_args = json!({"store":path,"store_id":store_id});
+    if admission {
+        bind_args["cursor_mode"] = json!("admission_v1");
+        bind_args["genesis_digest"] = authority.as_ref().unwrap()["genesis_digest"].clone();
+    }
+    let binding = send(home, actor, "mote_bind", bind_args, None, 10)?["binding"].clone();
+    if binding["cursor_mode"] == "admission_v1" && !admission {
+        return Err(Error::new(
+            "mote_authority_required",
+            "bound admission ordering requires a valid active authority status; cursor unchanged",
+        ));
+    }
+    let revision = std::cell::Cell::new(binding["sync_revision"].as_i64().unwrap_or(0));
     let ingest = |after: Option<&str>, cursor: &str, items: Vec<Value>, claims: Vec<Value>| {
-        send(
-            home,
-            actor,
-            "mote_ingest",
-            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":items,"claims":claims}),
-            None,
-            10,
-        )
+        let mut args = json!({"store_id":store_id,"after":after.filter(|s|!s.is_empty()),"cursor":if admission && cursor.is_empty() {Value::Null}else{json!(cursor)},"items":items,"claims":claims});
+        if admission {
+            args["sync_revision"] = json!(revision.get());
+        }
+        let result = send(home, actor, "mote_ingest", args, None, 10)?;
+        if admission {
+            revision.set(
+                result["sync_revision"]
+                    .as_i64()
+                    .ok_or_else(|| Error::invalid("daemon omitted admission revision"))?,
+            );
+        }
+        Ok::<Value, Error>(result)
     };
     let ingest_reconcile = |after: Option<&str>, cursor: &str, reconcile: Vec<Value>| {
-        send(
-            home,
-            actor,
-            "mote_ingest",
-            json!({"store_id":store_id,"after":after,"cursor":cursor,"items":[],"claims":[],"reconcile":reconcile}),
-            None,
-            10,
-        )
+        let mut args = json!({"store_id":store_id,"after":after.filter(|s|!s.is_empty()),"cursor":if admission && cursor.is_empty() {Value::Null}else{json!(cursor)},"items":[],"claims":[],"reconcile":reconcile});
+        if admission {
+            args["sync_revision"] = json!(revision.get());
+        }
+        let result = send(home, actor, "mote_ingest", args, None, 10)?;
+        if admission {
+            revision.set(
+                result["sync_revision"]
+                    .as_i64()
+                    .ok_or_else(|| Error::invalid("daemon omitted admission revision"))?,
+            );
+        }
+        Ok::<Value, Error>(result)
     };
+    if admission && binding["cursor_initialized"] != true {
+        let snapshot = match mote::run(
+            &store,
+            None,
+            &["events", "--kind", mote::SYNC_KINDS],
+            mote::read_timeout(),
+        ) {
+            mote::Outcome::Ok(Value::Array(events)) => events,
+            other => {
+                return Err(Error::new(
+                    "mote_unavailable",
+                    format!(
+                        "initial admission snapshot failed; no synthetic cursor written: {other:?}"
+                    ),
+                ))
+            }
+        };
+        let seed = snapshot
+            .iter()
+            .rev()
+            .find(|e| e["event_id"] == e["op_id"] && e["op_id"].is_string())
+            .and_then(|e| e["op_id"].as_str())
+            .map(str::to_owned);
+        let mut claims = mote::claim_transitions(&snapshot);
+        for claim in &mut claims {
+            claim["seed"] = json!(true);
+        }
+        let chunks: Vec<&[Value]> = if claims.is_empty() {
+            vec![&[]]
+        } else {
+            claims.chunks(100).collect()
+        };
+        let last = chunks.len() - 1;
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let result = send(
+                home,
+                actor,
+                "mote_ingest",
+                json!({"store_id":store_id,"after":null,"cursor":if index==last {json!(seed)}else{Value::Null},"items":[],"claims":chunk,"sync_revision":revision.get(),"initialized":index==last}),
+                None,
+                10,
+            )?;
+            revision.set(
+                result["sync_revision"]
+                    .as_i64()
+                    .ok_or_else(|| Error::invalid("daemon omitted admission revision"))?,
+            );
+        }
+        let mut result = mote_sync(home, actor)?;
+        result["mote_sync"]["seeded_admission_cursor"] = json!(seed);
+        result["mote_sync"]["history_suppressed"] = json!(true);
+        return Ok(result);
+    }
     let moved = |e: &Error| e.code == "mote_cursor_moved";
     // Never move the cursor backwards, even with a skewed clock.
     let tail = |current: Option<&str>| {
@@ -1227,7 +1425,11 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         ),
     };
 
-    let Some(cursor) = binding["cursor"].as_str().map(str::to_owned) else {
+    let Some(cursor) = binding["cursor"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| admission.then(String::new))
+    else {
         // First sync: start at the tail and never replay history, but record
         // who holds what now, so a later change of hands reaches the holder.
         let board = match mote::run(&store, Some(actor), &["board"], mote::read_timeout()) {
@@ -1269,11 +1471,21 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     let events = match mote::run(
         &store,
         None,
-        &["events", "--after", &cursor, "--kind", mote::SYNC_KINDS],
+        &if admission && cursor.is_empty() {
+            vec!["events", "--kind", mote::SYNC_KINDS]
+        } else {
+            vec!["events", "--after", &cursor, "--kind", mote::SYNC_KINDS]
+        },
         mote::read_timeout(),
     ) {
         mote::Outcome::Ok(Value::Array(events)) => events,
         mote::Outcome::Failed(why) if why.contains("timed out") => {
+            if admission {
+                return Err(Error::new(
+                    "mote_unavailable",
+                    format!("{why}; admission cursor unchanged, no UTC reseed"),
+                ));
+            }
             let n = send(home, actor, "mote_sync_failed", json!({}), None, 10)?
                 ["consecutive_timeouts"]
                 .as_i64()
@@ -1366,15 +1578,48 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
         }
     }
-    let newest = events
-        .iter()
-        .filter_map(|e| e["event_id"].as_str())
-        .max()
-        .filter(|id| *id > cursor.as_str())
-        .unwrap_or(&cursor)
-        .to_owned();
+    let newest = if admission {
+        events
+            .iter()
+            .rev()
+            .find(|e| e["event_id"] == e["op_id"] && e["op_id"].is_string())
+            .and_then(|e| e["op_id"].as_str())
+            .unwrap_or(&cursor)
+            .to_owned()
+    } else {
+        events
+            .iter()
+            .filter_map(|e| e["event_id"].as_str())
+            .max()
+            .filter(|id| *id > cursor.as_str())
+            .unwrap_or(&cursor)
+            .to_owned()
+    };
     let (mut created, mut duplicate, mut unknown, mut invalid) =
         (early_created, 0, Vec::new(), Vec::new());
+    // Projected deadlines are not admitted operations. A future-stamped raw
+    // cursor must not hide a currently due reservation warning.
+    if admission {
+        let projections = match mote::run(
+            &store,
+            None,
+            &["events", "--kind", "reservation"],
+            mote::read_timeout(),
+        ) {
+            mote::Outcome::Ok(Value::Array(events)) => mote::attention_items(&events),
+            other => {
+                return Err(Error::new(
+                    "mote_unavailable",
+                    format!("reservation projection read failed; raw cursor unchanged: {other:?}"),
+                ))
+            }
+        };
+        for chunk in projections.chunks(100) {
+            let result = ingest(Some(&cursor), &cursor, chunk.to_vec(), vec![])?;
+            created.extend(result["created"].as_array().cloned().unwrap_or_default());
+            duplicate += result["duplicate"].as_i64().unwrap_or(0);
+        }
+    }
     let chunks: Vec<&[Value]> = if events.is_empty() {
         vec![&[]]
     } else {
@@ -1543,6 +1788,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
             }
             for c in list.iter().take(200) {
                 cand_items.extend(mote::candidate_items(c));
+                cand_items.extend(mote::candidate_base_items(c, &store));
             }
         }
         other => {
@@ -1613,8 +1859,22 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     }
     unknown.sort_by_key(|v| v.to_string());
     unknown.dedup();
+    let dispatch_note = if admission {
+        let context = fray::mote_workflow::Context {
+            home,
+            actor,
+            store: store.clone(),
+            cwd: std::fs::canonicalize(&cwd)?,
+        };
+        match fray::dispatch_client::sync(&context) {
+            Ok(state) => state,
+            Err(error) => json!({"error":error}),
+        }
+    } else {
+        Value::Null
+    };
     Ok(
-        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,"request_note":request_note,
+        json!({"mote_sync":{"events":events.len(),"created":created,"duplicate":duplicate,"request_note":request_note,"dispatch":dispatch_note,
         "unknown_recipients":unknown,"invalid":invalid,"cursor":after,
         "reconciled_claims":reconciled,"raced":raced,"reconcile_note":reconcile_note,
         "candidate_note":if candidate_notes.is_empty() { Value::Null } else { json!(candidate_notes.join("; ")) }}}),
@@ -2831,6 +3091,63 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }));
         }
         Cmd::Review { command } => match command {
+            ReviewCmd::Candidate {
+                candidate,
+                to,
+                title,
+                body,
+                body_file,
+            } => {
+                let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+                let key = key.clone().unwrap_or(random_key()?);
+                return Ok(Some(fray::mote_workflow::request_candidate(
+                    &context,
+                    &candidate,
+                    &to,
+                    &title,
+                    &message_body(body, body_file)?,
+                    &key,
+                )?));
+            }
+            ReviewCmd::CandidateVerdict {
+                id,
+                verdict,
+                at,
+                expect,
+                body,
+                body_file,
+                evidence,
+                from_role,
+            } => {
+                let key = key.as_deref().ok_or_else(|| {
+                    Error::invalid("candidate verdict requires --key; retain it for exact recovery")
+                })?;
+                let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+                return Ok(Some(fray::mote_workflow::candidate_verdict(
+                    &context,
+                    id,
+                    expect,
+                    &at,
+                    &verdict,
+                    &message_body(body, body_file)?,
+                    &evidence,
+                    from_role.as_deref(),
+                    key,
+                )?));
+            }
+            ReviewCmd::Successor {
+                id,
+                candidate,
+                expect,
+            } => {
+                let key = key
+                    .as_deref()
+                    .ok_or_else(|| Error::invalid("review successor requires --key"))?;
+                let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+                return Ok(Some(fray::mote_workflow::request_successor(
+                    &context, id, expect, &candidate, key,
+                )?));
+            }
             ReviewCmd::Request {
                 to,
                 baseline,
@@ -2870,6 +3187,102 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 ("annotate", args)
             }
         },
+        Cmd::Land {
+            candidate,
+            target,
+            before,
+            check,
+        } => {
+            let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+            return Ok(Some(fray::mote_workflow::land(
+                &context,
+                &candidate,
+                &target,
+                before.as_deref(),
+                check,
+                key.as_deref(),
+            )?));
+        }
+        Cmd::Operation { command } => {
+            return Ok(Some(match command {
+                OperationCmd::Show { key } => send(
+                    &home,
+                    &actor,
+                    "mote_operation_get",
+                    json!({"key":key}),
+                    None,
+                    10,
+                )?["operation"]
+                    .clone(),
+                OperationCmd::Resume { key } => {
+                    let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+                    if context.get(&key)?["kind"]
+                        .as_str()
+                        .is_some_and(|k| k.starts_with("dispatch_"))
+                    {
+                        fray::dispatch_client::resume(&context, &key)?
+                    } else {
+                        fray::mote_workflow::resume(&context, &key)?
+                    }
+                }
+            }));
+        }
+        Cmd::Accept {
+            id,
+            expect,
+            progress,
+        } => {
+            let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+            let key = key
+                .as_deref()
+                .ok_or_else(|| Error::invalid("accept requires --key; retain it for recovery"))?;
+            return Ok(Some(fray::dispatch_client::accept(
+                &context,
+                id,
+                expect,
+                key,
+                progress.as_deref(),
+            )?));
+        }
+        Cmd::Handoff {
+            id,
+            to,
+            state,
+            next,
+            evidence,
+            carrier,
+            reservation_ttl,
+            resume,
+        } => {
+            let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+            if let Some(key) = resume {
+                return Ok(Some(fray::dispatch_client::resume(&context, &key)?));
+            }
+            let key = key
+                .as_deref()
+                .ok_or_else(|| Error::invalid("handoff requires --key; retain it for recovery"))?;
+            let carriers = carrier
+                .iter()
+                .map(|pair| {
+                    let (carrier, reservation) = pair
+                        .split_once('=')
+                        .filter(|(c, r)| !c.is_empty() && !r.is_empty())
+                        .ok_or_else(|| Error::invalid("--carrier requires CARRIER=RESERVATION"))?;
+                    Ok(json!({"carrier":carrier,"reservation":reservation,"ttl_s":reservation_ttl}))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Some(fray::dispatch_client::handoff(
+                &context,
+                json!({"source_card":id,"to":to,"state":state,"next":next,"evidence":evidence,"carriers":carriers}),
+                key,
+            )?));
+        }
+        Cmd::Dispatch {
+            command: DispatchCmd::Sync,
+        } => {
+            let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+            return Ok(Some(fray::dispatch_client::sync(&context)?));
+        }
         Cmd::Peers => ("peers", json!({})),
         Cmd::Skill {
             name,
@@ -2928,6 +3341,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         }
         Cmd::Send {
             to,
+            to_named,
             body,
             body_file,
             title,
@@ -2936,7 +3350,53 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             refs,
             pending,
             respond_within,
+            mote,
+            tag,
+            offer_ttl,
+            claim_ttl,
         } => {
+            let (to, body) = match (to_named, to, body) {
+                (Some(target), Some(message), None) if body_file.is_none() => {
+                    (target, Some(message))
+                }
+                (Some(target), None, body) => (target, body),
+                (None, Some(target), body) => (target, body),
+                _ => {
+                    return Err(Error::invalid(
+                        "send needs one recipient and one body or --body-file",
+                    ))
+                }
+            };
+            if to == "anyone-free" {
+                let issue = mote
+                    .as_deref()
+                    .ok_or_else(|| Error::invalid("anyone-free requires --mote ISSUE"))?;
+                if ask || pending || !refs.is_empty() || respond_within.is_some() || priority != 2 {
+                    return Err(Error::invalid("anyone-free is a work offer; use --tag/--offer-ttl/--claim-ttl and its single --mote reference"));
+                }
+                let body = message_body(body, body_file)?;
+                let title =
+                    title.unwrap_or_else(|| clip(body.lines().next().unwrap_or("Work offer"), 100));
+                let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+                let key = key
+                    .as_deref()
+                    .ok_or_else(|| Error::invalid("anyone-free offer requires --key"))?;
+                return Ok(Some(fray::dispatch_client::offer(
+                    &context,
+                    issue,
+                    tag.as_deref().unwrap_or("*"),
+                    &title,
+                    &body,
+                    offer_ttl,
+                    claim_ttl,
+                    key,
+                )?));
+            }
+            if mote.is_some() || tag.is_some() || offer_ttl != 300 || claim_ttl != 300 {
+                return Err(Error::invalid(
+                    "--mote/--tag/offer TTLs belong to anyone-free offers",
+                ));
+            }
             let mut refs = refs;
             let to = if let Some(role) = to.strip_prefix("@role:") {
                 let route = fray::routing::resolve(&home, &actor, role)?;
@@ -3324,6 +3784,20 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(Some(v));
         }
         Cmd::Mote { action } => match action {
+            MoteCmd::AuthorityEnable {
+                all_writers_upgraded,
+            } => {
+                if !all_writers_upgraded {
+                    return Err(Error::invalid(
+                        "upgrade every writer before enabling authority",
+                    ));
+                }
+                let key = key
+                    .as_deref()
+                    .ok_or_else(|| Error::invalid("authority migration requires --key"))?;
+                let context = fray::mote_workflow::Context::bind(&home, &actor)?;
+                return Ok(Some(fray::mote_workflow::enable_authority(&context, key)?));
+            }
             MoteCmd::Status => return Ok(Some(mote_status(&home, &actor)?)),
             MoteCmd::Sync => return Ok(Some(mote_sync(&home, &actor)?)),
         },
@@ -3601,8 +4075,13 @@ fn review_text(review: &Value) -> String {
         return String::new();
     }
     let mut out = format!(
-        "\nReview s{} (advisory)\n  baseline: {}\n  candidate: {}\n",
+        "\nReview s{} ({})\n  baseline: {}\n  candidate: {}\n",
         review["subject_rev"],
+        if review["advisory"] == false {
+            "Mote candidate; recorded receipts, current authority in Mote"
+        } else {
+            "advisory"
+        },
         clean(review["baseline"].as_str().unwrap_or("")),
         clean(review["candidate"].as_str().unwrap_or(""))
     );

@@ -1,5 +1,49 @@
 # Validation
 
+## Local Mote authority workflows (2026-10-06)
+
+Mote prerequisites are independently approved local commit
+`a86803de31e890ac6e4331c9961705cabcde2fcb`: confirmed-journal I/O failures and
+final Git drift return nonzero recovery receipts, and both claim/begin activate
+stable ordering before acquisition. Mote passed 423 active Rust tests with two
+pre-existing ignored, formatting, Clippy and rustdoc warnings denied.
+
+Fray implements explicit immutable candidate requests/verdicts/successors,
+author-only local integration-evidence attention, fenced nonempty local
+fast-forward landing, eligible idle-peer offers, explicit Mote-confirmed accept,
+disappearance reconciliation, and recoverable carrier close/adopt. Exact client
+journals preserve failed requests/receipts; historical retries do not renew
+claims, reservations or approvals. See the [revision 6 contract](design/mote-adapter.md).
+
+The final source passed 450 Rust tests over 50 targets, formatting, locked
+all-target checking, Clippy with warnings denied, and build. The independent SQL
+scanner prepared 236 statements against both schemas and passed 22 invariants.
+Always-run synthetic public-CLI courts cover mixed holder/token reads, bounded
+churn refusal, exact confirmation recovery after renewal, unsafe self-carrier
+refusal, admitted history suppression, earlier-spelled anchors, future raw ids
+with due reservation warnings and timeout cursor preservation.
+
+Real disposable Mote/Git/Fray courts passed nine review/landing and six
+dispatch/handoff cases. These include nonzero admitted-review recovery with no
+premature Fray verdict, object/successor/approve/land, revoked authorization,
+base advancement without reviewer wake, concurrent accepts with one actual
+claim, interrupted handoff/close/adopt, competing adoption, carrier expiry and
+actual bounded claim-expiry requeue. During a paused Mote landing an unrelated
+Fray RPC returned in 18.2 ms. This is a bounded observation, not a latency SLA.
+
+Required Python suites cover native-wake transport fixtures (23), ordinary IPC
+(38), attention (28) and descriptor/cancellation reliability (7). They do not
+execute paid models or native keepalive qualification. Final logs, source hashes,
+binary hashes and the local Mote prerequisite patch are retained in the
+[workflow evidence](evidence/fray-mote-workflows-20261006/manifest.json).
+
+No push, global installation, shared daemon restart, original-store authority
+activation, hosted CI or paid trial is claimed. The prior two-hour soak remains
+bound to its original source/binary; it does not qualify this entire new binary.
+[Mote #18](https://github.com/bbuchsbaum/mote/issues/18) tracks upstream publication
+of the needed primitives/fixes. Real native-host trials, the paid comparison,
+parked MCP shim and their encompassing epic remain outside local completion.
+
 ## Structured Mote failure receipts (2026-10-06)
 
 Fray implementation `a20432b21ef2d75274077fd54bd3a630d6015ee8` preserves a
@@ -15,7 +59,7 @@ exit-2 receipt and Git-updated/unknown/current-holder cases. Formatting,
 locked all-target checking, Clippy with warnings denied, all 428 Rust tests
 over 46 targets, and build passed. [Raw logs and source provenance](evidence/fray-authority-receipts-20261006/manifest.json)
 are retained. This step does not complete the authoritative review, landing or
-handoff workflows. Their upstream gates remain documented in
+handoff workflows. Their historical upstream gates are documented in
 [Mote integration gates](MOTE_CAPABILITY_GAPS.md). Timeouts still report an
 unconfirmed failure without recovering buffered output; consumer recovery
 must use the journaled request and authoritative readback.
@@ -24,8 +68,8 @@ must use the journaled request and authoritative readback.
 
 The [sweep evidence](LOCAL_SWEEP_20261006.md) separates local implementation,
 focused tests, crash/restore checks, stress limits, and outstanding qualification.
-Paid comparison remains deferred. Mote authority gaps and real keepalive sandbox
-qualification remain open; no broad epic completion or release is claimed.
+Paid comparison remained deferred at that stage. Mote authority gaps (now
+addressed locally above) and real keepalive sandbox qualification were open; no broad epic completion or release is claimed.
 
 The implementation landed on local `main` at
 `bb6fb6f01384f3ba6b512b2463e43702a3d16d2a`, with independent exact-commit approvals
