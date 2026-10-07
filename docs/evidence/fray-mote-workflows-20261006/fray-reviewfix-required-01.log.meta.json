@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T02:01:11.515154+00:00",
+  "finished_utc": "2026-10-07T02:03:12.842969+00:00",
+  "duration_seconds": 121.328218,
+  "command": [
+    "sh",
+    "-c",
+    "cargo fmt --all -- --check && cargo check --locked --all-targets && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --all-targets && cargo build --locked && python3 scripts/check_sql.py"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-reviewfix-required-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 360.0,
+  "log_bytes": 45987
+}

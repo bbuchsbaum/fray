@@ -1,0 +1,900 @@
+   Compiling fray v0.2.1 (/private/tmp/fray-outstanding-motes)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.42s
+   Compiling fray v0.2.1 (/private/tmp/fray-outstanding-motes)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.07s
+    Blocking waiting for file lock on build directory
+   Compiling fray v0.2.1 (/private/tmp/fray-outstanding-motes)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.55s
+     Running unittests src/lib.rs (target/debug/deps/fray-2b77b168c6a8bee0)
+
+running 10 tests
+test keepalive::tests::a_conversation_id_is_one_safe_argument ... ok
+test keepalive::tests::a_log_name_never_leaves_the_keepalive_directory ... ok
+test sha256::tests::matches_fips_180_4_known_answers ... ok
+test keepalive::tests::only_claude_and_codex_sessions_have_companions ... ok
+test mote::ts_tests::mote_timestamps_parse_to_unix_ms ... ok
+test server::metrics_tests::metrics_reply_while_the_publishers_store_mutex_is_held ... ok
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+test retention::publication_tests::publication_failure_cannot_commit_compaction_or_its_cursor_and_audit ... ok
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+test diagnostics::tests::sandbox_recovery_preserves_the_selected_home_and_literal_shell_arguments ... ok
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LC_ALL = "C.UTF-8",
+	LC_CTYPE = "C.UTF-8",
+	LANG = "C.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+test sha256::tests::matches_shasum_across_padding_and_stream_boundaries ... ok
+test snapshot::tests::final_revalidation_rejects_deterministic_file_and_tombstone_mutations ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.75s
+
+     Running unittests src/main.rs (target/debug/deps/fray-756c4caff0d8f438)
+
+running 12 tests
+test driver::keepalive_tests::a_claude_turn_forks_into_an_id_chosen_up_front_then_resumes_it ... ok
+test driver::host_tests::a_drives_host_is_its_childs_program ... ok
+test driver::keepalive_tests::a_codex_turn_is_read_only_without_user_config_or_extra_tools ... ok
+test driver::keepalive_tests::a_decision_must_match_the_schema_exactly ... ok
+test driver::keepalive_tests::codex_is_charged_the_rise_in_its_threads_running_total ... ok
+test driver::keepalive_tests::a_fork_id_is_a_version_4_uuid ... ok
+test driver::keepalive_tests::the_schema_is_strict_json ... ok
+test duration_tests::deadlines_parse_within_bounds_and_never_panic ... ok
+test host_tests::a_drives_recorded_host_holds_until_a_later_session_binds ... ok
+test driver::keepalive_tests::claude_output_is_its_top_level_structured_output ... ok
+test driver::keepalive_tests::recorded_model_reads_only_the_latest_selected_model_from_jsonl ... ok
+test driver::keepalive_tests::codex_output_is_its_stream_with_the_last_message_or_the_o_file ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/addressed.rs (target/debug/deps/addressed-c6d0e925f68793d6)
+
+running 12 tests
+test own_broadcasts_are_not_treated_as_requests ... ok
+test replies_to_your_own_request_arrive_whole ... ok
+test a_request_addressed_to_you_arrives_whole ... ok
+test broadcasts_keep_previews ... ok
+test json_escaping_counts_against_the_budget ... ok
+test a_patched_follow_up_shows_its_current_summary ... ok
+test a_short_request_in_excerpt_mode_is_not_flagged_truncated ... ok
+test a_long_objection_reaches_its_assignee_whole ... ok
+test byte_capped_consumers_get_excerpts_not_nothing ... ok
+test full_text_is_bounded_per_page_and_the_fallback_is_flagged ... ok
+test a_corrected_request_never_resurfaces_its_superseded_original ... ok
+test every_objection_length_is_shown_whole_or_flagged ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/archive.rs (target/debug/deps/archive-6f75eafc3a6d1a8a)
+
+running 3 tests
+test export_refuses_changed_files_and_symlinks_before_writing ... ok
+test since_selects_touched_cards_and_keeps_history_before_the_boundary ... ok
+test board_and_export_are_read_only_and_export_is_byte_stable ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/arm.rs (target/debug/deps/arm-b99efad3f69bc3bb)
+
+running 2 tests
+test a_stewards_text_brief_names_the_no_runner_state ... ok
+test the_printed_command_arms_and_an_unarmed_stop_is_told_first ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/attention.rs (target/debug/deps/attention-2ab1f4cd1334215d)
+
+running 8 tests
+test listener_is_fenced_expires_and_does_not_resurrect_leave ... ok
+test priority_pagination_and_scope_changes_never_skip_old_sequences ... ok
+test lease_renewals_do_not_evict_conversation_content ... ok
+test packets_are_host_neutral_preserve_full_messages_and_exact_receipts ... ok
+test outgoing_answers_and_objection_followups_are_included_without_broadcasts ... ok
+test kind_and_priority_filters_keep_linked_objections_and_hidden_receipts ... ok
+test byte_budget_counts_unicode_escaping_and_omissions_without_acknowledging ... ok
+test lower_priority_items_never_break_or_shrink_a_fitting_urgent_receipt ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.36s
+
+     Running tests/batches.rs (target/debug/deps/batches-abbc89e852037167)
+
+running 16 tests
+test ack_last_supports_an_ids_subset_and_fails_closed_without_a_pull ... ok
+test ack_last_acknowledges_this_sessions_latest_pull_only ... ok
+test present_rejects_receipts_that_were_not_delivered ... ok
+test compact_history_keeps_every_state_change_and_unread_takes_precedence ... ok
+test foreign_unknown_and_mismatched_batches_acknowledge_nothing ... ok
+test directly_built_kind_filters_cannot_inject_sql ... ok
+test presenting_never_acknowledges ... ok
+test batch_ack_covers_exactly_what_was_shown ... ok
+test batch_ack_subset_by_ids ... ok
+test continuation_receipt_requires_the_skipped_prefix_to_be_presented ... ok
+test thread_lists_open_objections_until_resolved ... ok
+test unread_skips_the_readers_own_messages ... ok
+test unread_thread_receipt_covers_only_the_shown_page ... ok
+test old_batches_expire_by_retention ... ok
+test presenting_does_not_count_as_presence ... ok
+test open_follow_ups_are_never_silently_truncated ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/client.rs (target/debug/deps/client-26fe869bcc0b7107)
+
+running 12 tests
+test wait_reports_daemon_disconnect_during_handshake_as_unavailable ... ok
+test attention_requires_capability_before_subscribing ... ok
+test start_rejects_old_daemon_without_creating_daemon_artifacts ... ok
+test matching_protocol_ignores_package_version_and_preserves_request_on_same_socket ... ok
+test ping_and_shutdown_remain_available_without_compatibility_handshake ... ok
+test reply_ack_with_refs_requires_both_capabilities ... ok
+test reply_refs_require_capability_before_sending_mutation ... ok
+test compatibility_is_not_cached_across_connections ... ok
+test session_is_negotiated_on_each_connection_and_never_sent_to_old_daemon ... ok
+test incompatible_or_missing_protocol_sends_only_ping ... ok
+test new_message_and_inbox_features_require_capabilities ... ok
+test batch_and_compact_operations_require_capability_before_sending ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/collaboration.rs (target/debug/deps/collaboration-d070de1a366f73b4)
+
+running 14 tests
+test send_retry_is_atomic_and_unknown_recipient_leaves_no_state ... ok
+test annotation_preview_reports_clipped_text ... ok
+test newcomer_discovers_existing_unassigned_work_across_scopes ... ok
+test off_topic_contributor_receives_later_replies ... ok
+test contributing_does_not_acknowledge_unseen_updates ... ok
+test long_message_preserves_exact_body_with_bounded_head_and_atomic_retry ... ok
+test longest_identity_and_unicode_message_fit_the_contract ... ok
+test directed_question_reaches_peer_and_both_managers_without_broadcast_noise ... ok
+test reply_references_are_additive_atomic_searchable_and_retry_safe ... ok
+test rejoin_does_not_echo_ones_own_publication ... ok
+test directed_messages_seed_only_after_explicit_rejoin ... ok
+test rejoin_recovers_an_off_topic_conversation ... ok
+test departing_participant_retains_the_final_outcome ... ok
+test inbox_filters_preserve_unselected_receipts_and_paginate_filtered_rows ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/crash_recovery.rs (target/debug/deps/crash_recovery-f3b755d21a396c2d)
+
+running 2 tests
+test sigkill_restart_preserves_pending_delivery_stale_ack_and_idempotency ... ok
+test interrupted_daemon_and_client_requests_reconcile_as_one_complete_mutation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/deadlines.rs (target/debug/deps/deadlines-4de40d492e63f560)
+
+running 8 tests
+test a_deadline_needs_an_ask_and_asks_without_one_use_the_soft_default ... ok
+test the_asker_moves_the_deadline_even_after_a_kind_patch ... ok
+test only_the_asker_moves_the_deadline ... ok
+test an_unanswered_ask_is_overdue_only_after_its_deadline ... ok
+test a_bystanders_reply_does_not_clear_it_but_the_addressees_does ... ok
+test the_deadline_cannot_be_patched_away_and_survives_reassignment ... ok
+test an_unassigned_ask_is_answered_by_anyone_but_the_asker ... ok
+test no_patch_hides_an_overdue_ask ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/diagnostics.rs (target/debug/deps/diagnostics-909b774a539f64e7)
+
+running 4 tests
+test doctor_names_a_stale_or_different_daemon_build ... ok
+test stale_and_managed_presence_remain_distinct ... ok
+test transport_presence_does_not_imply_host_activation_or_work ... ok
+test ping_reports_the_daemon_build ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/dispatch.rs (target/debug/deps/dispatch-2d2bac8191dc865a)
+
+running 8 tests
+test acceptance_start_after_snapshot_refuses_stale_reconciliation ... ok
+test no_idle_peer_and_muted_or_mismatched_acceptance_are_explicit ... ok
+test routing_selects_idle_peer_and_two_accept_attempts_have_one_winner ... ok
+test cancellation_during_mote_claim_does_not_reopen_the_offer ... ok
+test unknown_acceptance_waits_for_bounded_window_and_transport_then_old_generation_refuses ... ok
+test offer_expiry_routes_next_peer_and_handoff_packet_retries_are_exact ... ok
+test disappearance_notifies_but_live_or_renewed_claim_prevents_requeue ... ok
+test leave_and_rejoin_without_host_session_cannot_resume_an_old_attempt ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/dispatch_client.rs (target/debug/deps/dispatch_client-072f840b60cae8b5)
+
+running 2 tests
+test invalid_adoption_ttl_refuses_during_cli_parsing ... ok
+test public_readback_and_exact_confirmation_recovery ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.48s
+
+     Running tests/drive_compat.rs (target/debug/deps/drive_compat-7b5e005165052793)
+
+running 1 test
+test drive_runs_against_a_daemon_that_predates_controller_detail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/escalation.rs (target/debug/deps/escalation-f656121619eb6a97)
+
+running 15 tests
+test the_escalation_name_is_reserved ... ok
+test a_mote_request_to_someone_not_on_the_board_escalates_and_settles ... ok
+test a_request_carded_after_its_addressee_joins_is_listed_once ... ok
+test a_reply_from_the_addressee_ends_unreachable ... ok
+test an_overdue_ask_escalates_even_after_it_was_shown_and_settles_on_an_answer ... ok
+test clearing_a_mote_request_assignee_does_not_hide_its_overdue_escalation ... ok
+test a_kind_patch_does_not_hide_an_unreachable_ask ... ok
+test an_unreachable_ask_escalates_once_to_each_present_steward_after_the_grace ... ok
+test escalations_are_never_themselves_escalated ... ok
+test a_steward_is_told_when_nobody_is_ticking ... ok
+test a_still_stuck_request_escalates_again_after_a_reroute_or_an_hour ... ok
+test a_wakeable_or_shown_addressee_is_not_unreachable ... ok
+test escalations_are_bounded_per_tick ... ok
+test a_cap_deferred_reminder_is_still_stuck_on_the_next_available_tick ... ok
+test unassigned_asks_without_deadlines_do_not_fill_the_scan ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+     Running tests/field.rs (target/debug/deps/field-465bac9c6acdcb48)
+
+running 8 tests
+test clear_continues_the_identity_and_says_so ... ok
+test review_continued_sessions_show_as_takeovers_and_waiting_is_presence ... ok
+test review_an_objection_to_an_ask_owner_request_stays_with_the_owner ... ok
+test a_present_party_is_preferred_over_an_absent_one ... ok
+test a_third_partys_question_reaches_the_author_not_a_stale_assignee ... ok
+test the_authors_question_goes_to_the_worker_and_absence_is_reported ... ok
+test the_codex_hook_joins_with_a_codex_session_and_ignores_other_events ... ok
+test wait_explains_an_immediate_return_and_new_waits_for_new_activity ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+     Running tests/followups.rs (target/debug/deps/followups-400324fbb1b51e66)
+
+running 7 tests
+test author_questioning_an_unassigned_card_does_not_assign_itself ... ok
+test author_questioning_an_assigned_card_reaches_the_assignee ... ok
+test third_party_objection_prefers_live_lease_owner ... ok
+test lease_owner_objecting_skips_itself ... ok
+test assignee_objecting_to_a_request_reaches_its_author ... ok
+test kind_filter_ignores_the_readers_own_annotations ... ok
+test follow_up_title_names_the_concern_not_the_parent ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/framing.rs (target/debug/deps/framing-343b918bd44c175b)
+
+running 4 tests
+test frames_are_separate ... ok
+test invalid_utf8_is_rejected ... ok
+test incomplete_frame_is_rejected ... ok
+test oversized_frame_is_rejected ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/guard.rs (target/debug/deps/guard-407a75a9fd1530ef)
+
+running 10 tests
+test a_failing_check_warns_but_only_a_refusal_blocks ... ok
+test an_unreachable_daemon_warns_and_never_blocks ... ok
+test a_stale_lane_is_reported_but_does_not_block ... ok
+test a_foreign_lane_warns_blocks_on_request_and_an_own_lane_is_quiet ... ok
+test every_worktree_shares_the_guard_and_the_board ... ok
+test mote_reservations_decide_where_mote_is_adopted ... ok
+test a_prior_hook_runs_first_and_its_failure_is_kept ... ok
+test pre_push_checks_new_and_updated_branches_and_keeps_stdin_for_the_prior_hook ... ok
+test pushed_names_are_exact_and_a_force_push_over_unfetched_commits_is_checked ... ok
+test a_merges_own_changes_and_what_a_force_push_drops_are_checked ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.74s
+
+     Running tests/keepalive.rs (target/debug/deps/keepalive-490fa05e111bc19c)
+
+running 15 tests
+test the_conversation_is_the_bound_sessions_never_a_request_field ... ok
+test a_keepalive_that_never_began_stops_counting_as_starting ... ok
+test away_actions_are_reserved_until_the_hook_reports_them_after_output ... ok
+test an_armed_monitor_or_a_live_drive_already_owns_the_wake ... ok
+test terminal_begin_wins_the_atomic_keepalive_claim_before_any_child_can_start ... ok
+test a_busy_terminal_defers_its_keepalive_until_a_nonblocking_end ... ok
+test the_keepalive_does_not_renew_the_names_peer_generation ... ok
+test the_keepalives_waits_leave_the_terminals_wait_row_alone ... ok
+test leave_from_the_terminal_stops_its_keepalive ... ok
+test the_daily_budget_counts_reported_input_and_pauses_visibly ... ok
+test a_stopping_keepalive_is_not_wakeable ... ok
+test the_companion_binds_beside_the_terminal_and_survives_its_clear ... ok
+test a_stop_request_reaches_the_drive_and_shows_as_stopping ... ok
+test unbound_foreign_and_non_host_sessions_are_refused ... ok
+test only_the_pinned_owner_team_card_supplies_a_validated_model_and_budget ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/lanes.rs (target/debug/deps/lanes-192a069769c5fd18)
+
+running 15 tests
+test overlap_semantics ... ok
+test review3_a_holder_cannot_retake_what_a_queuer_waits_for ... ok
+test review3_unicode_names_compare_conservatively ... ok
+test review3_handover_never_creates_overlapping_holds ... ok
+test review_a_whole_repository_lane_is_warned ... ok
+test status_is_one_line_per_agent_updated_in_place ... ok
+test bad_lane_paths_are_refused ... ok
+test a_held_lane_refuses_overlap_and_queueing_orders_notification ... ok
+test review_handover_needs_a_joined_recipient_and_stale_holders_are_told ... ok
+test review_reading_keeps_an_agent_present ... ok
+test review_queued_lanes_do_not_deadlock_the_holder_they_wait_on ... ok
+test handoff_and_stale_release ... ok
+test review_handover_keeps_queue_position_and_stale_takeover_cannot_jump ... ok
+test review_a_handed_over_queued_lane_stays_queued_and_queues_are_fifo ... ok
+test preflight_sees_declared_lanes_and_real_edits_in_other_worktrees ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+
+     Running tests/mote.rs (target/debug/deps/mote-32a758259565a44e)
+
+running 22 tests
+test outcomes_are_classified_from_exit_code_stderr_and_json_together ... ok
+test an_ancestor_board_pairs_with_its_sibling_store ... ok
+test a_board_binds_once_and_refuses_a_different_store ... ok
+test status_names_a_bad_mote_store_and_warns_when_mote_is_missing ... ok
+test real_mote_rejections_conflicts_events_and_usage_errors_classify_correctly ... ok
+test status_against_the_real_mote_when_installed ... ok
+test a_repository_nested_in_another_is_not_mistaken_for_a_submodule ... ok
+test preflight_conflicts_and_events_come_back_as_results ... ok
+test unsuccessful_authority_receipts_preserve_recovery_and_current_ownership ... ok
+test authority_failure_receipt_survives_the_bound_subprocess_transport ... ok
+test status_without_mote_says_not_adopted ... ok
+test a_worktree_outside_the_checkout_finds_the_main_worktrees_store ... ok
+test a_board_that_is_not_this_repositorys_is_never_paired_implicitly ... ok
+test a_linked_worktree_of_a_bare_repository_must_name_its_store ... ok
+test a_changed_store_id_is_refused_not_followed ... ok
+test bare_repositories_and_submodules_must_name_their_store ... ok
+test status_binds_reads_and_refuses_a_swapped_store ... ok
+test a_submodule_inside_a_linked_worktree_must_name_its_store ... ok
+test status_refuses_an_unsupported_mote_and_warns_on_a_second_actor ... ok
+test the_store_actor_and_json_are_always_explicit ... ok
+test the_deadline_holds_when_a_leftover_process_keeps_mote_pipes_open ... ok
+kill: 70605: No such process
+test a_timeout_stops_and_reaps_the_whole_mote_process_group ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.06s
+
+     Running tests/mote_admission.rs (target/debug/deps/mote_admission-22c2decbbbc8cd31)
+
+running 6 tests
+test holder_checked_handoff_event_is_a_claim_transition ... ok
+test migration_invalidates_legacy_ingest_and_genesis_cannot_change_silently ... ok
+test empty_raw_baseline_is_initialized_and_projected_only_ingest_preserves_anchor ... ok
+test admission_cursor_accepts_earlier_spelling_and_deduplicates_claim_identity ... ok
+test current_snapshot_ahead_of_feed_does_not_invent_reverse_handoffs ... ok
+test public_admission_feed_compatibility_court ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.01s
+
+     Running tests/mote_sync.rs (target/debug/deps/mote_sync-c2b85a655eae9be3)
+
+running 40 tests
+test a_candidate_leaving_pending_tells_everyone_involved_once ... ok
+test a_pending_candidate_asks_unreviewed_reviewers_and_reports_landability ... ok
+test blocked_reasons_name_their_subject ... ok
+test an_oversized_or_invalid_item_is_skipped_and_reported_not_fatal ... ok
+test claim_events_become_transitions_in_order ... ok
+test a_final_candidate_state_is_never_replaced_by_an_older_one ... ok
+test a_claim_changing_hands_reaches_the_new_and_the_displaced_holder ... ok
+test a_candidate_returning_to_an_earlier_state_is_reported_again ... ok
+test consecutive_timeouts_are_counted_and_reset_by_a_successful_sync ... ok
+test every_recorded_holder_is_reported_for_reconciliation ... ok
+test each_event_reaches_each_recipient_exactly_once ... ok
+test ingest_refuses_an_unbound_or_different_store_and_skips_strangers ... ok
+test brief_warns_when_mote_actor_names_someone_else ... ok
+test reconciliation_applies_only_if_fray_still_records_what_the_reader_saw ... ok
+test fray_team_reports_an_unreadable_mote_as_unknown ... ok
+test released_claims_are_not_listed_for_reconciliation ... ok
+test replaying_a_chunk_never_invents_a_change_of_hands ... ok
+test reservation_events_map_to_their_holder_under_state_keys ... ok
+msg-01M4A1HXCEZ7PD1ECW2YSWHR1W
+recipient bob: untracked source=none reason=no_presence_evidence as-of=2026-10-07T02:02:22.478706Z; delivery=queued
+recipient is not live; public fallback: mote discuss post --topic <topic> --notify bob --body -
+test a_bound_mote_board_refuses_role_fallback_from_an_unrelated_directory ... ok
+test local_base_movement_notifies_only_author_and_evidence_runner_then_clears ... ok
+test fray_team_shows_roles_unclaimed_work_and_gaps ... ok
+test the_cursor_moves_forward_only_and_under_compare_and_set ... ok
+test the_daemon_skips_an_uncardable_request_and_cards_the_rest ... ok
+test sync_needs_an_identity_and_a_paired_store ... ok
+test a_watching_agent_hears_mote_changes_without_anyone_running_sync ... ok
+test the_tail_cursor_is_op_id_shaped_and_orders_with_real_ids ... ok
+test one_malformed_mote_request_does_not_stop_the_rest ... ok
+test role_send_uses_real_mote_lease_and_refuses_an_expired_holder ... ok
+test an_answered_request_to_an_unjoined_actor_is_no_longer_stuck ... ok
+test reconciliation_delivers_claim_changes_the_event_feed_missed_once ... ok
+test the_event_path_and_reconciliation_share_keys ... ok
+test a_missed_release_is_recorded_quietly_and_never_causes_a_false_receipt ... ok
+test a_mote_request_is_carded_once_and_settles_when_answered_in_mote ... ok
+test candidates_reach_their_reviewer_and_proposer_through_the_real_mote ... ok
+test the_incident_reaches_a_present_steward_and_the_stuck_list ... ok
+test a_handoff_and_an_expiry_reach_their_agents_once_and_strangers_are_reported ... ok
+test a_candidate_that_is_revoked_and_reauthorized_through_the_real_mote_is_reported_each_time ... ok
+test review_reproducers_against_the_real_mote ... ok
+test three_timeouts_in_a_row_reseed_at_the_tail ... ok
+test board_agents_requests_are_read_before_mote_only_actors ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.84s
+
+     Running tests/mote_workflow.rs (target/debug/deps/mote_workflow-8d8ba5123abd1b56)
+
+running 7 tests
+test durable_journal_survives_reopen_and_client_lock_releases_without_unlinking ... ok
+test immutable_mote_subject_refuses_advisory_verdict_and_sha_movement ... ok
+test exact_journal_freezes_tokens_and_rejection_records_no_verdict ... ok
+test self_review_and_bad_subject_fail_before_a_journal_is_written ... ok
+test historical_acceptance_never_replaces_a_current_block_or_creates_a_new_blocking_followup ... ok
+test committed_workflow_response_lookup_is_exact_and_actor_scoped_across_sessions ... ok
+test accepted_receipt_finalizes_once_and_verified_successor_carries_open_objection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/mute_edges.rs (target/debug/deps/mute_edges-d3047134c4f30ad3)
+
+running 5 tests
+test review_fu1_a_request_assigned_to_you_cannot_be_muted_even_when_closed ... ok
+test unmute_still_restores_updates_missed_on_a_routed_card ... ok
+test fu_a_a_mute_placed_before_assignment_never_hides_the_final_outcome ... ok
+test review_fu2_unmute_agrees_with_what_a_join_would_seed ... ok
+test fu_b_unmute_never_invents_a_receipt_for_a_card_never_routed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/notification.rs (target/debug/deps/notification-b7cf1ee445e426c8)
+
+running 8 tests
+test malformed_receipts_fail_visibly_instead_of_emitting_bad_ack_instructions ... ok
+test notification_preview_is_unicode_safe_and_receipt_bounded ... ok
+test notification_prefers_latest_peer_reply_over_stale_card_title ... ok
+test activation_metadata_is_declared_validated_and_separate_from_selection ... ok
+test notification_falls_back_to_title_without_an_eligible_peer_message ... ok
+test one_small_batch_notice_refers_to_all_immutable_receipts ... ok
+test batch_notification_shortens_preview_and_title_before_dropping_items ... ok
+test small_notifications_retain_every_exact_receipt_with_unicode_and_escaping ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/objections.rs (target/debug/deps/objections-97b41a6591295731)
+
+running 3 tests
+test objection_presentation_fits_the_minimum_brief_and_attention_budgets ... ok
+test override_and_resolution_notices_survive_restart_mutes_and_stale_ack ... ok
+test only_the_objector_or_owner_can_close_a_linked_objection ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/open_items.rs (target/debug/deps/open_items-a27ec9c5e3223d99)
+
+running 5 tests
+test waiting_is_reachable_but_holds_lanes_only_for_a_while ... ok
+test a_queue_waits_for_the_holder_only_so_long ... ok
+test review_inner_takes_notify_once_and_busy_says_to_release ... ok
+test review_a_session_bound_wait_cannot_renew_its_own_hold ... ok
+test codex_inside_claude_binds_the_codex_session ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/outage.rs (target/debug/deps/outage-22e0a85497470310)
+
+running 1 test
+test stopped_and_stale_sockets_return_nonzero_explicit_cli_errors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/owner.rs (target/debug/deps/owner-2dc50571f8017f79)
+
+running 20 tests
+test owner_commands_refuse_a_non_interactive_shell ... ok
+test agents_cannot_act_as_the_owner_and_the_owner_only_uses_owner_ops ... ok
+test audit2_review_shows_the_version_a_decision_binds_to ... ok
+test audit3_invisible_and_reordering_characters_are_shown_escaped ... ok
+test audit3_agent_text_cannot_scroll_away_or_fake_the_request ... ok
+test review2_authority_tags_are_reserved_for_the_owner ... ok
+test audit_authority_tag_spellings_and_spoofed_links_are_refused_or_ignored ... ok
+test audit4_only_printable_ascii_reaches_the_owners_terminal ... ok
+test audit2_closed_requests_cannot_be_decided_and_replies_name_their_version ... ok
+test audit_an_owner_decision_is_bound_to_what_the_owner_saw ... ok
+test review_block2_raw_rpc_cannot_reach_owner_operations ... ok
+test ask_owner_queues_and_the_answer_reaches_the_asker ... ok
+test an_owner_decision_is_pinned_for_everyone_and_marked_with_authority ... ok
+test audit6_numbers_cannot_widen_banners_and_lookalikes_are_marked_apart ... ok
+test audit5_every_row_is_either_quoted_or_a_fixed_renderer_row ... ok
+test review2_replies_and_leases_cannot_change_an_owner_card ... ok
+test review_block1_agents_cannot_rewrite_an_owner_card ... ok
+test review_fu7_owner_lookalike_names_are_refused ... ok
+test review_fu3_fu5_a_claimed_ask_cannot_block_the_owner_and_decline_is_distinct ... ok
+test audit3_newest_history_is_shown_and_long_sends_are_whole ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/pairing.rs (target/debug/deps/pairing-e3c4d4e8e20d1760)
+
+running 5 tests
+test unbound_readers_do_not_share_an_implicit_read_session ... ok
+test failure_after_ack_validation_rolls_back_the_ack_too ... ok
+test invalid_reply_ack_rolls_back_reply_refs_and_linked_objection ... ok
+test crossing_reply_warns_even_after_background_exposure_and_keeps_newer_pending ... ok
+test reply_ack_is_exact_card_scoped_and_covers_overlapping_watch_batch ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/pending.rs (target/debug/deps/pending-68ed0dc362f5d065)
+
+running 3 tests
+test unknown_names_fail_with_suggestions ... ok
+test pending_mail_waits_for_the_agent_and_arrives_on_join ... ok
+test withdrawn_or_rerouted_pending_mail_does_not_leave_a_phantom_in_default_roster ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/phase1.rs (target/debug/deps/phase1-58f9747914b41576)
+
+running 11 tests
+test provider_neutral_session_precedence_and_validation ... ok
+test card_filter_rejects_empty_overlong_and_nonpositive_values ... ok
+test unmute_does_not_subscribe_but_recovers_missed_peers_before_ones_own_reply ... ok
+test card_filter_is_shared_narrowing_not_routing_or_ack ... ok
+test assigned_open_questions_and_objection_children_cannot_be_muted ... ok
+test a_prior_mute_cannot_hide_a_later_assigned_question ... ok
+test leave_stops_participant_and_direct_fanout_but_rejoin_catches_up ... ok
+test mute_retains_receipts_survives_rejoin_and_does_not_hide_a_direct_objection ... ok
+test direct_request_created_and_closed_while_away_is_delivered_on_rejoin ... ok
+test readiness_warning_with_maximum_identity_fits_the_minimum_brief_budget ... ok
+test wake_warning_distinguishes_connected_expired_filtered_and_armed ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/pilot.rs (target/debug/deps/pilot-c09cb50f300efd04)
+
+running 5 tests
+test controller_lease_fences_old_runs_and_does_not_resurrect_leave ... ok
+test batch_ack_is_atomic_store_and_actor_qualified_and_uses_delivery_not_head ... ok
+test selected_manager_sees_incoming_outgoing_and_named_topics_not_firehose ... ok
+test incidental_delivery_is_not_permanent_participation ... ok
+test migration_preserves_receipts_but_only_backfills_contributors_once ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/presence.rs (target/debug/deps/presence-91c4c15dce4b7315)
+
+running 5 tests
+test invalid_presentations_are_atomic_and_do_not_create_card_state ... ok
+test leave_rejoin_and_changed_session_activity_increment_generation ... ok
+test first_session_surfaces_existing_peers_once_and_later_join_once ... ok
+test exact_presentation_is_session_local_and_does_not_consume_a_newer_rejoin_or_hidden_rows ... ok
+test ended_session_peer_cursors_are_pruned_and_live_sessions_are_preserved ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/reachability.rs (target/debug/deps/reachability-69f636621efba7b8)
+
+running 10 tests
+test a_driven_agent_is_wakeable_even_mid_child ... ok
+test a_filtered_or_undeclared_listener_is_not_wakeable ... ok
+test a_turn_that_ended_minutes_ago_is_present_not_wakeable ... ok
+test an_armed_monitor_is_wakeable_until_its_declared_expiry ... ok
+test friction_counts_a_present_but_unarmed_addressee_as_unreachable ... ok
+test a_question_goes_to_a_wakeable_party_first_and_names_who_else_is ... ok
+test only_an_unfiltered_wait_in_progress_is_wakeable ... ok
+test an_answered_ask_no_longer_counts_toward_the_lapse ... ok
+test kind_patches_and_local_mote_annotations_do_not_clear_a_lapse ... ok
+test a_lapse_is_told_apart_from_a_rearm_and_from_leaving ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-b6715207d938a4cf)
+
+running 3 tests
+test refuses_existing_outputs_and_cleans_failed_restore ... ok
+test bare_backup_filename_works_and_intermediate_symlinks_are_refused ... ok
+test online_backup_and_fresh_restore_preserve_board_state ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/retention.rs (target/debug/deps/retention-628f901431851aa5)
+
+running 5 tests
+test intermediate_archive_symlink_refuses_before_output_or_compaction ... ok
+test compaction_keeps_stats_and_rejects_expired_cursors_and_live_daemon_lock ... ok
+test every_protected_reference_category_stays_out_of_the_plan ... ok
+test dry_run_is_read_only_and_execution_archives_the_same_selection_with_a_restorable_database ... ok
+test compacted_cursors_fail_over_the_daemon_wire_but_fresh_reads_and_thread_markers_work ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/review.rs (target/debug/deps/review-bf94ed872e524786)
+
+running 8 tests
+test mutable_references_are_rejected_and_unicode_evidence_roundtrips ... ok
+test frozen_scope_authority_and_cas_are_enforced_without_freezing_routing ... ok
+test candidate_supersession_preserves_baseline_and_stales_even_aba_verdicts ... ok
+test stale_verdict_or_invalid_receipt_writes_neither_evidence_nor_ack ... ok
+test review_objection_uses_existing_linked_closure_gate ... ok
+test an_unsolicited_verdict_does_not_replace_the_requested_reviewers_header ... ok
+test schema_two_upgrade_preserves_identity_receipts_and_bound_peer_generation ... ok
+test terminal_reviews_refuse_both_subject_changes_and_verdicts_atomically ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/review_batches.rs (target/debug/deps/review_batches-bc63a938791b57d2)
+
+running 4 tests
+test compact_conversation_preserves_changed_summary_and_reply_references ... ok
+test unread_pages_can_be_read_without_acknowledging_the_first_page ... ok
+test interleaved_reader_batches_keep_exact_versions_across_store_restart ... ok
+test token_from_another_store_cannot_ack_same_actor_and_card_number ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/routing.rs (target/debug/deps/routing-8971c4b7e18d14c5)
+
+running 2 tests
+test without_mote_only_a_present_declared_role_holder_is_selected ... ok
+test mote_assignments_and_fray_liveness_both_gate_role_routing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sessions.rs (target/debug/deps/sessions-9943d6c8a77ecc23)
+
+running 10 tests
+test malformed_sessions_are_rejected ... ok
+test activity_keeps_a_binding_live ... ok
+test a_second_live_session_cannot_silently_share_a_name ... ok
+test legacy_callers_without_a_session_still_work ... ok
+test takeover_is_explicit_and_visible ... ok
+test a_stale_binding_yields_without_takeover ... ok
+test leave_ends_the_binding_and_one_session_may_hold_several_names ... ok
+test resolving_over_an_open_objection_is_refused ... ok
+test overriding_an_objection_is_recorded_in_the_thread ... ok
+test questions_superseding_and_withdrawing_are_not_gated ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/skill.rs (target/debug/deps/skill-02382703e7387678)
+
+running 9 tests
+test catalog_and_named_content_are_available ... ok
+test symlinked_configuration_is_not_followed ... ok
+test existing_custom_skill_prevents_any_installation ... ok
+test selected_skill_conflict_preflights_all_destinations ... ok
+test symlinked_skill_is_not_replaced_even_when_content_matches ... ok
+test single_host_install_only_touches_that_host ... ok
+test installs_one_identical_skill_for_both_hosts_idempotently ... ok
+test named_install_can_install_every_bundled_skill ... ok
+test cli_prints_and_installs_without_an_agent_or_daemon ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/snapshot.rs (target/debug/deps/snapshot-a9b8ffac2bc61237)
+
+running 9 tests
+test rejects_unmerged_selected_path_containing_a_tab ... ok
+test verification_rejects_tampered_and_unlisted_content ... ok
+test verification_rejects_symlinked_manifest_before_reading ... ok
+test creates_missing_output_root_after_overlap_check ... ok
+test rejects_missing_paths_beneath_symlinks_and_gitlinks ... ok
+test verification_rejects_bundle_root_symlink ... ok
+test captures_worktree_states_and_reuses_stable_identity ... ok
+test rejects_ignored_literals_symlinks_and_output_overlap ... ok
+test captures_and_verifies_500_files_with_shasum_identical_digests ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.09s
+
+     Running tests/state.rs (target/debug/deps/state-145868ec031279a9)
+
+running 33 tests
+test database_identity_persists ... ok
+test failed_mutation_leaves_no_event_or_delivery ... ok
+test actionable_annotations_create_persistent_questions ... ok
+test expired_owner_cannot_renew ... ok
+test explicit_ack_does_not_resolve_task ... ok
+test exposing_does_not_ack_and_reminders_return ... ok
+test current_search_does_not_return_old_head ... ok
+test annotation_does_not_invalidate_content_revision ... ok
+test filters_and_sort_are_structured ... ok
+test expired_claim_is_reclaimable_and_fenced ... ok
+test history_pagination_has_no_duplicate_sequences ... ok
+test annotations_never_silently_disappear_from_counts ... ok
+test blocked_tasks_are_not_suggested_as_available ... ok
+test idempotent_retry_is_one_event ... ok
+test key_reuse_with_different_payload_is_error ... ok
+test lease_exclusion ... ok
+test renew_is_not_attention_spam ... ok
+test reading_does_not_ack ... ok
+test reject_future_ack ... ok
+test post_updates_head_event_search_and_inbox ... ok
+test renew_keeps_content_revision ... ok
+test receipts_are_queryable_by_sender ... ok
+test release_invalidates_old_token ... ok
+test resolve_releases_lease ... ok
+test briefing_honors_byte_budget_and_signals_omissions ... ok
+test same_revision_only_one_writer_wins ... ok
+test unknown_mutation_fields_fail_closed ... ok
+test stale_ack_cannot_swallow_new_revision ... ok
+test unassigned_new_work_has_global_discovery ... ok
+test scoped_notes_are_filtered_but_broadcasts_are_not ... ok
+test scope_changes_seed_new_live_heads ... ok
+test repeated_updates_coalesce ... ok
+test new_agent_gets_live_heads_not_closed_history ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running tests/stats.rs (target/debug/deps/stats-62f10607f950567d)
+
+running 20 tests
+test a_friction_note_over_the_summary_limit_fails_before_sending ... ok
+test owner_requests_wait_in_the_owner_queue_not_unreachable ... ok
+test legacy_delivery_routing_times_are_flagged_instead_of_invented ... ok
+test agents_who_left_and_muted_cards_are_not_unacked_attention ... ok
+test an_empty_board_reports_nothing_measured_rather_than_zero_latency ... ok
+test friction_notes_and_unreachable_requests_are_listed ... ok
+test stats_and_friction_never_write ... ok
+test only_reassignment_away_from_someone_counts_as_a_possible_misroute ... ok
+test exposure_uses_the_first_time_a_version_was_shown ... ok
+test a_bystander_note_is_not_an_answer ... ok
+test reopening_clears_resolution_and_kind_and_title_follow_the_card ... ok
+test response_and_resolution_times_replay_from_the_log ... ok
+test a_read_only_metrics_connection_matches_the_store_and_never_initializes_a_database ... ok
+test objections_count_separately_and_overrides_are_visible ... ok
+test unacked_age_runs_from_the_oldest_unacknowledged_event ... ok
+test unacked_attention_is_current_and_shrinks_on_ack ... ok
+test a_pruned_first_showing_is_not_replaced_by_a_later_one ... ok
+test the_window_selects_work_started_within_it ... ok
+test unacked_age_never_predates_first_routing_and_reassignment_does_not_reset_it ... ok
+test the_cli_rejects_a_malformed_window_before_contacting_a_daemon ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/wait_latency.rs (target/debug/deps/wait_latency-11db4badd4318b50)
+
+running 4 tests
+test input_during_a_wait_is_still_refused ... ok
+test a_finite_wait_replies_without_the_hang_up_poll_delay ... ok
+test a_request_right_after_a_wait_reply_is_served_intact ... ok
+test input_racing_the_wait_reply_is_refused_or_served_never_corrupted ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.88s
+
+     Running tests/wake_waits.rs (target/debug/deps/wake_waits-a4548fc6e5a923fb)
+
+running 1 test
+test each_wait_counts_on_its_own_and_a_hang_up_ends_it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+{
+  "validation_kind": "schema_and_SQL_only",
+  "sqlite_version": "3.53.4",
+  "static_statements_prepared": 237,
+  "checks_passed": 22,
+  "checks": [
+    "static SQL prepares against the actual schema",
+    "FTS indexes current card insertion",
+    "FTS replaces obsolete head text",
+    "FTS finds new head text",
+    "history index preserves historical text",
+    "off-topic ordinary event does not interrupt bob",
+    "steward receives off-topic activity",
+    "new unassigned work is discoverable outside topic filters",
+    "incidental receipt does not subscribe to later events",
+    "100 updates coalesce into a single pending row",
+    "acknowledging an older delivery leaves the newer head pending",
+    "acknowledging through the exact pending sequence clears attention",
+    "acknowledgment cursor is monotonic",
+    "acknowledgment does not close the work item",
+    "actionable annotations can create linked durable questions",
+    "newcomer snapshot excludes closed history",
+    "newcomer snapshot includes active heads",
+    "FTS supports prefix and boolean queries",
+    "rollback keeps head and current FTS consistent",
+    "idempotency keys unique per actor",
+    "database structural integrity",
+    "database referential integrity"
+  ],
+  "not_tested": [
+    "Rust compilation",
+    "Rust tests",
+    "Rust parameter bindings",
+    "IPC runtime",
+    "latency",
+    "coding-agent host integration"
+  ]
+}

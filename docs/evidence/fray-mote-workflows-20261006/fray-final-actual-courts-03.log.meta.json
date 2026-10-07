@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T01:51:02.274281+00:00",
+  "finished_utc": "2026-10-07T01:51:20.399318+00:00",
+  "duration_seconds": 18.125007,
+  "command": [
+    "sh",
+    "-c",
+    "python3 scripts/mote_workflow_integration.py target/debug/fray /private/tmp/mote-63454fe-contract-check/target/debug/mote && python3 scripts/dispatch_integration.py target/debug/fray /private/tmp/mote-63454fe-contract-check/target/debug/mote"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-final-actual-courts-03.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 180.0,
+  "log_bytes": 2026
+}

@@ -1,0 +1,140 @@
+test_active_steers_expected_turn_only (test_wake.AdapterTests.test_active_steers_expected_turn_only) ... {"time": 1791338600.9383411, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/steer", "turn_id": "turn", "receipts": 1}
+ok
+test_approval_and_input_waits_remain_pending (test_wake.AdapterTests.test_approval_and_input_waits_remain_pending) ... ok
+test_backlog_combines_exact_receipts_without_merging_delivered_entries (test_wake.AdapterTests.test_backlog_combines_exact_receipts_without_merging_delivered_entries) ... {"time": 1791338600.94618, "event": "delivered", "delivery": "a57525d1bc2e2d61b20ee8b1ad51db29", "method": "turn/start", "turn_id": "turn", "receipts": 3}
+ok
+test_backlog_prompt_receipts_are_bounded (test_wake.AdapterTests.test_backlog_prompt_receipts_are_bounded) ... ok
+test_controller_reconnects_defers_approval_and_reaps_watcher (test_wake.AdapterTests.test_controller_reconnects_defers_approval_and_reaps_watcher) ... {"time": 1791338600.9721391, "event": "reconnecting", "attempt": 1, "reason": "ConnectionError"}
+{"time": 1791338602.981078, "event": "target_verified", "thread": "thread", "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}
+{"time": 1791338602.988566, "event": "watch_started", "pid": 11303, "expires_ms": 1791338615964}
+{"time": 1791338603.888957, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "woken-turn", "receipts": 1}
+{"time": 1791338603.88898, "event": "delivery_limit", "count": 1}
+ok
+test_disconnect_during_host_reads_prevents_start_and_steer (test_wake.AdapterTests.test_disconnect_during_host_reads_prevents_start_and_steer) ... ok
+test_explicit_turn_race_can_reread_then_start (test_wake.AdapterTests.test_explicit_turn_race_can_reread_then_start) ... {"time": 1791338603.8998132, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_identity_and_store_changes_rejected (test_wake.AdapterTests.test_identity_and_store_changes_rejected) ... ok
+test_idle_starts_same_thread_without_policy_overrides (test_wake.AdapterTests.test_idle_starts_same_thread_without_policy_overrides) ... {"time": 1791338603.9052138, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_legacy_pending_journal_is_split_without_redelivering_completed_entries (test_wake.AdapterTests.test_legacy_pending_journal_is_split_without_redelivering_completed_entries) ... ok
+test_lock_prevents_second_adapter (test_wake.AdapterTests.test_lock_prevents_second_adapter) ... ok
+test_lost_response_blocks_restart_not_duplicate_delivery (test_wake.AdapterTests.test_lost_response_blocks_restart_not_duplicate_delivery) ... ok
+test_real_unix_websocket_routes_responses_ignores_approval (test_wake.AdapterTests.test_real_unix_websocket_routes_responses_ignores_approval) ... {"time": 1791338603.948998, "event": "host_request_pending", "method": "item/commandExecution/requestApproval"}
+ok
+test_reconnect_dedup_uses_receipts_not_batches (test_wake.AdapterTests.test_reconnect_dedup_uses_receipts_not_batches) ... ok
+test_success_survives_restart_and_new_batch (test_wake.AdapterTests.test_success_survives_restart_and_new_batch) ... {"time": 1791338603.958046, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_turn_completed_between_reads_sends_nothing (test_wake.AdapterTests.test_turn_completed_between_reads_sends_nothing) ... ok
+test_unloaded_thread_never_created_or_resumed (test_wake.AdapterTests.test_unloaded_thread_never_created_or_resumed) ... ok
+test_wake_uses_configured_binary_and_session_for_receipt_commands (test_wake.AdapterTests.test_wake_uses_configured_binary_and_session_for_receipt_commands) ... {"time": 1791338603.967427, "event": "delivered", "delivery": "258afe1a856c6846a07b03ffc4db4d36", "method": "turn/start", "turn_id": "turn", "receipts": 1}
+ok
+test_wrong_workspace_cannot_mutate_target (test_wake.AdapterTests.test_wrong_workspace_cannot_mutate_target) ... ok
+test_expired_batches_still_leave_actionable_exact_receipts (test_wake_integration.RealFrayTests.test_expired_batches_still_leave_actionable_exact_receipts) ... {"time": 1791338604.6103392, "event": "delivered", "delivery": "81a9926486935f02b0fdfffd83d9c3ff", "method": "turn/start", "turn_id": "turn", "receipts": 32}
+Executing <Task finished name='Task-113' coro=<RealFrayTests.test_expired_batches_still_leave_actionable_exact_receipts() done, defined at /private/tmp/fray-outstanding-motes/integrations/codex-wake/test_wake_integration.py:113> result=None created at /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py:110> took 0.312 seconds
+ok
+test_leave_during_host_read_prevents_dispatch (test_wake_integration.RealFrayTests.test_leave_during_host_read_prevents_dispatch) ... {"time": 1791338604.831368, "event": "target_verified", "thread": "thread", "status": {"type": "idle"}}
+{"time": 1791338604.836171, "event": "watch_started", "pid": 11457, "expires_ms": 1791338614824}
+fray: not_joined: "manager" has not joined; run fray --as NAME join
+ok
+test_real_ready_listener_delivers_and_is_reaped (test_wake_integration.RealFrayTests.test_real_ready_listener_delivers_and_is_reaped) ... {"time": 1791338605.153507, "event": "target_verified", "thread": "thread", "status": {"type": "idle"}}
+{"time": 1791338605.158134, "event": "watch_started", "pid": 11572, "expires_ms": 1791338615146}
+{"time": 1791338605.359433, "event": "delivered", "delivery": "d876200c0a5154180ada81b2084272ba", "method": "turn/start", "turn_id": "wake-turn", "receipts": 1}
+{"time": 1791338605.359466, "event": "delivery_limit", "count": 1}
+ok
+test_recovered_delivery_does_not_wake_after_leave (test_wake_integration.RealFrayTests.test_recovered_delivery_does_not_wake_after_leave) ... {"time": 1791338605.449792, "event": "target_verified", "thread": "thread", "status": {"type": "idle"}}
+{"time": 1791338605.45468, "event": "watch_started", "pid": 11627, "expires_ms": 1791338615443}
+fray: not_joined: "manager" has not joined; run fray --as NAME join
+ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 4.728s
+
+OK
+test_batch_receipts_cli_rejects_wrong_store_without_partial_ack (__main__.Integration.test_batch_receipts_cli_rejects_wrong_store_without_partial_ack) ... ok
+test_busy_and_idle_controllers_refresh_presence_without_model_polling (__main__.Integration.test_busy_and_idle_controllers_refresh_presence_without_model_polling) ... ok
+test_child_failure_does_not_report_a_live_controller_or_ack (__main__.Integration.test_child_failure_does_not_report_a_live_controller_or_ack) ... ok
+test_claim_race_has_exactly_one_winner (__main__.Integration.test_claim_race_has_exactly_one_winner) ... ok
+test_cli_and_claude_hook_contract (__main__.Integration.test_cli_and_claude_hook_contract) ... ok
+test_cli_byte_budget (__main__.Integration.test_cli_byte_budget) ... ok
+test_conversation_with_two_managers_and_scoped_peers_survives_restart (__main__.Integration.test_conversation_with_two_managers_and_scoped_peers_survives_restart) ... ok
+test_crash_restart_preserves_committed_heads_and_inbox (__main__.Integration.test_crash_restart_preserves_committed_heads_and_inbox) ... ok
+test_drive_stops_when_child_ignores_its_receipts (__main__.Integration.test_drive_stops_when_child_ignores_its_receipts) ... ok
+test_drive_supplies_context_to_child (__main__.Integration.test_drive_supplies_context_to_child) ... ok
+test_drive_wakes_from_idle_and_supplies_new_attention (__main__.Integration.test_drive_wakes_from_idle_and_supplies_new_attention) ... ok
+test_duplicate_controller_and_child_timeout_are_visible (__main__.Integration.test_duplicate_controller_and_child_timeout_are_visible) ... ok
+test_empty_drive_does_not_invoke_child_but_explicit_bootstrap_does (__main__.Integration.test_empty_drive_does_not_invoke_child_but_explicit_bootstrap_does) ... ok
+test_enter_keeps_roster_available_to_child_session_start (__main__.Integration.test_enter_keeps_roster_available_to_child_session_start) ... ok
+test_explicit_all_selection_processes_discovery_and_logs_no_token_estimate (__main__.Integration.test_explicit_all_selection_processes_discovery_and_logs_no_token_estimate) ... ok
+test_find_discovers_boards_without_creating_or_switching_them (__main__.Integration.test_find_discovers_boards_without_creating_or_switching_them) ... ok
+test_hooks_do_not_reinject_context_inside_drive (__main__.Integration.test_hooks_do_not_reinject_context_inside_drive) ... ok
+test_invalid_shutdown_returns_error_and_keeps_connection_usable (__main__.Integration.test_invalid_shutdown_returns_error_and_keeps_connection_usable) ... ok
+test_involved_wait_ignores_broadcasts_but_wakes_for_outgoing_reply (__main__.Integration.test_involved_wait_ignores_broadcasts_but_wakes_for_outgoing_reply) ... ok
+test_long_body_files_readable_threads_and_filtered_inbox (__main__.Integration.test_long_body_files_readable_threads_and_filtered_inbox) ... ok
+test_malformed_frame_does_not_kill_daemon (__main__.Integration.test_malformed_frame_does_not_kill_daemon) ... ok
+test_old_daemon_is_rejected_without_shutdown_or_registration (__main__.Integration.test_old_daemon_is_rejected_without_shutdown_or_registration) ... ok
+test_oversize_receipt_becomes_a_pointer_instead_of_aborting (__main__.Integration.test_oversize_receipt_becomes_a_pointer_instead_of_aborting) ... ok
+test_pairing_help_and_pending_roster_cleanup (__main__.Integration.test_pairing_help_and_pending_roster_cleanup) ... ok
+test_pairing_reply_ack_warning_and_thread_revision (__main__.Integration.test_pairing_reply_ack_warning_and_thread_revision) ... ok
+test_partial_progress_drains_backlog_without_requiring_one_huge_turn (__main__.Integration.test_partial_progress_drains_backlog_without_requiring_one_huge_turn) ... ok
+test_peer_hints_respect_brief_budget_and_failed_output_does_not_consume (__main__.Integration.test_peer_hints_respect_brief_budget_and_failed_output_does_not_consume) ... ok
+test_peer_only_hook_notice_and_stop_nonblocking (__main__.Integration.test_peer_only_hook_notice_and_stop_nonblocking) ... ok
+test_reply_refs_survive_restart_and_are_searchable (__main__.Integration.test_reply_refs_survive_restart_and_are_searchable) ... ok
+test_same_key_retry_after_restart (__main__.Integration.test_same_key_retry_after_restart) ... ok
+test_selected_manager_does_not_stall_on_unrelated_retained_receipts (__main__.Integration.test_selected_manager_does_not_stall_on_unrelated_retained_receipts) ... ok
+test_snapshot_cli_and_review_candidate_round_trip (__main__.Integration.test_snapshot_cli_and_review_candidate_round_trip) ... ok
+test_unpresented_backlog_cannot_hide_an_ignored_packet (__main__.Integration.test_unpresented_backlog_cannot_hide_an_ignored_packet) ... ok
+test_wait_wakes_for_committed_work (__main__.Integration.test_wait_wakes_for_committed_work) ... ok
+test_wait_wakes_when_scope_change_seeds_existing_attention (__main__.Integration.test_wait_wakes_when_scope_change_seeds_existing_attention) ... ok
+test_watch_reconnect_checks_protocol_before_resubscribing (__main__.Integration.test_watch_reconnect_checks_protocol_before_resubscribing) ... ok
+test_watch_replays_then_follows (__main__.Integration.test_watch_replays_then_follows) ... ok
+test_watch_startup_race_never_loses_events (__main__.Integration.test_watch_startup_race_never_loses_events) ... ok
+
+----------------------------------------------------------------------
+Ran 38 tests in 52.294s
+
+OK
+test_adapter_fallback_and_doctor_against_old_attention_protocol (__main__.Attention.test_adapter_fallback_and_doctor_against_old_attention_protocol) ... ok
+test_adapter_monitor_delegates_to_the_same_generic_stream (__main__.Attention.test_adapter_monitor_delegates_to_the_same_generic_stream) ... ok
+test_adapter_rewake_exit_mapping_and_managed_child_suppression (__main__.Attention.test_adapter_rewake_exit_mapping_and_managed_child_suppression) ... ok
+test_attention_protocol_has_no_global_offset_and_errors_stay_off_stdout (__main__.Attention.test_attention_protocol_has_no_global_offset_and_errors_stay_off_stdout) ... ok
+test_attention_stream_rejects_inbound_frames_instead_of_swallowing_them (__main__.Attention.test_attention_stream_rejects_inbound_frames_instead_of_swallowing_them) ... ok
+test_broadcast_watch_still_accepts_inherited_attention_selection (__main__.Attention.test_broadcast_watch_still_accepts_inherited_attention_selection) ... ok
+test_compact_notification_retains_receipt_and_fetches_full_body (__main__.Attention.test_compact_notification_retains_receipt_and_fetches_full_body) ... ok
+test_control_readiness_is_not_emitted_for_a_left_identity (__main__.Attention.test_control_readiness_is_not_emitted_for_a_left_identity) ... ok
+test_doctor_is_read_only_and_distinguishes_manual_and_expired_activation (__main__.Attention.test_doctor_is_read_only_and_distinguishes_manual_and_expired_activation) ... ok
+test_doctor_reports_unavailable_without_starting_daemon (__main__.Attention.test_doctor_reports_unavailable_without_starting_daemon) ... ok
+test_duplicate_listener_and_driver_cannot_compete (__main__.Attention.test_duplicate_listener_and_driver_cannot_compete) ... ok
+test_expired_own_connection_reconnects_but_leave_does_not (__main__.Attention.test_expired_own_connection_reconnects_but_leave_does_not) ... ok
+test_fixed_window_coalesces_burst_and_receipts_stay_pending (__main__.Attention.test_fixed_window_coalesces_burst_and_receipts_stay_pending) ... ok
+test_killed_idle_listener_is_released_and_replaced_within_one_second (__main__.Attention.test_killed_idle_listener_is_released_and_replaced_within_one_second) ... ok
+test_kind_and_priority_selection_match_wait_inbox_and_watch (__main__.Attention.test_kind_and_priority_selection_match_wait_inbox_and_watch) ... ok
+test_notification_previews_latest_reply_instead_of_opening_title (__main__.Attention.test_notification_previews_latest_reply_instead_of_opening_title) ... ok
+test_once_timeout_and_explicit_leave_have_distinct_outcomes (__main__.Attention.test_once_timeout_and_explicit_leave_have_distinct_outcomes) ... ok
+test_opt_in_control_frames_fence_disconnect_and_reconnect (__main__.Attention.test_opt_in_control_frames_fence_disconnect_and_reconnect) ... ok
+test_priority_backlog_and_newly_followed_old_card_are_not_skipped (__main__.Attention.test_priority_backlog_and_newly_followed_old_card_are_not_skipped) ... ok
+test_quiet_heartbeat_and_unrelated_traffic_never_reach_stdout (__main__.Attention.test_quiet_heartbeat_and_unrelated_traffic_never_reach_stdout) ... ok
+test_reconnect_after_daemon_crash_recovers_unacked_exact_versions (__main__.Attention.test_reconnect_after_daemon_crash_recovers_unacked_exact_versions) ... ok
+test_reconnect_rejects_replaced_database (__main__.Attention.test_reconnect_rejects_replaced_database) ... ok
+test_review_candidate_and_stale_verdict_survive_bounded_wake (__main__.Attention.test_review_candidate_and_stale_verdict_survive_bounded_wake) ... ok
+test_unread_cli_paginates_before_ack_and_keeps_later_reply_pending (__main__.Attention.test_unread_cli_paginates_before_ack_and_keeps_later_reply_pending) ... ok
+test_urgent_bypasses_settlement_and_continuous_traffic_cannot_starve (__main__.Attention.test_urgent_bypasses_settlement_and_continuous_traffic_cannot_starve) ... ok
+test_wait_filters_match_attention_and_do_not_consume_hidden_receipts (__main__.Attention.test_wait_filters_match_attention_and_do_not_consume_hidden_receipts) ... ok
+test_wait_none_daemon_failure_and_cancel_release_connections (__main__.Attention.test_wait_none_daemon_failure_and_cancel_release_connections) ... ok
+test_wait_none_exits_only_for_selected_attention_and_resumes_from_exact_ack (__main__.Attention.test_wait_none_exits_only_for_selected_attention_and_resumes_from_exact_ack) ... ok
+
+----------------------------------------------------------------------
+Ran 28 tests in 29.456s
+
+OK
+test_finite_wait_keeps_sequential_rpc_connection_usable (__main__.Reliability.test_finite_wait_keeps_sequential_rpc_connection_usable) ... ok
+test_half_close_cancels_wait_and_does_not_ack (__main__.Reliability.test_half_close_cancels_wait_and_does_not_ack) ... ok
+test_immediate_wait_uses_reserved_short_rpc_capacity (__main__.Reliability.test_immediate_wait_uses_reserved_short_rpc_capacity) ... ok
+test_inbound_bytes_are_protocol_errors_for_finite_and_infinite_waits (__main__.Reliability.test_inbound_bytes_are_protocol_errors_for_finite_and_infinite_waits) ... ok
+test_killed_finite_waits_release_slots_without_waiting_for_deadline (__main__.Reliability.test_killed_finite_waits_release_slots_without_waiting_for_deadline) ... ok
+test_long_waits_reserve_capacity_for_send_inbox_and_ack (__main__.Reliability.test_long_waits_reserve_capacity_for_send_inbox_and_ack) ... ok
+test_low_descriptor_limit_preserves_busy_and_short_rpc_capacity (__main__.Reliability.test_low_descriptor_limit_preserves_busy_and_short_rpc_capacity) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 2.908s
+
+OK

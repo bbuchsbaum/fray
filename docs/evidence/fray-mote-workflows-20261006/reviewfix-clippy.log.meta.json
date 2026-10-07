@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T00:57:00.929386+00:00",
+  "finished_utc": "2026-10-07T00:57:06.526929+00:00",
+  "duration_seconds": 5.597438,
+  "command": [
+    "env",
+    "CARGO_TARGET_DIR=/private/tmp/mote-63454fe-contract-check/target",
+    "cargo",
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "cwd": "/private/tmp/mote-fray-prerequisites",
+  "log": "/private/tmp/mote-fray-authority-gates-20261006/reviewfix-clippy.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 1200.0,
+  "log_bytes": 136
+}

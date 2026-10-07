@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T00:56:59.869834+00:00",
+  "finished_utc": "2026-10-07T00:57:00.855417+00:00",
+  "duration_seconds": 0.985509,
+  "command": [
+    "env",
+    "CARGO_TARGET_DIR=/private/tmp/mote-63454fe-contract-check/target",
+    "cargo",
+    "fmt",
+    "--check"
+  ],
+  "cwd": "/private/tmp/mote-fray-prerequisites",
+  "log": "/private/tmp/mote-fray-authority-gates-20261006/reviewfix-fmt.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 600.0,
+  "log_bytes": 0
+}

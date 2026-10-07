@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T02:03:20.739057+00:00",
+  "finished_utc": "2026-10-07T02:04:50.808378+00:00",
+  "duration_seconds": 90.069583,
+  "command": [
+    "sh",
+    "-c",
+    "/private/tmp/fray-motes-wake-venv/bin/python -m unittest discover -s integrations/codex-wake -v && python3 scripts/integration.py target/debug/fray && python3 scripts/attention_integration.py target/debug/fray && python3 scripts/reliability_integration.py target/debug/fray"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-reviewfix-python-01.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 240.0,
+  "log_bytes": 17235
+}

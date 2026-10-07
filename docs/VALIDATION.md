@@ -21,14 +21,15 @@ scanner prepared 237 statements against both schemas and passed 22 invariants.
 Always-run synthetic public-CLI courts cover mixed holder/token reads, bounded
 churn refusal, exact confirmation recovery after renewal, unsafe self-carrier
 refusal, admitted history suppression, earlier-spelled anchors, future raw ids
-with due reservation warnings and timeout cursor preservation.
+with due reservation warnings and timeout cursor preservation. Cross-session
+committed-response recovery uses synthetic Mote; invalid-TTL refusal is a CLI
+parsing test.
 
 Real disposable Mote/Git/Fray courts passed eleven review/landing and six
 dispatch/handoff cases. These include nonzero admitted-review recovery with no
 premature Fray verdict, object/successor/approve/land, revoked authorization,
 base advancement without reviewer wake, actual client SIGKILL after Mote archive
-with historical recovery/drift refusal, cross-session committed-response recovery,
-invalid adoption TTL refusal, concurrent accepts with one actual
+with historical recovery/drift refusal, concurrent accepts with one actual
 claim, interrupted handoff/close/adopt, competing adoption, carrier expiry and
 actual bounded claim-expiry requeue. During a paused Mote landing an unrelated
 Fray RPC returned promptly; the exact duration is retained in each court log. This is a bounded observation, not a latency SLA.

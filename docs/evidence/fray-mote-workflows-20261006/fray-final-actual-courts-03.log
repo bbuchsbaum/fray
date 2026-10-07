@@ -1,0 +1,33 @@
+{
+  "checks": [
+    "nonzero admitted Mote review leaves no Fray verdict; exact-key recovery confirms acceptance",
+    "request -> accepted Mote block; identical request retry deduplicates despite changed review state",
+    "verified successor creates immutable review, carries open objection, copies no approval",
+    "completed approval retry reports historical receipt and preserves later authoritative Mote block",
+    "actual main advance reports local evidence mismatch to producers without re-waking reviewer",
+    "readonly landing check leaves Git unchanged; proposer self approval refused",
+    "revocation after eligibility check refuses landing without ref change",
+    "fenced real fast-forward completed; unrelated Fray RPC during blocked Mote returned in 0.0182s",
+    "exact-key landing retry reads historical receipt without another Git mutation"
+  ],
+  "passed": 9,
+  "fray_binary": "/private/tmp/fray-outstanding-motes/target/debug/fray",
+  "mote_binary": "/private/tmp/mote-63454fe-contract-check/target/debug/mote",
+  "paid_trials": false,
+  "shared_stores_touched": false
+}
+{
+  "passed": 6,
+  "checks": [
+    "two concurrent explicit accepts produce exactly one current Mote winner and one claim publication",
+    "post-admission handoff failure remains pending; exact-key resume confirms transfer while sender carrier stays reserved",
+    "interrupted carrier close/adopt resumes with no observed unreserved interval; repeated adoption resume does not renew",
+    "competitor during carrier orphan interval reports loss to both parties and never claims held paths",
+    "expiry during carrier orphan interval reports loss to both parties and never claims held paths",
+    "disappearance notifies sender immediately, preserves live Mote claim, then requeues after actual bounded expiry"
+  ],
+  "fray_binary": "/private/tmp/fray-outstanding-motes/target/debug/fray",
+  "mote_binary": "/private/tmp/mote-63454fe-contract-check/target/debug/mote",
+  "paid_trials": false,
+  "shared_stores_touched": false
+}

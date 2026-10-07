@@ -1,0 +1,53 @@
+{
+  "checks_timing": "Required checks ran before source commit; product input files unchanged. Post-commit build-stamp and real CLI courts retained separately.",
+  "earlier_soak": "Distinct source/binary and monotonic timing qualification; not repeated for this whole binary.",
+  "fray_base_sha": "07f2d0f4d78239ae9f4d235cb8246f7f05c83478",
+  "fray_precommit_build_stamp": "07f2d0f4d782-dirty",
+  "fray_precommit_qualified_binary_sha256": "03bdf4c6c5d587d78cfba13a38b2ab661a3eb1c0169f05c09834cbc755f9e296",
+  "fray_review": "pending exact-SHA independent verdict",
+  "fray_source_sha": "74397840099f9e8dfa5f3fec59ca104cb3b4ef79",
+  "fray_tests": {
+    "failed": 0,
+    "ignored": 0,
+    "python_suites": [
+      23,
+      38,
+      28,
+      7
+    ],
+    "real_cli_courts": [
+      9,
+      6
+    ],
+    "rust": 450,
+    "sql_invariants": 22,
+    "sql_statements": 236,
+    "targets": 50
+  },
+  "mote_base_sha": "63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1",
+  "mote_binary_path_note": "Disposable qualified debug binary; its target directory name is historical and does not identify source. Never use it on original live stores.",
+  "mote_binary_sha256": "9d3a2150b32b67e75e5612b616979334fb29bff9beb4c1b2cd3c50be054e90ed",
+  "mote_review": {
+    "reviewer": "authority_contract",
+    "scope": "Local prerequisite integration only; no publication or hosted CI claim.",
+    "source_sha": "a86803de31e890ac6e4331c9961705cabcde2fcb",
+    "verdict": "APPROVE"
+  },
+  "mote_source_sha": "a86803de31e890ac6e4331c9961705cabcde2fcb",
+  "mote_tests": {
+    "failed": 0,
+    "ignored": 2,
+    "passed": 423,
+    "targets": 43
+  },
+  "scope": {
+    "hosted_ci_claim": false,
+    "install": false,
+    "local_commits": true,
+    "local_main_landing": "pending Fray review",
+    "original_store_activation": false,
+    "paid_trials": false,
+    "push": false,
+    "shared_daemon_restart": false
+  }
+}

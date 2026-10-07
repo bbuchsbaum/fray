@@ -1,0 +1,61 @@
+{
+  "checks_timing": "Required checks ran on unchanged product inputs before source commit. Clean post-source-commit build and all real/synthetic CLI courts retained separately; evidence-only successor does not change these inputs.",
+  "earlier_soak": "Different frozen source/binary with monotonic timing qualification; not repeated for this entire binary.",
+  "fray_base_sha": "07f2d0f4d78239ae9f4d235cb8246f7f05c83478",
+  "fray_post_source_commit_cli_binary_sha256": "009be80e0846d3f32f3a52978bf4749fd437aff3ef92d6bd3417adc4914a4ad5",
+  "fray_precommit_qualified_binary_sha256": "9ec3ee28ee042793d402b9fb240bbe40d6ec611be213ff1c59da1656a8ee7f17",
+  "fray_review": {
+    "condition": "Required Python gate; passed96",
+    "reviewer": "authority_contract",
+    "source_sha": "883b93aaa1f48428ce39b2a5434556a5404cf229",
+    "verdict": "APPROVE"
+  },
+  "fray_source_sha": "883b93aaa1f48428ce39b2a5434556a5404cf229",
+  "fray_tests": {
+    "failed": 0,
+    "ignored": 0,
+    "python_suites": [
+      23,
+      38,
+      28,
+      7
+    ],
+    "real_cli_courts": [
+      11,
+      6
+    ],
+    "rust": 452,
+    "sql_invariants": 22,
+    "sql_statements": 237,
+    "synthetic_public_cli_cases": [
+      5,
+      5
+    ],
+    "targets": 50
+  },
+  "mote_base_sha": "63454fe71036c8e0eecd7ee2db6e84f0b7ba29a1",
+  "mote_binary_path_note": "Disposable debug target directory name is historical, not a source identifier. Qualified binary was never used on original live stores.",
+  "mote_binary_sha256": "9d3a2150b32b67e75e5612b616979334fb29bff9beb4c1b2cd3c50be054e90ed",
+  "mote_review": {
+    "reviewer": "authority_contract",
+    "scope": "Local prerequisites only",
+    "source_sha": "a86803de31e890ac6e4331c9961705cabcde2fcb",
+    "verdict": "APPROVE"
+  },
+  "mote_source_sha": "a86803de31e890ac6e4331c9961705cabcde2fcb",
+  "mote_tests": {
+    "failed": 0,
+    "ignored": 2,
+    "passed": 423,
+    "targets": 43
+  },
+  "scope": {
+    "hosted_ci_claim": false,
+    "install": false,
+    "local_commits": true,
+    "original_store_activation": false,
+    "paid_trials": false,
+    "push": false,
+    "shared_daemon_restart": false
+  }
+}
