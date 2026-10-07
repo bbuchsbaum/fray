@@ -179,7 +179,8 @@ agent's own. The owner never acts in Mote through the adapter.
 
 | Call | Examples | On failure |
 |---|---|---|
-| Invalid (exit 3, or exit 2 without `rejected`) | any | `mote_invalid`: an adapter bug or version mismatch, reported with Mote's message. Record nothing. |
+| Invalid (exit 3, or exit 2 without a structured command receipt or `rejected`) | any | `mote_invalid`: an adapter bug or version mismatch, reported with Mote's message. Record nothing. |
+| Structured unsuccessful command receipt | strict landing/handoff | Preserve the exit status and complete JSON, including journal, exact Git OIDs, `git_updated` uncertainty, and current holder/token. Never infer success from a receipt on a nonzero or signalled exit. |
 | Read | `who-has`, `preflight`, `show`, `candidate show`, `events` | Degrade to advisory: continue with Fray's own view, printing one warning that names the command and error. Never block a commit or a message. |
 | Mutation, rejected | `reserve`, `unreserve`, `claim`, `adopt`, `handoff` | Fail with `mote_rejected` and Mote's reason. Record nothing that Mote owns. |
 | Mutation, unconfirmed (timeout, exit 1 or 4, unparseable output) | same | Re-read the outcome (see 5). If that also fails, fail with `mote_unconfirmed` and name the read to run. Never report success. |

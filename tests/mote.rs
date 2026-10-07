@@ -175,6 +175,88 @@ fn outcomes_are_classified_from_exit_code_stderr_and_json_together() {
 }
 
 #[test]
+fn unsuccessful_authority_receipts_preserve_recovery_and_current_ownership() {
+    let recovery = json!({
+        "outcome":"recovery_required", "git_updated":true,
+        "old_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "new_oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "current_oid":"cccccccccccccccccccccccccccccccccccccccc",
+        "journal":"/tmp/selected home/authority/landing-active.json",
+        "detail":"confirmation persistence failed", "idempotency_key":"land-1"
+    });
+    for code in [Some(2), Some(1), None] {
+        assert_eq!(
+            classify(code, &recovery.to_string(), ""),
+            Outcome::Reported {
+                exit_code: code,
+                data: recovery.clone()
+            }
+        );
+    }
+    let refused = json!({
+        "outcome":"conflict", "accepted":false, "reason":"holder changed",
+        "current_claim":{"holder":"bob","token":"replacement-token",
+                         "lease_until_ts":"2026-10-07T00:00:00Z"},
+        "reservations_transferred":false, "idempotency_key":"handoff-1"
+    });
+    assert_eq!(
+        classify(Some(2), &refused.to_string(), "rejected: holder changed"),
+        Outcome::Reported {
+            exit_code: Some(2),
+            data: refused
+        }
+    );
+    // An incomplete Git observation remains unknown, with its evidence intact.
+    let unknown = json!({"outcome":"recovery_required", "git_updated":null,
+        "git_updated_unknown":true, "journal":"/tmp/authority/landing-active.json"});
+    assert_eq!(
+        classify(Some(2), &unknown.to_string(), ""),
+        Outcome::Reported {
+            exit_code: Some(2),
+            data: unknown
+        }
+    );
+    // Arbitrary JSON without a command receipt is still not a valid result.
+    assert!(matches!(
+        classify(Some(2), "{\"x\":1}", "error: usage"),
+        Outcome::Invalid(_)
+    ));
+}
+
+#[test]
+fn authority_failure_receipt_survives_the_bound_subprocess_transport() {
+    let t = Temp::new("authority-receipt");
+    let path = fake_store(&t.0, "st-authority-receipt");
+    let bin = stub(
+        &t.0,
+        r#"printf '%s\n' '{"outcome":"recovery_required","git_updated":true,"old_oid":"old","new_oid":"new","current_oid":"moved","journal":"/tmp/selected home/authority/landing-active.json","detail":"confirmation failed"}'
+exit 2"#,
+    );
+    let result = mote::run_with(
+        &bin,
+        &Store {
+            path,
+            store_id: "st-authority-receipt".into(),
+        },
+        Some("alice"),
+        &["candidate", "land", "cand-test"],
+        Duration::from_secs(2),
+    );
+    assert_eq!(
+        result,
+        Outcome::Reported {
+            exit_code: Some(2),
+            data: json!({
+                "outcome":"recovery_required", "git_updated":true, "old_oid":"old",
+                "new_oid":"new", "current_oid":"moved",
+                "journal":"/tmp/selected home/authority/landing-active.json",
+                "detail":"confirmation failed"
+            })
+        }
+    );
+}
+
+#[test]
 fn an_ancestor_board_pairs_with_its_sibling_store() {
     implicit_rules_only();
     let t = Temp::new("sib");

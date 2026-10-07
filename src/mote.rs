@@ -50,6 +50,10 @@ fn binary() -> PathBuf {
 pub enum Outcome {
     /// Exit 0, with the parsed JSON (Null when Mote printed nothing).
     Ok(Value),
+    /// A structured command receipt from an unsuccessful or signalled exit.
+    /// Preserve recovery journals, Git OIDs and current ownership without
+    /// treating the receipt as confirmation that a mutation succeeded.
+    Reported { exit_code: Option<i32>, data: Value },
     /// The reducer refused the op, with Mote's reason.
     Rejected(String),
     /// A usage error or version mismatch: an adapter bug, never a rejection.
@@ -187,6 +191,10 @@ pub fn version() -> Result<String> {
         Outcome::Ok(other) => Err(Error::new(
             "mote_version",
             format!("unrecognized version output: {other}"),
+        )),
+        Outcome::Reported { exit_code, data } => Err(Error::new(
+            "mote_unavailable",
+            format!("mote --version returned a failure receipt ({exit_code:?}): {data}"),
         )),
         Outcome::Rejected(e) | Outcome::Invalid(e) | Outcome::Failed(e) => {
             Err(Error::new("mote_unavailable", e))
@@ -333,6 +341,20 @@ fn kill_group(pgid: u32) {
 /// exit 2 is a result.
 pub fn classify(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
     let parsed = parse(stdout);
+    // Strict Mote commands report failed or interrupted mutations as JSON,
+    // including cases where Git already changed. A reason string alone would
+    // discard the recovery evidence or the replacement holder/token. Usage
+    // errors (exit 3) and legacy rejections keep their existing classification.
+    if !matches!(code, Some(0 | 3)) {
+        if let Ok(data) = &parsed {
+            if data.is_object() && data["outcome"].as_str().is_some_and(|s| !s.is_empty()) {
+                return Outcome::Reported {
+                    exit_code: code,
+                    data: data.clone(),
+                };
+            }
+        }
+    }
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
