@@ -1,0 +1,24 @@
+{
+  "files": {
+    "README.md": "38be5f495eadfddc3d28ddb8a6eccd941dc44309c1454910ffb0cdce27379194",
+    "astra-mote-review.md": "d97fd8f112e533f09612d833e7626f5921a399448ae100ea475fdf499541887f",
+    "dispatch-real-02.log.gz": "01e8b137a0baa1176a6f9c98ff022321ace6cd10786f94ad308746a681aac10c",
+    "dispatch-real-02.log.meta.json": "b257d3f40d582a9e39a6eba9c9d78b30baeeee27f8bcf4cfdeb62a4c189de93b",
+    "fray-full.log.gz": "a3715b59648ec9ae70365bb415d67be94e08df9ac380030d77be2e2fa8d2157b",
+    "fray-full.log.meta.json": "bb0fa30f11eeb0acda83bc69ec8d5bbd0b9248d634dec0f972fcdd4ad3717705",
+    "fray-python-02.log.gz": "1abb76a960af280b9c7a4bd5fef8f1c2ff336b85f0b3bbd71bdf5b304c396dcf",
+    "fray-python-02.log.meta.json": "55a1044468fa5666b5d42a62f1efd7c6bf41da7ca0a6a6449093affa5065da91",
+    "fray-required-02.log.gz": "abbd5b295c0f2e53faed029800a9429fb06a0e850eaf8a474ae22af53186c9f3",
+    "fray-required-02.log.meta.json": "1c8fb9bb817c3f300b613f0ce5428ef94c13092c574adeb978739ab367195fd8",
+    "mote-b114f4b.patch.gz": "70b04609e7c48ca0d018178bf40a260fc2f1936d35907afb0f998b04e8bc1f7d",
+    "mote-full.log.gz": "3f556ba2a9c6db794b5c48a0d1798631ce36ba8c3e01256781410af5ee70d79f",
+    "mote-full.log.meta.json": "24c19aa2c27b7c02523cd89895e1a79bf002f87e783f70113ae7e1f0f18c4f07",
+    "mote-required.log.gz": "a53aa2923e7d575108103b852d3ac36a0e4b104e071f3af2536b2e9d3f43286f",
+    "mote-required.log.meta.json": "571f5d395c422c5d024257fd68d15c843294d594de511645dcc4d967a67c8333",
+    "mote-targeted.log.gz": "547cd22062fe16489d148e83e579466aff4691a65a67eca0f36128db0015f4d5",
+    "mote-targeted.log.meta.json": "3eeeb3fd011ecc5a87eafb949c8552958d1a73223ef98a3eb851f6ccd7e0f39b",
+    "original-astra-review.md": "edf8d2f53ff2300129d3a4ef55ce112c7a6bf13dea9b5494e66391a9ed51f9a3",
+    "provenance.json": "b05f05aed36301658b074425238a959e97d0f79b271be9c3ae6f31cad2f4f324",
+    "source-inputs.json": "22f6349c13e84cff5c189ba4694d032bf0bef90efdbb4a653bc2a87613211fb9"
+  }
+}

@@ -546,6 +546,68 @@ pub fn claim_transitions(events: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Identify same-sync claim transitions still current in a fresh, admission-
+/// ordered read. Holder equality alone cannot distinguish an unseen ABA cycle.
+/// This is attention deduplication evidence, never an ownership fence.
+pub fn claim_coverage(
+    consumed: &[Value],
+    verified: &[Value],
+) -> std::collections::BTreeMap<String, String> {
+    use std::collections::BTreeMap;
+    let mut wanted = BTreeMap::new();
+    for c in claim_transitions(consumed) {
+        if let (Some(entity), Some(op), Some(holder)) =
+            (c["entity"].as_str(), c["op_id"].as_str(), c["to"].as_str())
+        {
+            wanted.insert(entity.to_owned(), (op.to_owned(), holder.to_owned()));
+        } else if let Some(entity) = c["entity"].as_str() {
+            wanted.remove(entity);
+        }
+    }
+    let mut latest = BTreeMap::new();
+    for event in verified {
+        let (Some(kind), Some(entity), Some(op), Some(event_id)) = (
+            event["type"].as_str(),
+            event["data"]["entity"].as_str(),
+            event["op_id"].as_str(),
+            event["event_id"].as_str(),
+        ) else {
+            return BTreeMap::new();
+        };
+        if event_id != op {
+            // Projected deadlines are not raw admission tokens.
+            continue;
+        }
+        match kind {
+            "claim.acquired" | "claim.transferred" => {
+                latest.insert(
+                    entity.to_owned(),
+                    event["data"]["to"]
+                        .as_str()
+                        .map(|holder| (op.to_owned(), holder.to_owned())),
+                );
+            }
+            "issue.noted"
+            | "issue.tag_added"
+            | "issue.tag_removed"
+            | "issue.dependency_added"
+            | "issue.dependency_removed"
+            | "issue.relationship_added"
+            | "issue.relationship_removed" => {}
+            _ => {
+                latest.insert(entity.to_owned(), None);
+            }
+        }
+    }
+    wanted
+        .into_iter()
+        .filter_map(|(entity, transition)| {
+            (latest.get(&entity).and_then(Option::as_ref) == Some(&transition))
+                .then_some((entity, transition.0))
+        })
+        .collect()
+}
+
 /// Candidate events after which the candidate leaves the pending list.
 pub fn terminal_candidates(events: &[Value]) -> Vec<String> {
     let mut ids: Vec<String> = events

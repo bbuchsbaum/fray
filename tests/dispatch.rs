@@ -332,3 +332,49 @@ fn offer_expiry_routes_next_peer_and_handoff_packet_retries_are_exact() {
         assert_eq!(retry, completed);
     }
 }
+
+#[test]
+fn handoff_acceptance_checks_recipient_and_all_terminal_card_states() {
+    for status in ["withdrawn", "resolved", "superseded"] {
+        let mut s = fixture();
+        let id = offer(&mut s, 300)["id"].clone();
+        let packet = call(
+            &mut s,
+            "writer",
+            "dispatch_handoff_packet",
+            json!({"source_card":id,"to":"alice","issue":"work","key":"packet","holder":"writer","claim_token":"old","state":"partial","next":"finish","evidence":[],"carriers":[]}),
+        );
+        let check = json!({"id":packet["id"],"for_accept":true});
+        assert_eq!(
+            run(&mut s, "bob", "dispatch_handoff_get", check.clone(), NOW)
+                .unwrap_err()
+                .code,
+            "not_recipient"
+        );
+        assert_eq!(
+            call(&mut s, "alice", "dispatch_handoff_get", check.clone())["accept_checked"],
+            true
+        );
+        call(
+            &mut s,
+            "writer",
+            "patch",
+            json!({"id":packet["id"],"expect":1,"status":status}),
+        );
+        assert_eq!(
+            run(&mut s, "alice", "dispatch_handoff_get", check, NOW)
+                .unwrap_err()
+                .code,
+            "closed"
+        );
+        assert_eq!(
+            call(
+                &mut s,
+                "alice",
+                "dispatch_handoff_get",
+                json!({"id":packet["id"]})
+            )["card_status"],
+            status
+        );
+    }
+}

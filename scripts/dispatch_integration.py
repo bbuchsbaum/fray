@@ -37,6 +37,7 @@ with tempfile.TemporaryDirectory(prefix="fray-dispatch-court-",dir="/tmp") as td
   board=mote("writer","board");claim=[c for c in board["active_claims"] if c["id"]=="work"];assert len(claim)==1 and claim[0]["claimed_by"]==winner
   assert len([e for e in mote("writer","history","work") if e["kind"]=="claim" and e["accepted"]])==1
   checks.append("two concurrent explicit accepts produce exactly one current Mote winner and one claim publication")
+  fray(winner,"mote","sync")
   # Carrier stays live under the sender through transfer and close/adopt.
   mote(winner,"new","--id","carrier","Carrier");mote(winner,"claim","carrier","--ttl","600")
   rv=mote(winner,"reserve","--issue","carrier","--ttl","600","src/work.rs")["reservation_id"]
@@ -47,6 +48,12 @@ with tempfile.TemporaryDirectory(prefix="fray-dispatch-court-",dir="/tmp") as td
   packet=str(transferred["result"]["packet"]["id"])
   assert transferred["state"]=="completed"
   checks.append("post-admission handoff failure remains pending; exact-key resume confirms transfer while sender carrier stays reserved")
+  synchronized=fray(winner,"mote","sync")
+  def work_notices(actor):return [i["card"] for i in fray(actor,"inbox","--selection","all")["items"] if i["card"]["author"]=="mote" and "mote:work" in i["card"]["tags"]]
+  received=work_notices(recipient);assert len(received)==1 and received[0]["title"]=="Mote: "+winner+" handed you work",(synchronized,received)
+  assert not work_notices(winner)
+  assert not fray(winner,"mote","sync")["mote_sync"]["created"]
+  checks.append("real admitted handoff emits exactly one recipient notice, no sender reconciliation notice, and quiet retry")
   # Interrupt closure before publication. Mote's publication journal and
   # Fray's exact request are recovered on the recipient's next resume.
   first=fray(recipient,"--key","adopt","accept",packet,success=False,extra={"MOTE_TEST_AUTHORITY_FAIL":"publication-prepared"})
@@ -59,6 +66,44 @@ with tempfile.TemporaryDirectory(prefix="fray-dispatch-court-",dir="/tmp") as td
   again=fray(recipient,"operation","resume","adopt");assert again["state"]=="completed"
   assert mote(recipient,"who-has","src/work.rs")[0]["lease_until_ts"]==lease
   checks.append("interrupted carrier close/adopt resumes with no observed unreserved interval; repeated adoption resume does not renew")
+  # Cancellation before acceptance, between mutations, and after all ownership
+  # steps committed has different outcomes. Each fixture uses its own work.
+  for phase in ("before", "after_close", "after_adopt"):
+   work="cancel-"+phase;carrier="carrier-cancel-"+phase;path="src/cancel-"+phase
+   mote(winner,"new","--id",work,"Cancellation court");mote(winner,"claim",work,"--ttl","600")
+   source=fray(winner,"send",recipient,"Cancellation court","--ref","mote:"+work)["card"]["id"]
+   mote(winner,"new","--id",carrier,"Carrier");mote(winner,"claim",carrier,"--ttl","600")
+   reservation=mote(winner,"reserve","--issue",carrier,"--ttl","600",path)["reservation_id"]
+   transfer=fray(winner,"--key","transfer-"+phase,"handoff",str(source),"--to",recipient,"--state","Partial","--next","Finish","--carrier",carrier+"="+reservation)
+   packet_id=str(transfer["result"]["packet"]["id"])
+   extra={}
+   if phase=="before":fray(winner,"patch",packet_id,"--expect","1","--status","withdrawn")
+   else:
+    wrapper=root/("cancel-"+phase)
+    patch=[FRAY,"--home",str(home),"--as",winner,"--json","patch",packet_id,"--expect","1","--status","withdrawn"]
+    trigger="close" if phase=="after_close" else "adopt"
+    wrapper.write_text("#!/usr/bin/env python3\nimport subprocess,sys\na=sys.argv[1:]\np=subprocess.run(["+repr(MOTE)+",*a],capture_output=True)\nsys.stdout.buffer.write(p.stdout);sys.stderr.buffer.write(p.stderr)\nif "+repr(trigger)+" in a and "+repr(carrier if phase=="after_close" else reservation)+" in a and p.returncode==0:\n subprocess.run("+repr(patch)+",check=True,stdout=subprocess.DEVNULL)\nsys.exit(p.returncode)\n")
+    wrapper.chmod(0o755);extra={"FRAY_MOTE_BIN":str(wrapper)}
+   key="accept-cancel-"+phase
+   result=fray(recipient,"--key",key,"accept",packet_id,success=phase=="after_adopt",extra=extra)
+   held=mote(recipient,"who-has",path)[0]
+   assert fray(recipient,"show",packet_id)["card"]["status"]=="withdrawn"
+   if phase=="after_adopt":
+    assert result["state"]=="completed" and result["result"]["historical_receipt"] is True,result
+    assert held["actor"]==recipient and held["entity"]==work,held
+    lease=held["lease_until_ts"]
+    retry=fray(recipient,"operation","resume",key);assert retry["historical_receipt"] is True,retry
+    assert mote(recipient,"who-has",path)[0]["lease_until_ts"]==lease
+   else:
+    assert result["error"]["code"]=="closed",result
+    assert held["actor"]==winner and held["entity"]==carrier,held
+    assert mote(recipient,"show",carrier)["status"]==("open" if phase=="before" else "closed")
+    if phase=="after_close":
+     before_history=mote(recipient,"history",carrier)
+     retry=fray(recipient,"operation","resume",key,success=False);assert retry["error"]["code"]=="closed",retry
+     assert mote(recipient,"history",carrier)==before_history
+   rejected=fray(recipient,"--key","new-"+key,"accept",packet_id,success=False);assert rejected["error"]["code"]=="closed",rejected
+   checks.append("withdrawal "+phase+" refuses new ownership mutations and preserves already committed results")
   # A public-CLI wrapper admits a competing adoption after carrier closure,
   # or lets its live TTL expire. It touches only this disposable fixture.
   for loss in ("competitor","expiry"):

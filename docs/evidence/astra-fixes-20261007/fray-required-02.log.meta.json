@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T10:43:09.604179+00:00",
+  "finished_utc": "2026-10-07T10:43:18.255318+00:00",
+  "duration_seconds": 8.651025,
+  "command": [
+    "bash",
+    "-c",
+    "set -e; cargo fmt --all --check; cargo check --locked --offline --all-targets; cargo clippy --locked --offline --all-targets -- -D warnings; cargo build --locked --offline; python3 scripts/check_sql.py; cargo test --locked --offline --test mote_admission; git diff --check"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-astra-fixes-20261007/fray-required-02.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 240.0,
+  "log_bytes": 2793
+}

@@ -13,6 +13,7 @@ if a==["authority","status"]:out({"schema":"mote.authority-status.v1","store_id"
 if a[0]=="events":
  if s.get("timeout"):time.sleep(30)
  kinds=a[a.index("--kind")+1].split(",") if "--kind" in a else []
+ if kinds==["claim","issue"] and s.get("verify_fail"):print("verification read unavailable",file=sys.stderr);sys.exit(3)
  events=s["events"]
  if "--after" in a:
   after=a[a.index("--after")+1];ids=[e["event_id"] for e in events];events=events[ids.index(after)+1:] if after in ids else []
@@ -23,7 +24,7 @@ if a[0]=="board":out({"active_claims":[{"id":"work","claimed_by":s["holder"],"le
 if a[:2] in (["candidate","list"],["msg","requests"],["actor","list"]):out([])
 print("unexpected feed command",a,file=sys.stderr);sys.exit(3)
 '''
-def raw(oid,to):return {"event_id":oid,"op_id":oid,"type":"claim.acquired","actor":to,"ts":"2026-01-01T00:00:00Z","data":{"entity":"work","to":to}}
+def raw(oid,to,by=None):return {"event_id":oid,"op_id":oid,"type":"claim.transferred" if by else "claim.acquired","actor":by or to,"ts":"2026-01-01T00:00:00Z","data":{"entity":"work","to":to}}
 with tempfile.TemporaryDirectory(prefix="fray-feed-",dir="/tmp") as tmp:
  root=pathlib.Path(tmp);home=root/"board";store=root/".mote";store.mkdir();(store/"FORMAT.json").write_text(json.dumps({"store_id":"st-feed"}))
  stub=root/"mote";stub.write_text(STUB);stub.chmod(0o755);state_path=root/"feed.json"
@@ -53,10 +54,18 @@ with tempfile.TemporaryDirectory(prefix="fray-feed-",dir="/tmp") as tmp:
   state["events"].append(projection);save();warn=sync();assert warn["mote_sync"]["created"] and meta()["mote_cursor"]==state["events"][0]["op_id"],warn
   quiet=sync();assert not quiet["mote_sync"]["created"],quiet
   checks.append("due projection behind future raw cursor reaches holder once without advancing anchor")
-  state["events"].append(raw("20000101T000000.000000Z-late","bob"));state["holder"]="bob";save()
+  state["events"].append(raw("20000101T000000.000000Z-late","bob","alice"));state["holder"]="bob";save()
   moved=sync();assert moved["mote_sync"]["events"]==2 and meta()["mote_cursor"]==state["events"][-1]["op_id"],moved
+  assert len(moved["mote_sync"]["created"])==1,moved
   assert not sync()["mote_sync"]["created"]
   checks.append("later admitted earlier-spelled claim advances feed anchor and remains quiet on retry")
+  state["events"].append(raw("19990101T000000.000000Z-next","alice","bob"));state["holder"]="alice";state["verify_fail"]=True;save()
+  # Alice's original current-holder state key already exists: ordinary
+  # reconciliation deduplicates it while still notifying the previous holder.
+  fallback=sync();assert len(fallback["mote_sync"]["created"])==2 and fallback["mote_sync"]["duplicate"]==1 and "verification unavailable" in fallback["mote_sync"]["reconcile_note"],fallback
+  assert any(i["card"]["title"]=="Mote: work is now held by alice" for i in fray("bob","inbox","--selection","all")["items"])
+  state.pop("verify_fail");save();assert not sync()["mote_sync"]["created"]
+  checks.append("verification read failure retains ordinary reconciliation and discloses conservative fallback")
   before=meta();state["timeout"]=True;save()
   for _ in range(3):
    failed=sync(success=False,extra={"FRAY_MOTE_READ_TIMEOUT_MS":"200"});assert "no UTC reseed" in failed["error"]["message"],failed

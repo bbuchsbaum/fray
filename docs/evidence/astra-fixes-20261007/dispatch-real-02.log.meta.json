@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T10:39:42.130963+00:00",
+  "finished_utc": "2026-10-07T10:39:59.433522+00:00",
+  "duration_seconds": 17.302405,
+  "command": [
+    "python3",
+    "scripts/dispatch_integration.py",
+    "target/debug/fray",
+    "/private/tmp/mote-fray-prerequisites/target/debug/mote"
+  ],
+  "cwd": "/private/tmp/fray-outstanding-motes",
+  "log": "/private/tmp/fray-astra-fixes-20261007/dispatch-real-02.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 180.0,
+  "log_bytes": 1342
+}

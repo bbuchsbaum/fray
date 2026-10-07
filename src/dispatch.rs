@@ -29,7 +29,27 @@ pub fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "dispatch_candidates" => Ok(
             json!({"agents":eligible(conn,&req.actor,string(&req.args,"tag")?,req.args.get("id").and_then(Value::as_i64),now)?}),
         ),
-        "dispatch_handoff_get" => handoff_get(conn, integer(&req.args, "id")?),
+        "dispatch_handoff_get" => {
+            check_fields(&req.args, &["id", "for_accept"])?;
+            let id = integer(&req.args, "id")?;
+            let mut packet = handoff_get(conn, id)?;
+            if req.args["for_accept"] == true {
+                if packet["payload"]["to"] != req.actor {
+                    return Err(Error::new(
+                        "not_recipient",
+                        "only intended recipient can accept this packet",
+                    ));
+                }
+                if store::get_card(conn, id)?.terminal() {
+                    return Err(Error::new(
+                        "closed",
+                        "handoff packet is terminal; no new ownership mutations are permitted",
+                    ));
+                }
+                packet["accept_checked"] = json!(true);
+            }
+            Ok(packet)
+        }
         "dispatch_attempt_live" => {
             Ok(json!({"live":attempt_live(conn,&get(conn,integer(&req.args,"id")?)?,now)?}))
         }
@@ -492,8 +512,9 @@ fn handoff_get(conn: &Connection, id: i64) -> Result<Value> {
         .optional()?;
     let (payload, status, receipt) =
         row.ok_or_else(|| Error::new("not_found", "not a handoff packet card"))?;
+    let card = store::get_card(conn, id)?;
     Ok(
-        json!({"id":id,"payload":serde_json::from_str::<Value>(&payload)?,"status":status,"receipt":receipt.map(|s|serde_json::from_str::<Value>(&s)).transpose()?}),
+        json!({"id":id,"payload":serde_json::from_str::<Value>(&payload)?,"status":status,"card_status":card.status,"receipt":receipt.map(|s|serde_json::from_str::<Value>(&s)).transpose()?}),
     )
 }
 fn handoff_record(conn: &Connection, req: &Request, now: i64) -> Result<Value> {

@@ -17,7 +17,7 @@ fn public_admission_feed_compatibility_court() {
         String::from_utf8_lossy(&out.stderr)
     );
     let result: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(result["passed"], 5);
+    assert_eq!(result["passed"], 6);
 }
 fn call(s: &mut Store, actor: &str, op: &str, args: Value) -> Value {
     s.execute_at(&Request::new(op, actor, args), 1000).unwrap()
@@ -176,4 +176,124 @@ fn holder_checked_handoff_event_is_a_claim_transition() {
     let transitions = mote::claim_transitions(events.as_array().unwrap());
     assert_eq!(transitions.len(), 1);
     assert_eq!(transitions[0]["to"], "bob");
+}
+
+fn transferred(op: &str, entity: &str, to: &str) -> Value {
+    json!({"type":"claim.transferred","actor":"alice","event_id":op,"op_id":op,"data":{"entity":entity,"to":to}})
+}
+
+#[test]
+fn claim_coverage_uses_admission_identity_and_rejects_unseen_cycles() {
+    let e = transferred("z", "work", "bob");
+    let late = transferred("a", "work", "carol");
+    assert_eq!(
+        mote::claim_coverage(&[e.clone(), late.clone()], &[e.clone(), late.clone()])["work"],
+        "a"
+    );
+    let other = transferred("other", "different-work", "carol");
+    assert_eq!(
+        mote::claim_coverage(std::slice::from_ref(&e), &[e.clone(), other])["work"],
+        "z"
+    );
+    for verified in [
+        vec![],
+        vec![late.clone()],
+        vec![e.clone(), late, transferred("b", "work", "bob")],
+        vec![
+            e.clone(),
+            json!({"type":"issue.closed","event_id":"close","op_id":"close","data":{"entity":"work"}}),
+            json!({"type":"issue.patched","event_id":"open","op_id":"open","data":{"entity":"work"}}),
+        ],
+        vec![
+            e.clone(),
+            json!({"type":"claim.unknown","event_id":"unknown","op_id":"unknown","data":{"entity":"work"}}),
+        ],
+        vec![
+            e.clone(),
+            json!({"type":"claim.transferred","event_id":"bad","op_id":"bad","data":{}}),
+        ],
+    ] {
+        assert!(
+            mote::claim_coverage(std::slice::from_ref(&e), &verified).is_empty(),
+            "{verified:?}"
+        );
+    }
+}
+
+fn handoff_feed(s: &mut Store) {
+    ingest(
+        s,
+        1,
+        Value::Null,
+        json!("z"),
+        json!([{"entity":"work","to":"alice","by":"alice","op_id":"z","seed":true}]),
+    );
+    ingest(
+        s,
+        2,
+        json!("z"),
+        json!("a"),
+        json!([{"entity":"work","to":"bob","by":"alice","op_id":"a"}]),
+    );
+}
+
+#[test]
+fn verified_handoff_reconciles_snapshot_without_duplicate_attention() {
+    let mut s = fixture();
+    handoff_feed(&mut s);
+    let result = call(
+        &mut s,
+        "alice",
+        "mote_ingest",
+        json!({"store_id":"st-test","sync_revision":3,"after":"a","cursor":"a","items":[],"reconcile":[{"entity":"work","expect":"alice","holder":"bob","marker":"a","covered_by_feed":{"op_id":"a","cursor":"a"}}]}),
+    );
+    assert!(result["created"].as_array().unwrap().is_empty());
+    assert_eq!(
+        call(
+            &mut s,
+            "alice",
+            "mote_claims",
+            json!({"store_id":"st-test"})
+        )["holders"]["work"],
+        "bob"
+    );
+    let bob = call(&mut s, "bob", "inbox", json!({}));
+    assert_eq!(bob["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        bob["items"][0]["card"]["title"],
+        "Mote: alice handed you work"
+    );
+}
+
+#[test]
+fn stale_coverage_or_missing_recipient_notice_keeps_normal_reconciliation() {
+    for proof in [
+        json!({"op_id":"z","cursor":"a"}),
+        json!({"op_id":"a","cursor":"old"}),
+    ] {
+        let mut s = fixture();
+        handoff_feed(&mut s);
+        let result = call(
+            &mut s,
+            "alice",
+            "mote_ingest",
+            json!({"store_id":"st-test","sync_revision":3,"after":"a","cursor":"a","items":[],"reconcile":[{"entity":"work","expect":"alice","holder":"bob","marker":"snapshot","covered_by_feed":proof}]}),
+        );
+        assert_eq!(result["created"].as_array().unwrap().len(), 2);
+    }
+    let mut s = fixture();
+    ingest(
+        &mut s,
+        1,
+        Value::Null,
+        json!("self"),
+        json!([{"entity":"work","to":"bob","by":"bob","op_id":"self"}]),
+    );
+    let result = call(
+        &mut s,
+        "alice",
+        "mote_ingest",
+        json!({"store_id":"st-test","sync_revision":2,"after":"self","cursor":"self","items":[],"reconcile":[{"entity":"work","expect":null,"holder":"bob","marker":"snapshot","covered_by_feed":{"op_id":"self","cursor":"self"}}]}),
+    );
+    assert_eq!(result["created"].as_array().unwrap().len(), 1);
 }

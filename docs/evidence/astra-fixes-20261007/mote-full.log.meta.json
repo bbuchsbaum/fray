@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T10:38:35.827836+00:00",
+  "finished_utc": "2026-10-07T10:40:35.021762+00:00",
+  "duration_seconds": 119.19309,
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--all-targets"
+  ],
+  "cwd": "/private/tmp/mote-fray-prerequisites",
+  "log": "/private/tmp/fray-astra-fixes-20261007/mote-full.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 300.0,
+  "log_bytes": 37306
+}

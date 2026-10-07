@@ -451,6 +451,7 @@ fn accept_packet(context: &Context<'_>, packet: Value, key: &str) -> Result<Valu
     let op = if let Some(op) = existing(context, key, "dispatch_adopt", &explicit)? {
         op
     } else {
+        check_packet_acceptance(context, &packet["id"])?;
         context.prepare(
             key,
             "dispatch_adopt",
@@ -460,10 +461,26 @@ fn accept_packet(context: &Context<'_>, packet: Value, key: &str) -> Result<Valu
     execute_adopt(context, op)
 }
 
+fn check_packet_acceptance(context: &Context<'_>, id: &Value) -> Result<()> {
+    let checked = context.rpc("dispatch_handoff_get", json!({"id":id,"for_accept":true}))?;
+    if checked["accept_checked"] != true {
+        return Err(Error::new(
+            "unsupported",
+            "daemon did not validate handoff acceptance; upgrade it before mutating Mote",
+        ));
+    }
+    Ok(())
+}
+
 fn execute_adopt(context: &Context<'_>, op: Value) -> Result<Value> {
     let packet_id = op["payload"]["packet"]["id"].clone();
     let result = execute_adopt_steps(context, op);
     if let Err(error) = &result {
+        // Cancellation is not an ownership observation. Preserve the journal
+        // and any committed results without re-notifying withdrawn work.
+        if error.code == "closed" {
+            return result;
+        }
         // Preserve partial progress as attention even if a readback fails.
         // The exact operation journal remains the recovery source.
         let status = if error.code == "reservation_lost" {
@@ -482,6 +499,7 @@ fn execute_adopt(context: &Context<'_>, op: Value) -> Result<Value> {
 fn execute_adopt_steps(context: &Context<'_>, mut op: Value) -> Result<Value> {
     context.validate_resume(&op)?;
     if op["state"] == "completed" {
+        op["historical_receipt"] = json!(true);
         return Ok(op);
     }
     let packet = op["payload"]["packet"].clone();
@@ -526,6 +544,7 @@ fn execute_adopt_steps(context: &Context<'_>, mut op: Value) -> Result<Value> {
                 &step,
                 json!({"argv":argv,"reservation_before":current}),
             )?;
+            check_packet_acceptance(context, &packet["id"])?;
             let outcome = context.mutate(&argv);
             op = context.checkpoint(
                 &op,
@@ -586,6 +605,7 @@ fn execute_adopt_steps(context: &Context<'_>, mut op: Value) -> Result<Value> {
             )?;
             argv
         };
+        check_packet_acceptance(context, &packet["id"])?;
         let outcome = context.mutate(&argv);
         op = context.checkpoint(
             &op,
@@ -620,8 +640,15 @@ fn execute_adopt_steps(context: &Context<'_>, mut op: Value) -> Result<Value> {
             ));
         }
     }
-    context.rpc("dispatch_handoff_record",json!({"id":packet["id"],"status":"completed","receipt":{"claim":final_claim,"reservations":adopted}}))?;
-    context.finalize(&op,json!({"confirmed":true,"packet_id":packet["id"],"claim_observation":final_claim,"reservations":adopted,"continuity":"observed live before each step; never unreserved"}))
+    // All ownership steps are already observed committed. Cancellation can
+    // stop later mutations, but cannot erase these historical results.
+    let current_packet = context.rpc("dispatch_handoff_get", json!({"id":packet["id"]}))?;
+    let historical = matches!(
+        current_packet["card_status"].as_str(),
+        Some("withdrawn" | "resolved" | "superseded")
+    );
+    context.rpc("dispatch_handoff_record",json!({"id":packet["id"],"status":"completed","receipt":{"claim":final_claim,"reservations":adopted,"historical_receipt":historical}}))?;
+    context.finalize(&op,json!({"confirmed":true,"packet_id":packet["id"],"claim_observation":final_claim,"reservations":adopted,"historical_receipt":historical,"continuity":"observed live before each step; never unreserved"}))
 }
 
 pub fn resume(context: &Context<'_>, key: &str) -> Result<Value> {

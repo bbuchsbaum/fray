@@ -1,7 +1,7 @@
 # Design: the Mote adapter contract
 
-Status: revision 6, locally qualified on 2026-10-06. Mote prerequisites are
-`a86803de31e890ac6e4331c9961705cabcde2fcb`; the package version alone does not
+Status: revision 7, local fixes qualified on 2026-10-07. Mote prerequisites are
+`b114f4b731a9f6836116054df7084a7dff0e90e7`; the package version alone does not
 identify these capabilities. See [validation](../VALIDATION.md) and the
 [historical upstream findings](../MOTE_CAPABILITY_GAPS.md).
 
@@ -88,6 +88,17 @@ Mote's returned event order. Raw ids are anchors, not lexical timestamps.
 Cursor and revision CAS, claim-event identity deduplication and card writes commit
 together. Snapshot reconciliation has separate claim state, so it cannot invent
 reverse feed transitions when it runs ahead of the feed.
+
+After reading the live board, a fresh `claim,issue` event read from the sync's
+original admission anchor verifies which exact same-sync claim transitions
+remain current. A later claim or issue status operation disqualifies coverage,
+including holder and close/reopen cycles. Verification does not advance the
+cursor. Reconciliation retains its snapshot CAS and update, but skips redundant
+notices only when the current feed token/holder, consumed cursor and delivered
+recipient card all match. Failed verification or an older daemon retains ordinary
+reconciliation. A crash between feed ingest and reconciliation can conservatively
+produce a later reconciliation notice; this is same-sync suppression, not a
+durable cross-restart association. These observations are not ownership fences.
 
 The first admitted sync quietly seeds both claim views from a filtered public
 history and stores the last raw op id; an empty seed has an initialized nullable
@@ -193,6 +204,16 @@ then checking ownership/path continuity. The client never unreserves these paths
 An interrupted close/adopt resumes from saved observations; already adopted
 reservations are not renewed. Final work and reservation readbacks precede
 completion. Older sender retries cannot erase completed adoption evidence.
+
+New acceptance of a withdrawn, resolved or superseded packet is refused by the
+daemon before preparing adoption. The client requires explicit validation and
+rechecks before each new carrier-close or adoption mutation, including resume.
+Withdrawal between steps stops future mutations; already committed closure or
+adoption is retained and its journal remains available. Once all ownership steps
+have committed, readback/finalization may finish as a historical receipt even
+after withdrawal. Completed retries do not renew leases. A concurrent withdrawal
+cannot roll back an already-started Mote mutation; this is a recoverable sequence
+with cancellation checks, not an atomic transaction spanning both stores.
 
 Continuity holds only while the carrier lease stays live. A competing adoption,
 expiry or changed path set reports loss, with urgent attention for both parties,

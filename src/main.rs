@@ -1691,6 +1691,29 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     );
     match (board, known) {
         (mote::Outcome::Ok(board), Ok(known)) => {
+            // Verify after the board read, from this sync's original cursor.
+            // Matching names cannot exclude unseen holder/status cycles. This
+            // observation never advances the cursor or changes the feed view.
+            let mut coverage = std::collections::BTreeMap::new();
+            if admission && !mote::claim_transitions(&events).is_empty() {
+                if known["coverage_supported"] == true {
+                    let verification_args = if cursor.is_empty() {
+                        vec!["events", "--kind", "claim,issue"]
+                    } else {
+                        vec!["events", "--after", &cursor, "--kind", "claim,issue"]
+                    };
+                    match mote::run(&store, None, &verification_args, mote::read_timeout()) {
+                        mote::Outcome::Ok(Value::Array(verified)) => {
+                            coverage = mote::claim_coverage(&events, &verified);
+                        }
+                        other => {
+                            reconcile_note = json!(format!("claim verification unavailable; ordinary reconciliation retained: {other:?}"));
+                        }
+                    }
+                } else {
+                    reconcile_note = json!("duplicate-notice suppression unavailable with this daemon; ordinary reconciliation retained");
+                }
+            }
             let mut live: std::collections::BTreeMap<String, (String, String)> =
                 std::collections::BTreeMap::new();
             for c in board["active_claims"].as_array().into_iter().flatten() {
@@ -1716,8 +1739,12 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
                     None => (None, ""),
                 };
                 if had != now {
-                    entries.push(json!({"entity":entity,"expect":had,"holder":now,
-                        "lease_until":lease,"marker":marker}));
+                    let mut entry = json!({"entity":entity,"expect":had,"holder":now,
+                        "lease_until":lease,"marker":marker});
+                    if let Some(op_id) = coverage.get(entity) {
+                        entry["covered_by_feed"] = json!({"op_id":op_id,"cursor":after});
+                    }
+                    entries.push(entry);
                 }
             }
             for chunk in entries.chunks(100) {

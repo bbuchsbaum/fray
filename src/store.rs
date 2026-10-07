@@ -2408,7 +2408,17 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
             };
             let mut raced = Vec::new();
             for r in &reconcile {
-                check_fields(r, &["entity", "expect", "holder", "lease_until", "marker"])?;
+                check_fields(
+                    r,
+                    &[
+                        "entity",
+                        "expect",
+                        "holder",
+                        "lease_until",
+                        "marker",
+                        "covered_by_feed",
+                    ],
+                )?;
                 let entity = string(r, "entity")?;
                 text(entity, "entity", 200, false)?;
                 let marker = string(r, "marker")?;
@@ -2425,10 +2435,27 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                     raced.push(entity.to_owned());
                     continue;
                 }
+                let mut covered = false;
+                if !r["covered_by_feed"].is_null() {
+                    let proof = &r["covered_by_feed"];
+                    check_fields(proof, &["op_id", "cursor"])?;
+                    let op_id = string(proof, "op_id")?;
+                    if admission
+                        && proof["cursor"].as_str() == current.as_deref()
+                        && holder.is_some()
+                    {
+                        // Check both the feed's exact final transition and its
+                        // delivered recipient card under the snapshot CAS.
+                        covered = conn.query_row("SELECT EXISTS(SELECT 1 FROM mote_feed_claims f JOIN mote_events e ON e.store_id=f.store_id AND e.key=? AND e.recipient=f.holder AND e.card_id IS NOT NULL WHERE f.store_id=? AND f.entity=? AND f.op_id=? AND f.holder=?)",params![format!("claim:{entity}:{op_id}"),store_id,entity,op_id,holder],|row| row.get(0))?;
+                    }
+                }
                 conn.execute(
                     "INSERT INTO mote_claims(store_id,entity,holder,op_id) VALUES(?1,?2,?3,?4) ON CONFLICT(store_id,entity) DO UPDATE SET holder=excluded.holder,op_id=excluded.op_id",
                     params![store_id, entity, holder, marker],
                 )?;
+                if covered {
+                    continue;
+                }
                 // A release or expiry the feed missed is recorded quietly:
                 // nobody is told anything that might be false.
                 let Some(holder) = holder else { continue };
@@ -3283,7 +3310,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
                 .take(10_000)
                 .map(|(e, h)| (e, json!(h)))
                 .collect();
-            Ok(json!({"holders":holders,"more":more}))
+            Ok(json!({"holders":holders,"more":more,"coverage_supported":true}))
         }
         "stats" => {
             check_fields(a, &["window_ms"])?;

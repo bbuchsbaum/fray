@@ -1,5 +1,40 @@
 # Validation
 
+## Fresh Astra review corrections (2026-10-07)
+
+The fresh review objected to Mote `a86803de` and Fray `3b1ae994` on three
+reproduced cases. Mote successor `b114f4b` preserves a pending publication
+before reusing its writer and stops compound `begin` on note/compensation
+publication errors. Two recovery regression courts cover admission order and
+refusal without replacing an unrecoverable journal. Its full suite passed
+425 tests with two pre-existing ignored; formatting, Clippy and rustdoc passed.
+
+Fray now checks the recipient and terminal packet state before preparing
+adoption and before each new close/adopt mutation, including resume. Cancellation
+retains previously committed ownership results; completed retries are historical
+and do not renew leases. A fresh admission-ordered observation proves which
+same-sync transitions cover reconciliation attention. Exact feed token/holder,
+cursor, delivered-card checks and snapshot CAS preserve ordinary reconciliation
+for later changes, unseen holder/status cycles, missing coverage or read failure.
+The two claim projections remain separate.
+
+Fray passed 456 Rust tests, the 96 required Python transport tests, formatting,
+locked all-target checking, Clippy and build. The independent SQL scanner prepared
+238 statements and passed 22 invariants. Ten real disposable dispatch/handoff
+cases include cancellation before acceptance, between close/adopt, after committed
+adoption and exact-once same-sync handoff attention. The affected admission suite
+passed again after test-only lint corrections. Raw logs, the original OBJECT
+report, product input hashes and a lossless local Mote patch are retained in the
+[correction evidence](evidence/astra-fixes-20261007/manifest.json).
+
+This is local qualification. No installation, shared daemon restart, original-store
+authority migration, hosted CI, push, native host or paid trial is claimed. The
+previous frozen soak does not qualify this binary. Duplicate suppression is
+same-sync: a crash between ingestion and reconciliation can still produce a
+conservative later notice. Cancellation cannot roll back an already-started Mote
+mutation; committed results remain inspectable. Exact successor peer verdicts
+are recorded through Fray review #109 and the corresponding Mote issue histories.
+
 ## Local Mote authority workflows (2026-10-06)
 
 Mote prerequisites are independently approved local commit

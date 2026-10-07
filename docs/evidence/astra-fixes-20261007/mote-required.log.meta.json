@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-10-07T10:41:43.771818+00:00",
+  "finished_utc": "2026-10-07T10:41:57.635811+00:00",
+  "duration_seconds": 13.86387,
+  "command": [
+    "bash",
+    "-c",
+    "set -e; cargo fmt --all --check; cargo clippy --locked --offline --all-targets -- -D warnings; RUSTDOCFLAGS=\"-D warnings\" cargo doc --locked --offline --no-deps; git diff --check"
+  ],
+  "cwd": "/private/tmp/mote-fray-prerequisites",
+  "log": "/private/tmp/fray-astra-fixes-20261007/mote-required.log",
+  "exit_code": 0,
+  "child_returncode": 0,
+  "reason": "exited",
+  "detail": null,
+  "timeout_seconds": 240.0,
+  "log_bytes": 831
+}

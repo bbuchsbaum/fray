@@ -1,0 +1,67 @@
+{
+  "fray_base": "3b1ae994d1f7b4578c8d0f6979e6d1b4f2f7ffce",
+  "mote_base": "a86803de31e890ac6e4331c9961705cabcde2fcb",
+  "mote_source_sha": "b114f4b731a9f6836116054df7084a7dff0e90e7",
+  "mote_patch_raw_sha256": "e91a7132814966429c0e75915a4f71481b99f3a61010dcf1a68a5a1b70fe7dd1",
+  "rust": {
+    "mote": {
+      "passed": 425,
+      "failed": 0,
+      "ignored": 2,
+      "targets": 43
+    },
+    "fray": {
+      "passed": 456,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 50
+    }
+  },
+  "python_suites": [
+    23,
+    38,
+    28,
+    7
+  ],
+  "real_dispatch_cases": 10,
+  "sql": {
+    "prepared": 238,
+    "invariants": 22
+  },
+  "limits": [
+    "Full Rust qualification preceded two test-only clone-to-slice lint changes; the affected admission suite passed again in fray-required-02.log.",
+    "Qualification logs precede the immutable Fray source commit; source-inputs.json binds their final product inputs.",
+    "No push, install, shared daemon restart, original-store authority migration, hosted CI, native host qualification or paid trials.",
+    "Admission duplicate suppression covers same-sync transitions; after a crash between ingestion and reconciliation, conservative later notices remain possible."
+  ],
+  "raw_logs": {
+    "mote-targeted.log": {
+      "archive": "mote-targeted.log.gz",
+      "sha256": "e71f9517090c3142a2722c189c4a28cf7f4f414f8925ed7467f96974c91ba3fb"
+    },
+    "mote-full.log": {
+      "archive": "mote-full.log.gz",
+      "sha256": "537d0d8d3a9d39c2494448a97bfc45cf815c10387f3077d870761009a3e0482b"
+    },
+    "mote-required.log": {
+      "archive": "mote-required.log.gz",
+      "sha256": "f0800481a047c97a21849beea2da3544aaabfb13c9e7355b2ee5e834d914065f"
+    },
+    "fray-full.log": {
+      "archive": "fray-full.log.gz",
+      "sha256": "b4073d790b3ce94dd3333f2be19f31515e7d4f861f568adc3c8b51813b3d9b55"
+    },
+    "fray-required-02.log": {
+      "archive": "fray-required-02.log.gz",
+      "sha256": "2783e81a1d97552e2c16e5a73b57ce780d38b2ca0d056f2ca2b52ea1949c91fa"
+    },
+    "fray-python-02.log": {
+      "archive": "fray-python-02.log.gz",
+      "sha256": "1aac1949a50b8b4101d8f448539c2b39ea2f2b1820e32a85e8c9ad8af2f88ca9"
+    },
+    "dispatch-real-02.log": {
+      "archive": "dispatch-real-02.log.gz",
+      "sha256": "320c88e750fbcb4eb1fda4fc25688c9d19bf642e97db3fcc4351df5b4dc60b6a"
+    }
+  }
+}
