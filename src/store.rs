@@ -2381,6 +2381,14 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                         "title":format!("Mote: {by} handed you {entity}"),
                         "summary":format!("{by} transferred the Mote claim on {entity} to you. Mote owns the claim: `mote show {entity}` for the work, and look for a Fray handoff packet from {by}."),
                         "priority":1,"refs":[entity]}));
+                } else if admission {
+                    // A holder's own claim owes them no card. Record that the
+                    // feed saw it, so same-sync reconciliation does not tell
+                    // them what they just did.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO mote_events(store_id,key,recipient) VALUES(?,?,?)",
+                        params![store_id, format!("claimself:{entity}:{op_id}"), to],
+                    )?;
                 }
                 // The previous holder hears when someone else moved their claim (a
                 // third-party handoff, or taking over one that expired), not when
@@ -2388,7 +2396,7 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                 if let Some(prev) = previous.flatten().filter(|p| p != to && p != by) {
                     items.push(json!({"key":key,"recipient":prev,
                         "title":format!("Mote: your claim on {entity} is now {to}'s"),
-                        "summary":format!("The Mote claim on {entity} you held (possibly expired) now belongs to {to}, by {by}. If that was not agreed, raise it with {by}; Mote does not check who hands a claim off."),
+                        "summary":format!("The Mote claim on {entity} you held (possibly expired) now belongs to {to}, by {by}. If that was not agreed, raise it with {by}."),
                         "priority":1,"refs":[entity]}));
                 }
             }
@@ -2445,8 +2453,9 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                         && holder.is_some()
                     {
                         // Check both the feed's exact final transition and its
-                        // delivered recipient card under the snapshot CAS.
-                        covered = conn.query_row("SELECT EXISTS(SELECT 1 FROM mote_feed_claims f JOIN mote_events e ON e.store_id=f.store_id AND e.key=? AND e.recipient=f.holder AND e.card_id IS NOT NULL WHERE f.store_id=? AND f.entity=? AND f.op_id=? AND f.holder=?)",params![format!("claim:{entity}:{op_id}"),store_id,entity,op_id,holder],|row| row.get(0))?;
+                        // delivered recipient card (or the holder's own claim,
+                        // which owes none) under the snapshot CAS.
+                        covered = conn.query_row("SELECT EXISTS(SELECT 1 FROM mote_feed_claims f JOIN mote_events e ON e.store_id=f.store_id AND e.recipient=f.holder AND ((e.key=? AND e.card_id IS NOT NULL) OR e.key=?) WHERE f.store_id=? AND f.entity=? AND f.op_id=? AND f.holder=?)",params![format!("claim:{entity}:{op_id}"),format!("claimself:{entity}:{op_id}"),store_id,entity,op_id,holder],|row| row.get(0))?;
                     }
                 }
                 conn.execute(

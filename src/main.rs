@@ -1308,7 +1308,7 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
     };
     let admission = authority
         .as_ref()
-        .is_some_and(|s| s["enabled"] == true && s["authority_version"] == 1);
+        .is_some_and(|s| s["enabled"] == true && mote::authority_version_supported(s));
     let mut bind_args = json!({"store":path,"store_id":store_id});
     if admission {
         bind_args["cursor_mode"] = json!("admission_v1");

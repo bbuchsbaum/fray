@@ -505,7 +505,7 @@ impl<'a> Context<'a> {
         let status = self.read(&["authority", "status"])?;
         if status["schema"] != "mote.authority-status.v1"
             || status["store_id"] != self.store.store_id
-            || status["authority_version"] != 1
+            || !mote::authority_version_supported(&status)
             || status["enabled"] != true
             || status["genesis_digest"]
                 .as_str()
@@ -515,7 +515,7 @@ impl<'a> Context<'a> {
                     && caps.iter().any(|c| c == capability)
             })
         {
-            return Err(Error::new("mote_authority_required",format!("enabled Mote authority v1 with {capability} required; status: {status}. Upgrade all writers, then explicitly enable authority; this read did not enable it")));
+            return Err(Error::new("mote_authority_required",format!("enabled Mote authority (v1 or v2) with {capability} required; status: {status}. Upgrade all writers, then explicitly enable authority; this read did not enable it")));
         }
         Ok(status)
     }
