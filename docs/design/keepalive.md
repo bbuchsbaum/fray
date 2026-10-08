@@ -251,7 +251,9 @@ respawned.
   it renews its controller lease and `exec`s the daemon's binary as `fray
   drive --keepalive`. The pid, process group, log and environment stay;
   the run's id, turn count, fork, the Codex running total, consecutive
-  failures and set-aside cards pass in `FRAY_KEEPALIVE_HANDOFF` (removed
+  failures, set-aside cards and the start of the idle period in progress
+  (so restarts never extend the 24-hour idle bound) pass in
+  `FRAY_KEEPALIVE_HANDOFF` (removed
   from every host turn's environment). The new image continues the same
   run, resumes the same fork and finds pending attention on the board. A
   turn in progress at the restart finishes on the old binary and is

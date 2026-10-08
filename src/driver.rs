@@ -486,6 +486,9 @@ struct Keep {
     /// A turn cannot read them, so they are left for the terminal, the owner
     /// or escalation, until new activity changes their version.
     oversized: RefCell<Vec<(i64, i64)>>,
+    /// When the idle period in progress began (wall-clock ms): carried
+    /// across a re-execution, so restarts never extend the idle bound.
+    idle_since: Cell<Option<i64>>,
 }
 impl Keep {
     /// What a turn boundary knows that the daemon's record does not: carried
@@ -493,7 +496,8 @@ impl Keep {
     fn handoff(&self) -> Value {
         json!({"fork":self.fork.borrow().clone(),"failures":self.failures.get(),
             "reported":self.reported.borrow().clone(),"parent_total":*self.parent_total.borrow(),
-            "fork_prompt":self.fork_prompt.borrow().clone(),"oversized":self.oversized.borrow().clone()})
+            "fork_prompt":self.fork_prompt.borrow().clone(),"oversized":self.oversized.borrow().clone(),
+            "idle_since":self.idle_since.get()})
     }
     fn resume(&self, v: &Value) {
         *self.fork.borrow_mut() = v["fork"].as_str().map(str::to_owned);
@@ -505,6 +509,7 @@ impl Keep {
             serde_json::from_value(v["fork_prompt"].clone()).unwrap_or(None);
         *self.oversized.borrow_mut() =
             serde_json::from_value(v["oversized"].clone()).unwrap_or_default();
+        self.idle_since.set(v["idle_since"].as_i64());
     }
 }
 
@@ -801,9 +806,28 @@ impl Run<'_> {
         }
         Ok(page)
     }
+    /// When the idle period in progress must end: `idle_timeout` after it
+    /// began, which for a keepalive may be before a re-execution.
+    fn idle_deadline(&self) -> Instant {
+        let bound = Duration::from_secs(self.options.idle_timeout);
+        let Some(keep) = &self.keep else {
+            return Instant::now() + bound;
+        };
+        let now = now_ms() as i64;
+        let since = keep.idle_since.get().unwrap_or(now);
+        keep.idle_since.set(Some(since));
+        let elapsed = Duration::from_millis(u64::try_from(now - since).unwrap_or(0));
+        Instant::now() + bound.saturating_sub(elapsed)
+    }
+    /// The idle period ended: the next one starts afresh.
+    fn idle_ended(&self) {
+        if let Some(keep) = &self.keep {
+            keep.idle_since.set(None);
+        }
+    }
     /// Wait for selected attention after `after` (0: any pending).
     fn wait(&self, after: i64) -> Result<bool> {
-        let deadline = Instant::now() + Duration::from_secs(self.options.idle_timeout);
+        let deadline = self.idle_deadline();
         loop {
             self.state("waiting", false, None)?;
             if self.keep.is_some() {
@@ -1171,12 +1195,14 @@ impl Run<'_> {
                     if let Some(reason) = self.pause()? {
                         return Ok(reason);
                     }
+                    self.idle_ended();
                     continue;
                 }
                 if !self.terminal_ready(keep)? {
                     if let Some(reason) = self.defer_terminal(keep)? {
                         return Ok(reason);
                     }
+                    self.idle_ended();
                     continue;
                 }
             }
@@ -1194,6 +1220,7 @@ impl Run<'_> {
                 if !self.wait(after)? {
                     return Ok(if self.stop.get() { "stopped" } else { "idle" });
                 }
+                self.idle_ended();
                 thread::sleep(Duration::from_millis(self.options.debounce_ms));
                 page = self.inbox()?;
                 if page["total"] == 0 {
@@ -1459,13 +1486,13 @@ impl Run<'_> {
     /// at the normal heartbeat interval, without spinning on the same packet.
     fn defer_terminal(&self, keep: &Keep) -> Result<Option<&'static str>> {
         self.state("waiting", false, None)?;
-        let started = Instant::now();
+        let deadline = self.idle_deadline();
         let mut refreshed = Instant::now();
         loop {
             if self.stop.get() {
                 return Ok(Some("stopped"));
             }
-            if started.elapsed() >= Duration::from_secs(self.options.idle_timeout) {
+            if Instant::now() >= deadline {
                 return Ok(Some("idle"));
             }
             thread::sleep(Duration::from_secs(1));
@@ -1491,13 +1518,13 @@ impl Run<'_> {
             json!({"run_id":self.id,"keepalive":"paused","reason":"budget","usage":self.detail.borrow()["keepalive"]["usage"]})
         );
         self.state("waiting", false, None)?;
-        let since = Instant::now();
+        let deadline = self.idle_deadline();
         let mut refreshed = Instant::now();
         loop {
             if self.stop.get() {
                 return Ok(Some("stopped"));
             }
-            if since.elapsed() >= Duration::from_secs(self.options.idle_timeout) {
+            if Instant::now() >= deadline {
                 return Ok(Some("idle"));
             }
             thread::sleep(Duration::from_secs(1));
@@ -1751,6 +1778,7 @@ fn keep_for(home: &Path, actor: &str) -> Result<(Keep, Value)> {
             )),
             fork_prompt: RefCell::new(None),
             oversized: RefCell::new(Vec::new()),
+            idle_since: Cell::new(None),
         },
         status,
     ))
@@ -1913,6 +1941,7 @@ mod keepalive_tests {
             parent_total: RefCell::new(Some(7)),
             fork_prompt: RefCell::new(None),
             oversized: RefCell::new(Vec::new()),
+            idle_since: Cell::new(None),
         }
     }
 
@@ -1925,6 +1954,7 @@ mod keepalive_tests {
         *before.parent_total.borrow_mut() = None;
         *before.fork_prompt.borrow_mut() = Some(("codex:base-1".into(), 3));
         *before.oversized.borrow_mut() = vec![(12, 40), (13, 41)];
+        before.idle_since.set(Some(1_791_000_000_000));
         // Through the environment, as text.
         let carried: Value = serde_json::from_str(&before.handoff().to_string()).unwrap();
         let after = keep();
@@ -1938,6 +1968,8 @@ mod keepalive_tests {
             Some(("codex:base-1".into(), 3))
         );
         assert_eq!(*after.oversized.borrow(), vec![(12, 40), (13, 41)]);
+        // The idle bound keeps counting from before the re-execution.
+        assert_eq!(after.idle_since.get(), Some(1_791_000_000_000));
     }
 
     #[test]
