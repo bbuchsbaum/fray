@@ -223,6 +223,57 @@ A Claude whose Monitor is armed is already wakeable: `fray keepalive` says
 so and does not start a second controller (which would fail with
 `controller_busy`).
 
+### Across a daemon restart
+
+Contract (2026-10-08, daemon lifecycle L8): **a drive survives a restart,
+the new daemon adopts it by pid, and the drive moves itself onto the new
+daemon's binary at its next turn boundary.** It is not stopped and
+respawned.
+
+- **It survives.** The drive runs in its own process group, so the old
+  daemon's exit does not stop it. `shutdown {restart:true}` sends its wait a
+  `restarting` frame; the drive waits up to 30 s (the client's restart
+  window) for a daemon to answer and resends from its cursor. A request
+  that no daemon accepted (the socket is gone between the old daemon and
+  the new one) is resent the same way, so a turn that ends in that gap
+  still posts its replies and acknowledgments once, instead of failing and
+  being paid for again. With no daemon after 30 s, it exits as before.
+- **The new daemon adopts it.** The keepalive record keeps the drive's pid.
+  At startup the daemon logs each recorded drive whose pid is alive and
+  watches it, logging when it exits; it is not the daemon's child, so
+  launchd or init reaps it. `fray keepalive --status` reports `pid_alive`,
+  the drive's own `build` and `exe`, and the daemon's `daemon_build` and
+  `daemon_exe`. Stop requests, budget and claims live in the store, so
+  nothing else changes owner.
+- **It moves onto the new binary.** Each time the drive reads its record,
+  always between turns (no packet claimed, no host turn running), it
+  compares the daemon's build and binary with its own. If either differs,
+  it renews its controller lease and `exec`s the daemon's binary as `fray
+  drive --keepalive`. The pid, process group, log and environment stay;
+  the run's id, turn count, fork, the Codex running total, consecutive
+  failures, set-aside cards and the start of the idle period in progress
+  (so restarts never extend the 24-hour idle bound) pass in
+  `FRAY_KEEPALIVE_HANDOFF` (removed
+  from every host turn's environment). The new image continues the same
+  run, resumes the same fork and finds pending attention on the board. A
+  turn in progress at the restart finishes on the old binary and is
+  applied once; the move follows it. An idle drive moves within one
+  heartbeat (30 s), or at once when attention wakes it, before that turn.
+  Each daemon build and binary is tried once, so a failed `exec` (logged)
+  leaves the drive running as it was rather than retrying in a loop.
+
+Why not stop and respawn: a drive mid-turn cannot stop at once, so the new
+daemon would have to wait for the old pid to exit before starting a
+replacement, and so would an old daemon that comes back after a failed
+restart. Respawning also loses in-memory state (the fork and the Codex
+running total) unless all of it is made durable, and a first turn without
+the fork re-reads the whole conversation. Surviving needs neither: if the
+restart fails and the same binary returns, the drive carries on unchanged.
+
+A plain `shutdown` (no restart) still ends the drive: its wait ends with
+no `restarting` frame, and it exits. A drive that is between calls at that
+moment instead waits up to 30 s for a daemon before exiting.
+
 ## Slices
 
 K1 is not announced to agents until K2 lands; the skill changes only in K3.
