@@ -503,6 +503,12 @@ impl<'a> Context<'a> {
     }
     pub fn require(&self, capability: &str) -> Result<Value> {
         let status = self.read(&["authority", "status"])?;
+        if let Some(why) = mote::unsupported_authority(&status) {
+            return Err(Error::new(
+                "mote_authority_required",
+                format!("{why}; nothing was changed"),
+            ));
+        }
         if status["schema"] != "mote.authority-status.v1"
             || status["store_id"] != self.store.store_id
             || !mote::authority_version_supported(&status)

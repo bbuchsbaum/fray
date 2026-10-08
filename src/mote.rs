@@ -446,6 +446,18 @@ pub fn authority_version_supported(status: &Value) -> bool {
         .is_some_and(|v| (1..=2).contains(&v))
 }
 
+/// Why Fray must not use an enabled authority whose format it does not know.
+/// A newer format may order or fence claims differently, so Fray stops rather
+/// than guess, and never falls back to filename order on an authority store.
+pub fn unsupported_authority(status: &Value) -> Option<String> {
+    (status["enabled"] == true && !authority_version_supported(status)).then(|| {
+        format!(
+            "Mote authority format version {} is not one this Fray reads (1 or 2); upgrade Fray",
+            status["authority_version"]
+        )
+    })
+}
+
 /// The event categories a sync reads (section 6). Candidate events only mark
 /// candidates that left the pending list; their cards come from the
 /// candidate's current state.

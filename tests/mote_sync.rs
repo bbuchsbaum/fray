@@ -736,6 +736,28 @@ fn replaying_a_chunk_never_invents_a_change_of_hands() {
 }
 
 impl Project {
+    /// The holder Fray records for `entity`.
+    fn recorded_holder(&self, entity: &str) -> Value {
+        let (ok, out) = self.fray(
+            &[],
+            "alice",
+            &[
+                "rpc",
+                &json!({"op":"mote_claims","actor":"alice","args":{"store_id":self.store_id()}})
+                    .to_string(),
+            ],
+        );
+        assert!(ok, "{out}");
+        serde_json::from_str::<Value>(&out).unwrap()["holders"][entity].clone()
+    }
+    fn store_id(&self) -> String {
+        let (ok, out) = self.fray(&[], "alice", &["--json", "mote", "status"]);
+        assert!(ok, "{out}");
+        serde_json::from_str::<Value>(&out).unwrap()["mote"]["store_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
     /// Moves the board's cursor past everything so far without delivering it:
     /// a stand-in for events the feed skipped (a late op, or a reseed).
     fn skip_events(&self) {
@@ -760,16 +782,15 @@ fn reconciliation_delivers_claim_changes_the_event_feed_missed_once() {
     let Some(p) = Project::pre_authority("recon") else {
         return;
     };
-    // alice holds `held`, briefly, when the board is seeded.
+    // alice holds `held` when the board is seeded.
     let held = p.bead("alice");
-    assert!(p
-        .mote("alice", &["claim", &held, "--ttl", "1"])
-        .status
-        .success());
+    assert!(p.mote("alice", &["claim", &held]).status.success());
     p.sync(&[], "alice").unwrap();
+    assert_eq!(p.recorded_holder(&held), json!("alice"));
     // Changes the feed will miss: a handoff to bob, then bob renewing it (a
-    // renewal looks like a handoff in Mote's history), and bob taking over
-    // alice's claim once it expired (Mote refuses to move a live claim).
+    // renewal looks like a handoff in Mote's history), and `held` passing
+    // from alice to bob (Mote refuses to move a live claim, so alice lets go
+    // and bob claims; reconciliation sees only the change of holder).
     let handed = p.bead("alice");
     assert!(p.mote("alice", &["claim", &handed]).status.success());
     assert!(p
@@ -777,7 +798,7 @@ fn reconciliation_delivers_claim_changes_the_event_feed_missed_once() {
         .status
         .success());
     assert!(p.mote("bob", &["claim", &handed]).status.success());
-    std::thread::sleep(Duration::from_millis(1500));
+    assert!(p.mote("alice", &["release", &held]).status.success());
     assert!(p.mote("bob", &["claim", &held]).status.success());
     p.skip_events();
     let s = p.sync(&[], "alice").unwrap();
@@ -899,48 +920,157 @@ fn a_legacy_board_rebinds_quietly_when_mote_enables_authority() {
     assert!(p.titles("alice").is_empty(), "{:?}", p.titles("alice"));
 }
 
+impl Project {
+    /// Starts a Mote session for `actor` and returns its id.
+    fn session(&self, actor: &str) -> String {
+        let out = self.mote(actor, &["session", "start"]);
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout)
+            .split('\'')
+            .find(|w| w.starts_with("sess-"))
+            .expect("a session id")
+            .to_owned()
+    }
+    /// Fray mode on this board as JSON, failing loudly on a refusal.
+    fn json(&self, env: &[(&str, &str)], actor: &str, args: &[&str]) -> Value {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        let (ok, out) = self.fray(env, actor, &all);
+        assert!(ok, "{args:?}: {out}");
+        serde_json::from_str(&out).unwrap()
+    }
+    /// A Mote that reports authority format `version`; everything else is
+    /// the real Mote.
+    fn mote_reporting_authority(&self, version: u32) -> PathBuf {
+        let bin = self.t.0.join(format!("authority-v{version}-mote"));
+        fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in *\" authority status \"*) mote \"$@\" | sed 's/\"authority_version\":[0-9]*/\"authority_version\":{version}/'; exit;; esac\nexec mote \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+}
+
 #[test]
-fn a_session_bound_claim_keeps_an_admission_board_syncing() {
+fn a_session_bound_store_keeps_sync_and_dispatch_working() {
     // A claim made under MOTE_SESSION raises Mote's authority format to 2.
-    // Fray still reads that store and delivers the change of hands.
+    // Fray still syncs it in admission order, and its dispatch workflow
+    // follows Mote's session binding: a handoff from outside the holding
+    // session is refused and kept pending, and resumes from that session.
     let Some(p) = Project::new("session") else {
         return;
     };
+    for who in ["writer", "alice", "bob"] {
+        p.fray(&[], who, &["join", "--topics", "rust"]);
+        p.fray(&[], who, &["status", "idle"]);
+    }
     p.sync(&[], "alice").unwrap();
-    let out = p.mote("alice", &["session", "start"]);
-    assert!(out.status.success(), "{out:?}");
-    let session = String::from_utf8_lossy(&out.stdout)
-        .split('\'')
-        .find(|w| w.starts_with("sess-"))
-        .expect("a session id")
-        .to_owned();
-    let w = p.bead("alice");
-    let claimed = Command::new("mote")
-        .current_dir(&p.t.0)
-        .env_remove("MOTE_STORE")
-        .env_remove("MOTE_ACTOR")
-        .env("MOTE_SESSION", &session)
-        .arg("--store")
-        .arg(p.t.0.join(".mote"))
-        .args(["--actor", "alice", "claim", &w])
-        .output()
-        .unwrap();
-    assert!(claimed.status.success(), "{claimed:?}");
+    let work = p.bead("writer");
+    let session = p.session("alice");
+    let in_session = [("MOTE_SESSION", session.as_str())];
+    let offered = p.json(
+        &[],
+        "writer",
+        &[
+            "--key",
+            "offer",
+            "send",
+            "anyone-free",
+            "Work",
+            "--mote",
+            &work,
+            "--tag",
+            "rust",
+        ],
+    );
+    let card = offered["result"]["offer"]["offer"]["id"].to_string();
+    let accepted = p.json(&in_session, "alice", &["--key", "accept", "accept", &card]);
+    assert_eq!(accepted["state"], "completed", "{accepted}");
     let status: Value =
         serde_json::from_slice(&p.mote("alice", &["authority", "status"]).stdout).unwrap();
     assert_eq!(status["authority_version"], 2, "{status}");
-    assert!(p
-        .mote("alice", &["handoff", &w, "--to", "bob", "--force"])
-        .status
-        .success());
+    let s = p.sync(&[], "alice").unwrap();
+    assert!(s["invalid"].as_array().unwrap().is_empty(), "{s}");
+
+    let handoff = [
+        "--key", "move", "handoff", &card, "--to", "bob", "--state", "Half", "--next", "Finish",
+    ];
+    let (ok, out) = p.fray(&[], "alice", &handoff);
+    assert!(!ok && out.contains("mote_unconfirmed"), "{out}");
+    let pending = p.json(&[], "alice", &["operation", "show", "move"]);
+    assert_eq!(pending["state"], "pending", "{pending}");
+    assert!(
+        pending.to_string().contains("run from that session"),
+        "{pending}"
+    );
+    let s = p.sync(&[], "bob").unwrap();
+    assert!(s["created"].as_array().unwrap().is_empty(), "{s}");
+
+    let resumed = p.json(&in_session, "alice", &["operation", "resume", "move"]);
+    assert_eq!(resumed["state"], "completed", "{resumed}");
     let s = p.sync(&[], "bob").unwrap();
     assert_eq!(s["created"].as_array().unwrap().len(), 1, "{s}");
     assert!(
         p.titles("bob")
-            .contains(&format!("Mote: alice handed you {w}")),
+            .contains(&format!("Mote: alice handed you {work}")),
         "{:?}",
         p.titles("bob")
     );
+}
+
+#[test]
+fn an_unknown_authority_format_stops_sync_and_workflows() {
+    let Some(p) = Project::new("future") else {
+        return;
+    };
+    let future = p.mote_reporting_authority(3);
+    let env = [("FRAY_MOTE_BIN", future.to_str().unwrap())];
+    let binding = |p: &Project| {
+        let (_, out) = p.fray(&[], "alice", &["--json", "mote", "status"]);
+        serde_json::from_str::<Value>(&out).unwrap()["mote"]["binding"].clone()
+    };
+    // A board never synced is not seeded, and never falls back to filename
+    // order on an authority store.
+    let err = p.sync(&env, "alice").unwrap_err();
+    assert!(err.contains("format version 3"), "{err}");
+    let fresh = binding(&p);
+    assert!(
+        fresh["cursor"].is_null() && fresh["cursor_initialized"] == false,
+        "{fresh}"
+    );
+    // A bound board keeps its exact cursor.
+    p.sync(&[], "alice").unwrap();
+    let w = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &w]).status.success());
+    let before = binding(&p);
+    assert_eq!(before["cursor_mode"], "admission_v1", "{before}");
+    let err = p.sync(&env, "alice").unwrap_err();
+    assert!(
+        err.contains("format version 3") && err.contains("cursor unchanged"),
+        "{err}"
+    );
+    assert_eq!(binding(&p), before);
+    // A workflow refuses before it writes anything to Mote.
+    p.fray(&[], "writer", &["join", "--topics", "rust"]);
+    let (ok, out) = p.fray(
+        &env,
+        "writer",
+        &[
+            "--json",
+            "--key",
+            "offer",
+            "send",
+            "anyone-free",
+            "Work",
+            "--mote",
+            &w,
+        ],
+    );
+    assert!(!ok && out.contains("format version 3"), "{out}");
 }
 
 #[test]
