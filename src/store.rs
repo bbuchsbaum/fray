@@ -15,6 +15,19 @@ pub const MOTE: &str = "mote";
 /// The reserved identity that authors escalations of stuck requests
 /// (no-silent-stalls R3). Like `mote`, it never joins or acts.
 pub const ESCALATION: &str = "escalation";
+/// The reserved identity that authors daemon maintenance notices (`announce`).
+/// Like `mote`, it never joins or acts: the notice records who asked for it.
+pub const SYSTEM: &str = "fray";
+
+/// `fray` in any case or with separators (Fray, f-r-a-y): a name a reader
+/// could take for the daemon speaking.
+pub fn system_lookalike(name: &str) -> bool {
+    name.to_lowercase()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        == SYSTEM
+}
 
 /// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
 /// owner1 …): case, separators and a numeric suffix are ignored.
@@ -434,15 +447,25 @@ impl Store {
                 | "dispatch_handoff_record"
                 | "dispatch_sync"
                 | "dispatch_status"
+                | "announce"
         );
         if !write {
             let mut v = read(&self.conn, req, now)?;
             v["store_id"] = json!(self.identity()?);
             return Ok(v);
         }
-        if !valid_name(&req.actor) {
+        // A maintenance notice needs no identity: the daemon authors it and
+        // records who asked, so anyone with socket access can announce.
+        let announce = req.op == "announce";
+        if !(valid_name(&req.actor) || announce && req.actor.is_empty()) {
             return Err(Error::invalid(
                 "set --as/FRAY_AGENT to a unique terminal identity (1-80 name characters)",
+            ));
+        }
+        if system_lookalike(&req.actor) {
+            return Err(Error::new(
+                "reserved_system",
+                "`fray` is reserved for notices the daemon itself authors; choose another name",
             ));
         }
         // The owner identity writes only through owner operations, and owner
@@ -521,10 +544,15 @@ impl Store {
                 "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker',?,0,?,0)",
                 params![OWNER, "[]", now],
             )?;
-        } else if req.op != "join" {
+        } else if req.op != "join" && !announce {
             registered(&tx, &req.actor)?;
         }
-        let replaced = bind_session(&tx, req, now)?;
+        // An announcement binds no session and records no presence.
+        let replaced = if announce {
+            None
+        } else {
+            bind_session(&tx, req, now)?
+        };
         // A transaction-local clock lets the insert trigger record first
         // routing without scanning the entire deliveries table on each write.
         tx.execute("INSERT INTO meta(key,value) VALUES('routing_clock_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [now.to_string()])?;
@@ -550,6 +578,7 @@ impl Store {
                 "join" | "leave" | "present" | "expose" | "peer_present" | "terminal_turn"
             )
             && req.actor != OWNER
+            && !announce
         {
             crate::presence::joined(&tx, &req.actor, req.session.as_deref(), true, now)?;
         }
@@ -572,7 +601,7 @@ impl Store {
         // activity.
         if !matches!(
             req.op.as_str(),
-            "present" | "peer_present" | "terminal_turn"
+            "present" | "peer_present" | "terminal_turn" | "announce"
         ) {
             tx.execute(
                 "UPDATE agents SET last_seen_ms=? WHERE name=?",
@@ -664,6 +693,13 @@ pub(crate) fn registered(conn: &Connection, actor: &str) -> Result<()> {
 }
 fn assignee_known(conn: &Connection, who: &Option<String>) -> Result<()> {
     if let Some(who) = who {
+        // The daemon's notice author can never answer or act.
+        if who == SYSTEM {
+            return Err(Error::new(
+                "reserved_system",
+                "`fray` authors daemon notices and cannot be assigned or addressed",
+            ));
+        }
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
             [who],
@@ -1097,6 +1133,12 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
             // Explicitly leave mail for an agent that has not joined yet: it
             // is registered disabled and receives the message when it joins.
             // Only on request, so a typo still fails with suggestions.
+            if boolean(a, "pending", false)? && system_lookalike(target) {
+                return Err(Error::new(
+                    "reserved_system",
+                    "`fray` authors daemon notices and reads no mail; choose another name",
+                ));
+            }
             if boolean(a, "pending", false)? && target != OWNER && owner_lookalike(target) {
                 return Err(Error::new(
                     "reserved_owner",
@@ -1158,6 +1200,7 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
             )?;
             create_card(conn, actor, a, Value::Null, now)
         }
+        "announce" => announce(conn, req, now),
         "peer_present" => crate::presence::presented(conn, req),
         "review_request" => {
             check_fields(
@@ -2955,7 +2998,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["mote_rpc_receipts","dispatch","mote_admission_order","mote_workflows","peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"capabilities":["mote_rpc_receipts","dispatch","mote_admission_order","mote_workflows","peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations","announce"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -4939,6 +4982,118 @@ fn escalation_card(
         now,
     )?;
     Ok(card["card"]["id"].as_i64().unwrap_or(0))
+}
+
+/// A daemon maintenance notice (`announce`): a project-wide card authored by
+/// the reserved `fray` identity, recording who asked. The caller needs no
+/// join and gains no participant, session or presence. A newer notice
+/// supersedes older open ones, so a board shows one current notice.
+fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
+    let a = &req.args;
+    check_fields(
+        a,
+        &["action", "reason", "from_build", "to_build", "requested_by"],
+    )?;
+    let action = string(a, "action")?;
+    if !["restart", "stop"].contains(&action) {
+        return Err(Error::invalid("action: restart|stop"));
+    }
+    let reason = string(a, "reason")?;
+    text(reason, "reason", 500, false)?;
+    let mut builds = Vec::new();
+    for field in ["from_build", "to_build"] {
+        let build = a.get(field).map(|_| string(a, field)).transpose()?;
+        if let Some(build) = build {
+            text(build, field, 80, false)?;
+        }
+        builds.push(build);
+    }
+    // The caller's identity when it has one, otherwise the OS user the CLI
+    // reports. Recorded, not authenticated: the socket is the boundary.
+    let requested_by = match (req.actor.as_str(), a.get("requested_by")) {
+        ("", Some(_)) => string(a, "requested_by")?,
+        ("", None) => return Err(Error::invalid("requested_by is required without --as")),
+        (_, Some(_)) => {
+            return Err(Error::invalid(
+                "requested_by is the caller's --as identity; omit it",
+            ))
+        }
+        (actor, None) => actor,
+    };
+    if !valid_name(requested_by) || system_lookalike(requested_by) {
+        return Err(Error::invalid(
+            "requested_by must be a name other than `fray`",
+        ));
+    }
+    if let Some(session) = &req.session {
+        text(session, "session", 128, false)?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
+        params![SYSTEM, now],
+    )?;
+    // A board where someone joined as `fray` before the name was reserved
+    // keeps that agent; its notices would read as theirs, so refuse.
+    let (enabled, seen): (bool, i64) = conn.query_row(
+        "SELECT enabled,last_seen_ms FROM agents WHERE name=?",
+        [SYSTEM],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if enabled || seen > 0 {
+        return Err(Error::new(
+            "reserved_system",
+            "an agent joined this board as `fray` before the name was reserved; it must leave and rejoin under another name",
+        ));
+    }
+    let (from, to) = (builds[0], builds[1]);
+    let change = match (from, to) {
+        (Some(f), Some(t)) => format!(" Build {f} -> {t}."),
+        (Some(f), None) => format!(" Running build {f}."),
+        (None, Some(t)) => format!(" New build {t}."),
+        (None, None) => String::new(),
+    };
+    let effect = if action == "restart" {
+        "Waits and watches may be interrupted; re-run them once the daemon is back."
+    } else {
+        "Fray is unavailable on this board until the daemon is started again."
+    };
+    let maintenance = json!({"action":action,"reason":reason,"from_build":from,"to_build":to,
+        "requested_by":requested_by,"requested_session":req.session});
+    let mut s = conn.prepare(&format!(
+        "SELECT c.id FROM cards c WHERE c.author=? AND {ACTIVE} AND EXISTS(SELECT 1 FROM json_each(c.tags) t WHERE t.value='maintenance') ORDER BY c.id"
+    ))?;
+    let older = s
+        .query_map([SYSTEM], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let card = create_card(
+        conn,
+        SYSTEM,
+        &json!({"kind":"note","topic":"*","priority":1,
+            "title":clip(&format!("Fray daemon {action}: {reason}"), 160),
+            "summary":clip(&format!("Requested by {requested_by}.{change} Reason: {reason}. {effect}"), 2000),
+            "tags":["maintenance", format!("maintenance:{action}")]}),
+        json!({"maintenance":maintenance}),
+        now,
+    )?;
+    let id = card["card"]["id"].as_i64().unwrap_or(0);
+    for old in older {
+        conn.execute(
+            "UPDATE cards SET rev=rev+1,status='superseded',updated_ms=? WHERE id=?",
+            params![now, old],
+        )?;
+        emit(
+            conn,
+            SYSTEM,
+            "patch",
+            old,
+            json!({"note":format!("superseded by maintenance notice #{id}")}),
+            now,
+            false,
+        )?;
+    }
+    let mut result = card;
+    result["maintenance"] = maintenance;
+    Ok(result)
 }
 
 /// The strict "armed" test: `(enabled, listening, armed)`. A live drive
