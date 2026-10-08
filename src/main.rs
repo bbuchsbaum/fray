@@ -302,6 +302,18 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: i64,
     },
+    /// Post a daemon maintenance notice to everyone, authored by `fray`.
+    /// Needs no join; records --as (or $USER) as the requester.
+    Announce {
+        #[arg(long, value_parser = ["restart", "stop"])]
+        action: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        from_build: Option<String>,
+        #[arg(long)]
+        to_build: Option<String>,
+    },
     /// Add a public current-state card. Use topic '*' for a project-wide broadcast.
     Post {
         title: String,
@@ -2814,6 +2826,7 @@ fn send(
     let mutation = matches!(
         op,
         "post"
+            | "announce"
             | "review_request"
             | "review_subject"
             | "send"
@@ -3518,6 +3531,29 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             ("show", args)
         }
+        Cmd::Announce {
+            action,
+            reason,
+            from_build,
+            to_build,
+        } => {
+            let mut a = json!({"action":action,"reason":reason});
+            if actor.is_empty() {
+                let user = std::env::var("USER").unwrap_or_default();
+                if user.is_empty() {
+                    return Err(Error::invalid(
+                        "fray announce needs --as NAME or $USER to record who asked",
+                    ));
+                }
+                a["requested_by"] = json!(user);
+            }
+            for (k, v) in [("from_build", from_build), ("to_build", to_build)] {
+                if let Some(v) = v {
+                    a[k] = json!(v);
+                }
+            }
+            ("announce", a)
+        }
         Cmd::Post {
             title,
             summary,
@@ -3965,6 +4001,12 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             // Owner operations exist only behind `fray owner` (a person at an
             // interactive terminal); the raw RPC command must not bypass that.
+            if fray::store::system_lookalike(&r.actor) {
+                return Err(Error::new(
+                    "reserved_system",
+                    "`fray` is reserved for notices the daemon itself authors",
+                ));
+            }
             if r.op.starts_with("owner_") || r.actor == fray::store::OWNER {
                 return Err(Error::new(
                     "reserved_owner",

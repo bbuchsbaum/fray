@@ -724,4 +724,23 @@ print(r.stdout,end='')
         # Snapshot capture is local; no hidden conversation was created for it.
         self.assertEqual(self.call('query')['total'],1)
 
+    def test_announce_needs_no_identity_and_adds_no_participant(self):
+        env={k:v for k,v in os.environ.items() if k not in ('FRAY_AGENT','FRAY_SESSION','CLAUDE_CODE_SESSION_ID','CODEX_THREAD_ID')}
+        env['USER']='maint-user'
+        argv=[str(BINARY),'--home',self.home,'--json','--key','restart-1','announce','--action','restart','--reason','new build','--from-build','old1','--to-build','new2']
+        first=subprocess.run(argv,env=env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(first.returncode,0,first.stderr)
+        notice=json.loads(first.stdout)
+        self.assertEqual(notice['card']['author'],'fray');self.assertEqual(notice['card']['topic'],'*')
+        self.assertEqual(notice['maintenance']['requested_by'],'maint-user')
+        self.assertEqual(notice['maintenance']['to_build'],'new2')
+        retry=json.loads(subprocess.run(argv,env=env,text=True,capture_output=True,timeout=10,check=True).stdout)
+        self.assertEqual(retry['card']['id'],notice['card']['id'])
+        self.assertEqual(self.call('query',args={'tag':'maintenance'})['total'],1)
+        self.assertEqual({a['name'] for a in self.call('agents','alice')['items']},{'alice','bob'})
+        self.assertIn(notice['card']['id'],[i['card']['id'] for i in self.call('inbox','bob')['items']])
+        with Peer(self.home) as p:
+            refused=p.call('join','fray')
+        self.assertFalse(refused['ok']);self.assertEqual(refused['error']['code'],'reserved_system')
+
 if __name__=='__main__': unittest.main(verbosity=2)

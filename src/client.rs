@@ -239,6 +239,7 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             "send" | "annotate" if req.args.get("respond_within_ms").is_some() => {
                 Some(("ask_deadlines", "--respond-within"))
             }
+            "announce" => Some(("announce", "fray announce")),
             "escalate_tick" | "stuck_requests" => {
                 Some(("escalations", "escalation of stuck requests"))
             }
