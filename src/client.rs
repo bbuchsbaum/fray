@@ -168,7 +168,87 @@ fn warn_build_mismatch(home: &Path, daemon: &Value) {
         }
     }
 }
+/// How long a client waits for a restarting daemon to accept connections again.
+const RESTART_WINDOW: Duration = Duration::from_secs(30);
+/// The reason a daemon gave when it refused or ended a request because it is
+/// restarting. Nothing that request carried was executed or acknowledged.
+pub(crate) fn restart_reason(error: &Error) -> Option<String> {
+    let details = error.details.as_ref()?;
+    (details["restarting"] == true).then(|| details["reason"].as_str().unwrap_or("").to_owned())
+}
+/// Waits until a daemon answers on this home again: the replacement. A
+/// stopping daemon may still accept a connection, but never answers one.
+/// False if none answers within the window.
+pub fn await_daemon(home: &Path, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    let mut delay = Duration::from_millis(50);
+    loop {
+        if rpc_mapped(home, &Request::new("ping", "", json!({})), 1).is_ok() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
+}
+/// Waits until the daemon that owned this home has exited and released its
+/// lock, so a replacement can start. False if it still holds it at the deadline.
+pub fn await_exit(home: &Path, window: Duration) -> Result<bool> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(home.join("daemon.lock"))?;
+    let deadline = Instant::now() + window;
+    loop {
+        if fs2::FileExt::try_lock_exclusive(&lock).is_ok() {
+            fs2::FileExt::unlock(&lock)?;
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+/// A request a restarting daemon refused was never executed, so it is resent
+/// once the daemon is back; a wait resumes from the same cursor with what is
+/// left of its timeout. One quiet line on stderr says why it paused.
 pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
+    let started = Instant::now();
+    let mut attempt = req.clone();
+    let mut attempt_timeout = timeout;
+    let mut announced = false;
+    loop {
+        match rpc_mapped(home, &attempt, attempt_timeout) {
+            Err(error) if !matches!(req.op.as_str(), "ping" | "shutdown") => {
+                let Some(reason) = restart_reason(&error) else {
+                    return Err(error);
+                };
+                if !announced {
+                    eprintln!("fray: daemon restarting ({reason}); reconnecting");
+                    announced = true;
+                }
+                if !await_daemon(home, RESTART_WINDOW) {
+                    return Err(error);
+                }
+                if let Some(secs) = req.args.get("timeout").and_then(Value::as_u64) {
+                    if req.op == "wait" {
+                        let left = secs.saturating_sub(started.elapsed().as_secs());
+                        attempt.args["timeout"] = json!(left);
+                        attempt_timeout = left.saturating_add(5);
+                    }
+                }
+            }
+            other => return other,
+        }
+    }
+}
+fn rpc_mapped(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     rpc_inner(home, req, timeout).map_err(|error| {
         if req.op == "wait"
             && (matches!(error.code.as_str(), "io" | "busy")
@@ -389,6 +469,8 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
     let mut expected_store: Option<String> = None;
     let mut retry_delay = 1;
     let mut disconnected = false;
+    // A restart's one notice line stands for the whole reconnect.
+    let mut restarted = false;
     loop {
         if let Some(end) = deadline {
             let remaining = end.saturating_duration_since(Instant::now());
@@ -446,8 +528,13 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                 }
                 expected_store = Some(id.to_owned());
                 if disconnected {
-                    eprintln!("fray attention: reconnected; unacknowledged receipts may repeat");
+                    if !restarted {
+                        eprintln!(
+                            "fray attention: reconnected; unacknowledged receipts may repeat"
+                        );
+                    }
                     disconnected = false;
+                    restarted = false;
                 }
                 retry_delay = 1;
                 match data["type"].as_str() {
@@ -519,14 +606,36 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                         "io" | "disconnected" | "unavailable" | "listener_expired" | "busy"
                     ) =>
             {
+                let restart = restart_reason(&e);
                 if !disconnected {
                     if include_control {
-                        let frame = json!({"type":"disconnected","control_version":1,"agent":actor,"store_id":expected_store,"reason":e.code});
+                        let reason = if restart.is_some() {
+                            "restarting"
+                        } else {
+                            e.code.as_str()
+                        };
+                        let frame = json!({"type":"disconnected","control_version":1,"agent":actor,"store_id":expected_store,"reason":reason});
                         write_frame(&mut std::io::stdout().lock(), &frame)
                             .map_err(|e| Error::new("output_closed", e.message))?;
                     }
-                    eprintln!("fray attention: {e}; reconnecting with backoff");
+                    match &restart {
+                        Some(reason) => eprintln!(
+                            "fray attention: daemon restarting ({reason}); reconnecting, unacknowledged receipts may repeat"
+                        ),
+                        None => eprintln!("fray attention: {e}; reconnecting with backoff"),
+                    }
                     disconnected = true;
+                    restarted = restart.is_some();
+                }
+                if restart.is_some() {
+                    // The daemon said it is coming back: reconnect when it does.
+                    let mut window = RESTART_WINDOW;
+                    if let Some(end) = deadline {
+                        window = window.min(end.saturating_duration_since(Instant::now()));
+                    }
+                    await_daemon(home, window);
+                    retry_delay = 1;
+                    continue;
                 }
                 let mut delay = Duration::from_secs(retry_delay);
                 if let Some(end) = deadline {
@@ -604,6 +713,8 @@ pub fn watch(
 ) -> Result<()> {
     let mut cursor = after;
     let mut expected_store: Option<String> = None;
+    // Once a restart is announced, the reconnect attempts that follow are quiet.
+    let mut restarting = false;
     loop {
         let result = (|| -> Result<()> {
             let mut args = json!({});
@@ -623,6 +734,7 @@ pub fn watch(
             write_request(reader.get_mut(), &req)?;
             while let Some(line) = read_frame(&mut reader, RESPONSE_LIMIT)? {
                 let data = unpack(serde_json::from_str(&line)?)?;
+                restarting = false;
                 if let Some(id) = data["store_id"].as_str() {
                     if expected_store.as_ref().is_some_and(|old| old != id) {
                         return Err(Error::new(
@@ -650,7 +762,16 @@ pub fn watch(
                 if e.message.contains("Broken pipe") {
                     return Err(e);
                 }
-                eprintln!("fray watch: {e}; reconnecting at cursor {cursor:?}");
+                if let Some(reason) = restart_reason(&e) {
+                    eprintln!("fray watch: daemon restarting ({reason}); reconnecting at cursor {cursor:?}");
+                    // Quiet only while a replacement is expected; after the
+                    // window, report failures again.
+                    restarting = await_daemon(home, RESTART_WINDOW);
+                    continue;
+                }
+                if !restarting {
+                    eprintln!("fray watch: {e}; reconnecting at cursor {cursor:?}");
+                }
                 thread::sleep(Duration::from_secs(1));
             }
             other => return other,
