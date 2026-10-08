@@ -218,6 +218,14 @@ enum Cmd {
         grace_ms: Option<u64>,
     },
     Ping,
+    /// List this user's registered daemons: liveness, build skew against this
+    /// client, uptime and occupancy. Read-only, except that records of dead
+    /// daemons are pruned and reported.
+    Daemons {
+        /// Only daemons whose build differs from this client's.
+        #[arg(long)]
+        stale: bool,
+    },
     /// Who a daemon restart would interrupt: open waits, listeners, drives,
     /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
     Occupancy,
@@ -3395,6 +3403,16 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(Some(value));
         }
         Cmd::Ping => ("ping", json!({})),
+        Cmd::Daemons { stale } => {
+            let report = fray::daemons::report(stale)?;
+            if cli.json {
+                return Ok(Some(report));
+            }
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(fray::daemons::render(&report).as_bytes())?;
+            stdout.flush()?;
+            return Ok(None);
+        }
         Cmd::Occupancy => ("occupancy", json!({})),
         Cmd::Join {
             topics,
