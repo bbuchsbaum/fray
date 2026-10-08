@@ -203,6 +203,12 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
     let store = Store::open(&home.join("state.db"), normal)?;
     // The daemon lock proves old socket-owned listeners cannot still be attached.
     store.conn.execute("UPDATE listeners SET connected=0", [])?;
+    // Keepalive drives outlive a restart in their own process groups. This
+    // daemon has no child handle for them; it watches their recorded pids.
+    for (agent, pid) in crate::keepalive::adoptable(&store.conn)? {
+        eprintln!("keepalive drive for {agent:?} (pid {pid}) adopted");
+        crate::keepalive::watch(agent, pid);
+    }
     fs::set_permissions(home.join("state.db"), fs::Permissions::from_mode(0o600))?;
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -473,6 +479,17 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                 let response = match result {
                     Ok(mut value) => {
                         value["daemon_sandboxed"] = json!(crate::keepalive::sandboxed());
+                        // The daemon keeps the drive's pid, so a keepalive
+                        // whose process is gone can be named.
+                        if let Some(pid) = value["pid"].as_i64() {
+                            value["pid_alive"] = json!(crate::keepalive::pid_alive(pid));
+                        }
+                        // What a drive compares with its own build and binary
+                        // to move onto this daemon's (keepalive.md, restarts).
+                        value["daemon_build"] = json!(BUILD);
+                        value["daemon_exe"] = json!(std::env::current_exe()
+                            .ok()
+                            .and_then(|exe| exe.to_str().map(str::to_owned)));
                         success(value)
                     }
                     Err(error) => failure(error),
@@ -529,13 +546,6 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     }
                     match result {
                         Ok(mut v) => {
-                            // The daemon keeps the drive's pid, so a keepalive
-                            // whose process is gone can be named.
-                            if req.op == "keepalive_status" {
-                                if let Some(pid) = v["pid"].as_i64() {
-                                    v["pid_alive"] = json!(crate::keepalive::pid_alive(pid));
-                                }
-                            }
                             if req.op == "ping" {
                                 v["capabilities"]
                                     .as_array_mut()

@@ -144,10 +144,10 @@ class Keepalive(unittest.TestCase):
         self.launch()
         self.fray("join", actor="bob", session="test:bob")
 
-    def launch(self, **extra):
+    def launch(self, binary=None, **extra):
         # As if started from inside hosts: a turn must not inherit either.
         self.server = subprocess.Popen(
-            [str(BINARY), "--home", self.home, "serve"],
+            [str(binary or BINARY), "--home", self.home, "serve"],
             env=dict(self.env, CLAUDECODE="1", CODEX_SANDBOX="seatbelt", **extra),
             stdout=self.log,
             stderr=self.log,
@@ -745,6 +745,122 @@ class Keepalive(unittest.TestCase):
         self.await_status(
             "hal", lambda s: s["state"] == "stopped", "stopped", timeout=5
         )
+
+    def restart(self, binary):
+        reply = self.rpc("shutdown", args={"restart": True, "reason": "upgrade"})
+        self.assertTrue(reply["ok"], reply)
+        self.server.wait(timeout=15)
+        self.launch(binary=binary)
+
+    def drives(self):
+        # This test's drives only: their binaries live under its own root.
+        ps = subprocess.run(["ps", "-Ao", "pid=,command="], text=True,
+                            capture_output=True, check=True).stdout
+        return [int(line.split()[0]) for line in ps.splitlines()
+                if "drive --keepalive" in line and self.root.name in line]
+
+    def test_a_restart_keeps_one_drive_and_moves_it_onto_the_new_binary(self):
+        # Two copies of one build stand for two builds: a drive moves onto
+        # the daemon's binary when its build or its path differs.
+        old, new = self.root / "old" / "fray", self.root / "new" / "fray"
+        for path in (old, new):
+            path.parent.mkdir()
+            shutil.copy2(BINARY, path)
+        same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
+        self.shutdown()
+        self.launch(binary=old)
+        session = "claude:restart-1"
+        self.start("alice", session)
+        first = self.ask("alice", "Before any restart")
+        self.await_reply(first, "alice")
+        before = self.await_status(
+            "alice", lambda s: s["fork"] and self.pending("alice") == 0, "settled"
+        )
+        pid, fork = before["pid"], before["fork"]
+        # The daemon names its drive's liveness (it used to report null).
+        self.assertIs(before["pid_alive"], True)
+        self.assertTrue(same(before["drive"]["exe"], old), before["drive"])
+        self.assertEqual(before["drive"]["build"], before["daemon_build"])
+
+        # A restart that brings the same binary back (as when a new one fails
+        # to start and the old one is started again): the drive stays as it is.
+        self.restart(old)
+        self.assertIn(f"(pid {pid}) adopted", (self.root / "server.log").read_text())
+        second = self.ask("alice", "After the same daemon came back")
+        self.assertEqual(len(self.await_reply(second, "alice")), 1)
+        self.assertEqual(self.status("alice")["pid"], pid)
+        self.assertNotIn('"upgrade"', self.drive_log("alice"))
+
+        # A restart onto a new binary in the middle of a turn: the turn
+        # finishes and is applied once, then the drive becomes the new binary
+        # in place (same pid) and resumes its fork.
+        self.mode("slow:3")
+        third = self.ask("alice", "Asked as the daemon restarts")
+        deadline = time.monotonic() + 10
+        while [third] not in [c["cards"] for c in self.calls()]:
+            self.assertLess(time.monotonic(), deadline, self.drive_log("alice"))
+            time.sleep(0.02)
+        # The host turn is under way in the old binary.
+        self.restart(new)
+        self.assertEqual(len(self.await_reply(third, "alice", timeout=20)), 1)
+        after = self.await_status(
+            "alice",
+            lambda s: s["state"] == "keepalive" and s["drive"]["exe"]
+            and same(s["drive"]["exe"], new),
+            "moved onto the new binary", timeout=15,
+        )
+        self.assertEqual(after["pid"], pid)
+        self.assertIs(after["pid_alive"], True)
+        self.assertEqual(self.drives(), [pid])
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True,
+                                 capture_output=True).stdout
+        self.assertIn(f"{self.root.name}/new/fray drive --keepalive", command)
+        self.mode("answer")
+        fourth = self.ask("alice", "After the upgrade")
+        self.assertEqual(len(self.await_reply(fourth, "alice")), 1)
+        calls = self.calls()
+        # One host turn per ask: none repeated, none lost.
+        self.assertEqual([c["cards"] for c in calls], [[first], [second], [third], [fourth]])
+        # The upgraded drive resumed the fork it had, rather than forking again.
+        self.assertNotIn("--fork-session", calls[3]["argv"])
+        self.assertEqual(calls[3]["argv"][calls[3]["argv"].index("--resume") + 1], fork)
+        settled = self.await_status("alice", lambda s: self.pending("alice") == 0, "settled")
+        self.assertEqual(settled["usage"]["input_tokens"], 40)
+        self.assertEqual(settled["turns"], 4)
+        log = self.drive_log("alice")
+        self.assertEqual(log.count('"upgrade":'), 1, log)
+        self.assertEqual(log.count('"upgraded":'), 1, log)
+
+        # A plain stop still ends the drive.
+        self.shutdown()
+        deadline = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid))
+
+    def test_a_turn_that_ends_between_daemons_is_applied_once_the_replacement_answers(self):
+        session = "claude:restart-gap"
+        self.start("alice", session)
+        self.mode("slow:1")
+        card = self.ask("alice", "Answered while no daemon runs")
+        deadline = time.monotonic() + 10
+        while [card] not in [c["cards"] for c in self.calls()]:
+            self.assertLess(time.monotonic(), deadline, self.drive_log("alice"))
+            time.sleep(0.02)
+        reply = self.rpc("shutdown", args={"restart": True, "reason": "gap"})
+        self.assertTrue(reply["ok"], reply)
+        self.server.wait(timeout=15)
+        # The turn ends, and its reply and acknowledgment are due, while no
+        # daemon accepts connections; they wait for the replacement.
+        time.sleep(2.5)
+        self.launch()
+        self.assertEqual(len(self.await_reply(card, "alice", timeout=20)), 1)
+        status = self.await_status(
+            "alice", lambda s: self.pending("alice") == 0, "acknowledged", timeout=10
+        )
+        self.assertEqual(status["state"], "keepalive")
+        self.assertEqual(status["usage"]["input_tokens"], 10)
+        self.assertEqual(len(self.calls()), 1, "the turn was not paid for twice")
 
     def test_a_sandboxed_daemon_refuses(self):
         self.shutdown()

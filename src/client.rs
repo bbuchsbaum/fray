@@ -107,6 +107,7 @@ fn connect(home: &Path, timeout: u64) -> Result<BufReader<UnixStream>> {
             "unavailable",
             format!("{e}; run fray start (home: {})", home.display()),
         )
+        .with_details(json!({"not_sent":true}))
     })?;
     stream.set_read_timeout(Some(Duration::from_secs(timeout.max(1))))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -169,7 +170,15 @@ fn warn_build_mismatch(home: &Path, daemon: &Value) {
     }
 }
 /// How long a client waits for a restarting daemon to accept connections again.
-const RESTART_WINDOW: Duration = Duration::from_secs(30);
+pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
+/// Whether a request failed before any of it reached a daemon (no daemon
+/// accepted the connection), so resending it cannot repeat it.
+pub fn not_sent(error: &Error) -> bool {
+    error
+        .details
+        .as_ref()
+        .is_some_and(|d| d["not_sent"] == true)
+}
 /// The reason a daemon gave when it refused or ended a request because it is
 /// restarting. Nothing that request carried was executed or acknowledged.
 pub(crate) fn restart_reason(error: &Error) -> Option<String> {
