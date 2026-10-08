@@ -193,33 +193,53 @@ pub fn await_daemon(home: &Path, window: Duration) -> bool {
         delay = (delay * 2).min(Duration::from_millis(500));
     }
 }
-/// Waits until the daemon that owned this home has exited and released its
-/// lock, so a replacement can start. False if it still holds it at the deadline.
-pub fn await_exit(home: &Path, window: Duration) -> Result<bool> {
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(home.join("daemon.lock"))?;
+/// Waits until the daemon process `pid` has exited, so its lock is released
+/// and a replacement can start. False if it is still running at the deadline.
+///
+/// This never touches the lock itself: probing with a try-lock could make a
+/// replacement that is starting at that moment lose the lock and give up.
+/// `bus.sock` is no proof either, since a restarting daemon removes it
+/// before draining. A process that is gone, or a zombie (it has exited and
+/// closed its descriptors, but nobody has reaped it yet), holds no lock.
+pub fn await_exit(pid: u32, window: Duration) -> bool {
     let deadline = Instant::now() + window;
     loop {
-        if fs2::FileExt::try_lock_exclusive(&lock).is_ok() {
-            fs2::FileExt::unlock(&lock)?;
-            return Ok(true);
+        if process_exited(pid) {
+            return true;
         }
         if Instant::now() >= deadline {
-            return Ok(false);
+            return false;
         }
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(50));
     }
 }
+fn process_exited(pid: u32) -> bool {
+    // `ps` prints nothing for a pid that no longer exists, and `Z` for a zombie.
+    Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            let stat = String::from_utf8_lossy(&out.stdout);
+            let stat = stat.trim();
+            stat.is_empty() || stat.starts_with('Z')
+        })
+}
+/// The server's timeout for a `wait` that names none.
+const WAIT_DEFAULT_SECS: u64 = 300;
 /// A request a restarting daemon refused was never executed, so it is resent
-/// once the daemon is back; a wait resumes from the same cursor with what is
-/// left of its timeout. One quiet line on stderr says why it paused.
+/// once the daemon is back, within the caller's own time budget (`timeout`
+/// seconds; for a wait, what is left of its timeout) and never longer than
+/// RESTART_WINDOW per pause. A wait resumes from the same cursor. One quiet
+/// line on stderr says why it paused.
 pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     let started = Instant::now();
+    let wait = req.op == "wait";
+    let indefinite = wait && req.args.get("timeout") == Some(&Value::Null);
+    let wait_secs = req.args["timeout"].as_u64().unwrap_or(WAIT_DEFAULT_SECS);
+    // An indefinite wait has no budget of its own; the window still bounds it.
+    let budget = (!indefinite).then(|| Duration::from_secs(timeout.max(1)));
     let mut attempt = req.clone();
     let mut attempt_timeout = timeout;
     let mut announced = false;
@@ -233,15 +253,20 @@ pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
                     eprintln!("fray: daemon restarting ({reason}); reconnecting");
                     announced = true;
                 }
-                if !await_daemon(home, RESTART_WINDOW) {
+                let left = budget.map(|b| b.saturating_sub(started.elapsed()));
+                let window = left.map_or(RESTART_WINDOW, |left| left.min(RESTART_WINDOW));
+                if window.is_zero() || !await_daemon(home, window) {
                     return Err(error);
                 }
-                if let Some(secs) = req.args.get("timeout").and_then(Value::as_u64) {
-                    if req.op == "wait" {
-                        let left = secs.saturating_sub(started.elapsed().as_secs());
-                        attempt.args["timeout"] = json!(left);
-                        attempt_timeout = left.saturating_add(5);
-                    }
+                let elapsed = started.elapsed().as_secs();
+                if wait && !indefinite {
+                    let secs = wait_secs.saturating_sub(elapsed);
+                    attempt.args["timeout"] = json!(secs);
+                    attempt_timeout = secs
+                        .saturating_add(5)
+                        .min(timeout.saturating_sub(elapsed).max(1));
+                } else if !indefinite {
+                    attempt_timeout = timeout.saturating_sub(elapsed).max(1);
                 }
             }
             other => return other,

@@ -477,6 +477,8 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     reply["restart"] = json!(true);
                     reply["reason"] = json!(reason);
                     reply["grace_ms"] = json!(plan.grace.as_millis() as u64);
+                    // Lets the requester confirm this process has exited.
+                    reply["pid"] = json!(std::process::id());
                     eprintln!(
                         "restart requested ({reason}); draining for up to {}ms",
                         plan.grace.as_millis()
