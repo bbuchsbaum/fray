@@ -3484,7 +3484,7 @@ pub const LANE_PATIENCE_MS: i64 = 10 * 60_000;
 /// holding its lanes. Waiting always counts as reachable for routing.
 pub const WAIT_HOLD_MS: i64 = 4 * 60 * 60_000;
 /// A wait refreshes its row every minute; older rows are not waiting.
-const WAIT_FRESH_MS: i64 = 150_000;
+pub(crate) const WAIT_FRESH_MS: i64 = 150_000;
 
 fn session_label(session: &str) -> String {
     clip(session, 20)

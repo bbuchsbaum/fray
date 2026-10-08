@@ -77,6 +77,8 @@ struct Shared {
     metrics_readers: AtomicUsize,
     limits: Limits,
     socket: PathBuf,
+    /// Open long-lived connections, for `occupancy`.
+    long_lived: crate::occupancy::Registry,
 }
 
 pub fn read_frame<R: BufRead>(r: &mut R, limit: usize) -> io::Result<Option<String>> {
@@ -165,6 +167,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         metrics_readers: AtomicUsize::new(0),
         limits,
         socket: socket.clone(),
+        long_lived: Default::default(),
     });
     eprintln!(
         "fray {} listening on {} (synchronous={})",
@@ -291,7 +294,7 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
         if shared.stop.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let _long_client = if matches!(req.op.as_str(), "watch" | "watch_attention")
+        let long_client = if matches!(req.op.as_str(), "watch" | "watch_attention")
             || (req.op == "wait" && req.args["timeout"] != 0)
         {
             match reserve_long_client(shared) {
@@ -304,7 +307,17 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
         } else {
             None
         };
+        let _open = long_client
+            .as_ref()
+            .map(|_| shared.long_lived.open(&req, now_ms()));
         match req.op.as_str() {
+            "occupancy" => {
+                let response = match occupancy(shared, &req) {
+                    Ok(v) => success(v),
+                    Err(e) => failure(e),
+                };
+                write_frame(&mut stream, &response)?;
+            }
             "stats" | "friction" => {
                 // Each WAL reader adds SQLite descriptors beyond the stream
                 // admission budget. Keep those within its reserved headroom.
@@ -456,6 +469,10 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                                     .as_array_mut()
                                     .unwrap()
                                     .push(json!("keepalive"));
+                                v["capabilities"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(json!("occupancy"));
                                 v["capacity"] = json!({"clients":shared.clients.load(Ordering::SeqCst),"long_lived":shared.long_clients.load(Ordering::SeqCst),"client_limit":shared.limits.clients,"long_limit":shared.limits.long,"short_reserved":shared.limits.clients-shared.limits.long,"descriptor_limit":shared.limits.descriptors});
                             }
                             success(v)
@@ -539,6 +556,25 @@ fn keepalive_start(shared: &Shared, req: &Request) -> Result<Value> {
         crate::keepalive::DRIVE_ARGS[1]
     ]);
     Ok(status)
+}
+/// `occupancy`: who a restart would interrupt (see `crate::occupancy`).
+/// A read under the store lock and nothing else: no presence, no
+/// acknowledgment. The caller's own connection is not counted.
+fn occupancy(shared: &Shared, req: &Request) -> Result<Value> {
+    check_fields(&req.args, &[])?;
+    let now = now_ms();
+    let report =
+        crate::occupancy::collect(&shared.store.lock().map_err(|_| poisoned())?.conn, now)?;
+    let clients = crate::occupancy::Clients {
+        connected: shared.clients.load(Ordering::SeqCst).saturating_sub(1),
+        long_lived: shared.long_clients.load(Ordering::SeqCst),
+    };
+    Ok(crate::occupancy::finish(
+        report,
+        shared.long_lived.snapshot(),
+        clients,
+        now,
+    ))
 }
 /// A wait error that ends the connection, and every indefinite wait.
 fn wait_terminal(indefinite: bool, result: &Result<Value>) -> bool {
@@ -1011,6 +1047,7 @@ mod metrics_tests {
                 descriptors: 512,
             },
             socket: dir.join("bus.sock"),
+            long_lived: Default::default(),
         });
         // Ordinary dispatch would block here. Both metrics must finish
         // before the publisher's guard is released.

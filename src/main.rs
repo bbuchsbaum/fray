@@ -208,6 +208,9 @@ enum Cmd {
     },
     Stop,
     Ping,
+    /// Who a daemon restart would interrupt: open waits, listeners, drives,
+    /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
+    Occupancy,
     /// Register this terminal identity and read a bounded current-state snapshot.
     Join {
         #[arg(long, value_delimiter = ',')]
@@ -3348,6 +3351,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         }
         Cmd::Stop => ("shutdown", json!({})),
         Cmd::Ping => ("ping", json!({})),
+        Cmd::Occupancy => ("occupancy", json!({})),
         Cmd::Join {
             topics,
             role,

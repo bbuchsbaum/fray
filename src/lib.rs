@@ -12,6 +12,7 @@ pub mod model;
 pub mod mote;
 pub mod mote_workflow;
 pub mod notification;
+pub mod occupancy;
 pub mod owner;
 pub mod presence;
 pub mod recovery;
