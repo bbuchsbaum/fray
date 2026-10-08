@@ -3,6 +3,9 @@
 Includes Python transport/scheduling overhead. Does not measure LLM attention.
 """
 import argparse, json, os, pathlib, platform, socket, statistics, subprocess, tempfile, threading, time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('binary',nargs='?',default='target/release/fray')

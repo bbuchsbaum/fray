@@ -156,6 +156,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
     fs::set_permissions(home.join("state.db"), fs::Permissions::from_mode(0o600))?;
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+    let registration = crate::registry::register(&home, normal);
     let shared = Arc::new(Shared {
         store: Mutex::new(store),
         changed: Condvar::new(),
@@ -220,6 +221,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         });
     }
     let _ = fs::remove_file(socket);
+    drop(registration);
     drop(lock);
     Ok(())
 }

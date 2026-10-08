@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Bounded local Fray daemon soak; writes raw samples and a qualification report."""
-import argparse, hashlib, json, pathlib, shutil, socket, subprocess, sys, tempfile, time
+import argparse, hashlib, json, os, pathlib, shutil, socket, subprocess, sys, tempfile, time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 DEFAULTS = {"agents": 30, "warmup": 60, "duration": 7200, "fd_limit": 256,
             "rss_mib_limit": 256, "wal_mib_limit": 64, "p95_publish_ms_limit": 100}

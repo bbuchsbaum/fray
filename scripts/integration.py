@@ -3,6 +3,9 @@
 Usage: python3 scripts/integration.py [target/debug/fray]
 """
 import concurrent.futures, json, os, pathlib, shutil, socket, subprocess, sys, tempfile, threading, time, unittest
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 BINARY = pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'target/debug/fray').resolve()
 AGENT = pathlib.Path(__file__).resolve().parents[1] / 'tests/fixtures/agent.py'

@@ -1,0 +1,4 @@
+# Daemons started by `cargo test` and `cargo run` register under the build
+# directory, never in the user's daemon registry ($HOME/.local/state/fray).
+[env]
+FRAY_STATE_DIR = { value = "target/fray-state", relative = true, force = true }
