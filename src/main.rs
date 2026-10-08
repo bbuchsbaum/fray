@@ -221,6 +221,14 @@ enum Cmd {
     /// Who a daemon restart would interrupt: open waits, listeners, drives,
     /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
     Occupancy,
+    /// Restart this home's daemon. Only --dry-run is available yet: who a
+    /// restart would interrupt, read-only. Exit 0 idle, 3 busy, 5 only armed
+    /// waits (or, on an old daemon, recent activity), 6 an old daemon with
+    /// nothing live visible, 7 no daemon running.
+    Restart {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Register this terminal identity and read a bounded current-state snapshot.
     Join {
         #[arg(long, value_delimiter = ',')]
@@ -3406,6 +3414,23 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         }
         Cmd::Ping => ("ping", json!({})),
         Cmd::Occupancy => ("occupancy", json!({})),
+        Cmd::Restart { dry_run: false } => {
+            return Err(Error::new(
+                "not_implemented",
+                "fray restart without --dry-run is not implemented yet; check with `fray restart --dry-run`, then use `fray stop --restart` and `fray start`",
+            ))
+        }
+        Cmd::Restart { dry_run: true } => {
+            let preflight = fray::restart::preflight(&home)?;
+            if cli.json {
+                output(&preflight.to_json(), true)?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(preflight.text().as_bytes())?;
+                stdout.flush()?;
+            }
+            std::process::exit(preflight.verdict.exit_code());
+        }
         Cmd::Join {
             topics,
             role,
