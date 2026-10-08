@@ -161,7 +161,11 @@ fn a_new_notice_supersedes_the_open_one() {
 #[test]
 fn the_system_name_is_reserved() {
     let mut s = Store::memory().unwrap();
-    for name in ["fray", "Fray", "f-r-a-y", "FRAY"] {
+    // The owner's rule: case, separators, a numeric suffix and common
+    // substitutions are ignored; an unrelated longer name is not.
+    for name in [
+        "fray", "Fray", "f-r-a-y", "FRAY", "fray1", "fray-2", "f.r.a.y",
+    ] {
         assert_eq!(
             refused(&mut s, Request::new("join", name, json!({}))),
             "reserved_system",
@@ -260,6 +264,97 @@ fn a_board_with_an_agent_already_named_fray_refuses_to_announce() {
         "reserved_system"
     );
     assert_eq!(count(&s, "SELECT count(*) FROM cards"), 0);
+    // The remedy the error names works: the agent can still leave, and then
+    // the daemon can announce. It cannot rejoin under the name.
+    at(&mut s, "fray", "leave", json!({}));
+    let v = at(&mut s, "m", "announce", restart("x"));
+    assert_eq!(v["card"]["author"], "fray");
+    assert_eq!(
+        refused(&mut s, Request::new("join", "fray", json!({}))),
+        "reserved_system"
+    );
+    assert_eq!(
+        refused(&mut s, Request::new("heartbeat", "fray", json!({}))),
+        "reserved_system"
+    );
+}
+
+#[test]
+fn a_legacy_lookalike_can_still_leave() {
+    let mut s = Store::memory().unwrap();
+    s.conn
+        .execute(
+            "INSERT INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES('fray1','worker','[\"*\"]',1,?1,?1)",
+            [NOW],
+        )
+        .unwrap();
+    assert_eq!(
+        refused(
+            &mut s,
+            Request::new("post", "fray1", json!({"title":"x","summary":"y"}))
+        ),
+        "reserved_system"
+    );
+    assert_eq!(at(&mut s, "fray1", "leave", json!({}))["enabled"], false);
+}
+
+/// Mote items and requests addressed to `fray` (after it exists as the
+/// notice author) are unknown recipients, never a sync-wide failure.
+#[test]
+fn mote_mail_to_fray_does_not_wedge_sync() {
+    let mut s = Store::memory().unwrap();
+    for who in ["alice", "bob"] {
+        at(&mut s, who, "join", json!({"topics":[]}));
+    }
+    at(
+        &mut s,
+        "alice",
+        "mote_bind",
+        json!({"store":"/r/.mote","store_id":"st-A","cursor_mode":"admission_v1","genesis_digest":"genesis"}),
+    );
+    at(&mut s, "alice", "announce", restart("x"));
+    let ingest = at(
+        &mut s,
+        "alice",
+        "mote_ingest",
+        json!({"store_id":"st-A","sync_revision":1,"after":null,"cursor":"a","claims":[],
+            "items":[{"key":"k1","recipient":"fray","title":"t","summary":"s"},
+                     {"key":"k2","recipient":"Fray1","title":"t","summary":"s"},
+                     {"key":"k3","recipient":"bob","title":"t","summary":"s"}]}),
+    );
+    assert_eq!(
+        ingest["unknown_recipients"],
+        json!(["Fray1", "fray"]),
+        "{ingest}"
+    );
+    assert_eq!(ingest["created"].as_array().unwrap().len(), 1, "{ingest}");
+    let requests = at(
+        &mut s,
+        "alice",
+        "mote_requests_sync",
+        json!({"store_id":"st-A","requests":[
+            {"msg_id":"m1","recipient":"fray","from":"alice","state":"open","body":"?"},
+            {"msg_id":"m2","recipient":"bob","from":"alice","state":"open","body":"?"}]}),
+    );
+    assert_eq!(
+        requests["unknown_recipients"].as_array().unwrap().len(),
+        1,
+        "{requests}"
+    );
+    assert_eq!(requests["unknown_recipients"][0]["recipient"], "fray");
+    assert_eq!(
+        requests["created"].as_array().unwrap().len(),
+        1,
+        "{requests}"
+    );
+    // Kept for R3, like any request nobody here can be asked.
+    assert_eq!(
+        count(
+            &s,
+            "SELECT count(*) FROM mote_requests_unknown WHERE recipient='fray'"
+        ),
+        1
+    );
 }
 
 #[test]

@@ -19,27 +19,16 @@ pub const ESCALATION: &str = "escalation";
 /// Like `mote`, it never joins or acts: the notice records who asked for it.
 pub const SYSTEM: &str = "fray";
 
-/// `fray` in any case or with separators (Fray, f-r-a-y): a name a reader
-/// could take for the daemon speaking.
-pub fn system_lookalike(name: &str) -> bool {
-    name.to_lowercase()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        == SYSTEM
-}
-
-/// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
-/// owner1 …): case, separators and a numeric suffix are ignored.
-fn owner_lookalike(name: &str) -> bool {
+/// A name folded the way a reader might misread it: case and separators
+/// ignored, a numeric suffix dropped (owner1), then common character
+/// substitutions undone (0wner, own3r, 0vvner).
+fn misread(name: &str) -> String {
     let alnum: String = name
         .to_lowercase()
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect();
-    // A numeric suffix first (owner1), then common character substitutions
-    // (0wner, own3r, 0vvner).
-    let folded: String = alnum
+    alnum
         .trim_end_matches(|c: char| c.is_ascii_digit())
         .chars()
         .map(|c| match c {
@@ -49,8 +38,19 @@ fn owner_lookalike(name: &str) -> bool {
             _ => c,
         })
         .collect::<String>()
-        .replace("vv", "w");
-    folded == OWNER
+        .replace("vv", "w")
+}
+
+/// Names a reader could mistake for the owner (OWNER, 0wner, o-w-n-e-r,
+/// owner1 …).
+fn owner_lookalike(name: &str) -> bool {
+    misread(name) == OWNER
+}
+
+/// Names a reader could take for the daemon speaking (Fray, f-r-a-y, fray1
+/// …), by the same rule as the owner's.
+pub fn system_lookalike(name: &str) -> bool {
+    misread(name) == SYSTEM
 }
 
 /// Marks an ask card the owner approved or declined; set only by the owner.
@@ -462,7 +462,9 @@ impl Store {
                 "set --as/FRAY_AGENT to a unique terminal identity (1-80 name characters)",
             ));
         }
-        if system_lookalike(&req.actor) {
+        // `leave` stays open, so an agent that joined under such a name
+        // before it was reserved can still step aside.
+        if system_lookalike(&req.actor) && req.op != "leave" {
             return Err(Error::new(
                 "reserved_system",
                 "`fray` is reserved for notices the daemon itself authors; choose another name",
@@ -2539,6 +2541,7 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                 text(key, "key", 300, false)?;
                 // A Mote actor that has never joined this board has no inbox here.
                 if recipient == MOTE
+                    || system_lookalike(recipient)
                     || !conn.query_row(
                         "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)",
                         [recipient],
@@ -2596,7 +2599,12 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                     now,
                 ) {
                     Ok(card) => card,
-                    Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
+                    Err(e)
+                        if matches!(
+                            e.code.as_str(),
+                            "invalid" | "reserved_owner" | "reserved_system"
+                        ) =>
+                    {
                         if subject.is_none() {
                             conn.execute(
                                 "DELETE FROM mote_events WHERE store_id=? AND key=? AND recipient=?",
@@ -2725,7 +2733,7 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                             [recipient],
                             |x| x.get(0),
                         )?;
-                        if recipient == MOTE || !joined {
+                        if recipient == MOTE || system_lookalike(recipient) || !joined {
                             // Kept for R3: nobody here can be asked, so it
                             // escalates once its grace period passes.
                             conn.execute(
@@ -2774,7 +2782,12 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                             now,
                         ) {
                             Ok(card) => card,
-                            Err(e) if e.code == "invalid" || e.code == "reserved_owner" => {
+                            Err(e)
+                                if matches!(
+                                    e.code.as_str(),
+                                    "invalid" | "reserved_owner" | "reserved_system"
+                                ) =>
+                            {
                                 invalid.push(json!({"msg_id":msg_id,"recipient":recipient,"error":e.message}));
                                 continue;
                             }
@@ -5032,17 +5045,16 @@ fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "INSERT OR IGNORE INTO agents(name,role,topics,enabled,joined_ms,last_seen_ms) VALUES(?,'worker','[]',0,?,0)",
         params![SYSTEM, now],
     )?;
-    // A board where someone joined as `fray` before the name was reserved
-    // keeps that agent; its notices would read as theirs, so refuse.
-    let (enabled, seen): (bool, i64) = conn.query_row(
-        "SELECT enabled,last_seen_ms FROM agents WHERE name=?",
-        [SYSTEM],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    if enabled || seen > 0 {
+    // Someone who joined as `fray` before the name was reserved and is
+    // still joined would read as the notices' author: refuse until they leave.
+    let enabled: bool =
+        conn.query_row("SELECT enabled FROM agents WHERE name=?", [SYSTEM], |r| {
+            r.get(0)
+        })?;
+    if enabled {
         return Err(Error::new(
             "reserved_system",
-            "an agent joined this board as `fray` before the name was reserved; it must leave and rejoin under another name",
+            "an agent joined this board as `fray` before the name was reserved; run `fray --as fray leave`, rejoin under another name, then announce again",
         ));
     }
     let (from, to) = (builds[0], builds[1]);
