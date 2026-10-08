@@ -18,8 +18,12 @@ import socket
 import subprocess
 import sys
 import time
+import tempfile
 import termios
 import struct
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 if len(sys.argv) == 3 and sys.argv[1] == 'mark-idle':
     pathlib.Path(sys.argv[2]).write_text(str(time.time()))

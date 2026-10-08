@@ -29,6 +29,9 @@ import subprocess
 import sys
 import tempfile
 import time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 parser = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -104,6 +107,7 @@ def main():
     root = tempfile.mkdtemp(prefix="fbm-", dir=args.home_parent)
     home = os.path.join(root, ".fray")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FRAY_", "MOTE_"))}
+    env["FRAY_STATE_DIR"] = os.environ["FRAY_STATE_DIR"]
     env["FRAY_HOME"] = home
     # The host's own fray calls must reach this board with this build.
     env["PATH"] = os.path.dirname(binary) + os.pathsep + env.get("PATH", "")

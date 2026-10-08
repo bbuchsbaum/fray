@@ -15,6 +15,7 @@ pub mod notification;
 pub mod owner;
 pub mod presence;
 pub mod recovery;
+pub mod registry;
 pub mod retention;
 pub mod review;
 pub mod routing;
