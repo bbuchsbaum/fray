@@ -462,9 +462,22 @@ impl Store {
                 "set --as/FRAY_AGENT to a unique terminal identity (1-80 name characters)",
             ));
         }
-        // `leave` stays open, so an agent that joined under such a name
-        // before it was reserved can still step aside.
-        if system_lookalike(&req.actor) && req.op != "leave" {
+        // `leave` stays open only to an agent that joined under such a name
+        // before it was reserved, so it can step aside; never to the
+        // daemon's own notice author.
+        let lookalike = system_lookalike(&req.actor);
+        if lookalike
+            && !(req.op == "leave"
+                && self
+                    .conn
+                    .query_row(
+                        "SELECT enabled FROM agents WHERE name=?",
+                        [&req.actor],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false))
+        {
             return Err(Error::new(
                 "reserved_system",
                 "`fray` is reserved for notices the daemon itself authors; choose another name",
@@ -549,8 +562,9 @@ impl Store {
         } else if req.op != "join" && !announce {
             registered(&tx, &req.actor)?;
         }
-        // An announcement binds no session and records no presence.
-        let replaced = if announce {
+        // An announcement binds no session and records no presence, nor
+        // does a legacy lookalike stepping aside.
+        let replaced = if announce || lookalike {
             None
         } else {
             bind_session(&tx, req, now)?
@@ -604,7 +618,8 @@ impl Store {
         if !matches!(
             req.op.as_str(),
             "present" | "peer_present" | "terminal_turn" | "announce"
-        ) {
+        ) && !lookalike
+        {
             tx.execute(
                 "UPDATE agents SET last_seen_ms=? WHERE name=?",
                 params![now, req.actor],

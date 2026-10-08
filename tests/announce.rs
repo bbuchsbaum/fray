@@ -295,7 +295,41 @@ fn a_legacy_lookalike_can_still_leave() {
         ),
         "reserved_system"
     );
-    assert_eq!(at(&mut s, "fray1", "leave", json!({}))["enabled"], false);
+    let mut leave = Request::new("leave", "fray1", json!({}));
+    leave.session = Some("claude:legacy".into());
+    assert_eq!(s.execute_at(&leave, NOW + 9_000).unwrap()["enabled"], false);
+    // Stepping aside binds no session.
+    assert_eq!(
+        count(&s, "SELECT count(*) FROM sessions WHERE agent='fray1'"),
+        0
+    );
+    // Once gone, the exemption is gone too.
+    assert_eq!(refused(&mut s, leave), "reserved_system");
+}
+
+#[test]
+fn the_notice_author_itself_cannot_leave() {
+    let mut s = Store::memory().unwrap();
+    at(&mut s, "m", "announce", restart("x"));
+    let mut leave = Request::new("leave", "fray", json!({}));
+    leave.session = Some("claude:abc".into());
+    assert_eq!(refused(&mut s, leave), "reserved_system");
+    assert_eq!(
+        count(&s, "SELECT count(*) FROM sessions WHERE agent='fray'"),
+        0
+    );
+    assert_eq!(
+        count(
+            &s,
+            "SELECT count(*) FROM agents WHERE name='fray' AND enabled=0 AND last_seen_ms=0"
+        ),
+        1
+    );
+    // Nor can a name that never joined.
+    assert_eq!(
+        refused(&mut s, Request::new("leave", "fray2", json!({}))),
+        "reserved_system"
+    );
 }
 
 /// Mote items and requests addressed to `fray` (after it exists as the
