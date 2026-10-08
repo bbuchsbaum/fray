@@ -79,6 +79,54 @@ struct Shared {
     socket: PathBuf,
     /// Open long-lived connections, for `occupancy`.
     long_lived: crate::occupancy::Registry,
+    /// How a requested shutdown ends: set, under the store lock, before `stop`.
+    stopping: Mutex<Stopping>,
+}
+/// A restart reason makes each long-lived handler tell its client to
+/// reconnect; the grace bounds how long in-flight requests may finish.
+#[derive(Default)]
+struct Stopping {
+    restart: Option<String>,
+    grace: Duration,
+}
+/// A restarting daemon's refusal: nothing on this connection was executed or
+/// acknowledged by it. Clients reconnect and resume from their own cursors.
+/// The `unavailable` code keeps older clients on their reconnect paths.
+fn restarting(shared: &Shared) -> Option<Error> {
+    let reason = shared
+        .stopping
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .restart
+        .clone()?;
+    Some(
+        Error::new(
+            "unavailable",
+            format!("daemon restarting ({reason}); nothing was acknowledged, reconnect and resume from your cursor"),
+        )
+        .with_details(json!({"restarting":true,"reason":reason})),
+    )
+}
+/// The failure envelope, marked as a `restarting` control frame when it is one.
+fn failure_frame(error: Error) -> Value {
+    let reason = error
+        .details
+        .as_ref()
+        .filter(|d| d["restarting"] == true)
+        .map(|d| d["reason"].clone());
+    let mut frame = failure(error);
+    if let Some(reason) = reason {
+        frame["type"] = json!("restarting");
+        frame["reason"] = reason;
+    }
+    frame
+}
+/// A stream handler that saw `stop`: on a restart, say so before closing.
+fn stream_stopped(stream: &mut UnixStream, shared: &Shared) -> Result<()> {
+    match restarting(shared) {
+        Some(error) => write_frame(stream, &failure_frame(error)),
+        None => Ok(()),
+    }
 }
 
 pub fn read_frame<R: BufRead>(r: &mut R, limit: usize) -> io::Result<Option<String>> {
@@ -169,6 +217,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         limits,
         socket: socket.clone(),
         long_lived: Default::default(),
+        stopping: Mutex::new(Stopping::default()),
     });
     eprintln!(
         "fray {} listening on {} (synchronous={})",
@@ -223,7 +272,19 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
             }
         });
     }
+    // Refuse new connections at once, then let in-flight requests finish and
+    // long-lived handlers send their notices, within the requested grace.
+    drop(listener);
     let _ = fs::remove_file(socket);
+    let grace = shared
+        .stopping
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .grace;
+    let deadline = Instant::now() + grace;
+    while shared.clients.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
     drop(registration);
     drop(lock);
     Ok(())
@@ -294,7 +355,7 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
             }
         };
         if shared.stop.load(Ordering::SeqCst) {
-            return Ok(());
+            return stream_stopped(&mut stream, shared);
         }
         let long_client = if matches!(req.op.as_str(), "watch" | "watch_attention")
             || (req.op == "wait" && req.args["timeout"] != 0)
@@ -419,16 +480,30 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                 write_frame(&mut stream, &response)?;
             }
             "shutdown" => {
-                if let Err(error) = check_fields(&req.args, &[]) {
-                    write_frame(&mut stream, &failure(error))?;
-                    continue;
+                let plan = match shutdown_plan(&req.args) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        write_frame(&mut stream, &failure(error))?;
+                        continue;
+                    }
+                };
+                let mut reply = json!({"stopping":true});
+                if let Some(reason) = &plan.restart {
+                    reply["restart"] = json!(true);
+                    reply["reason"] = json!(reason);
+                    reply["grace_ms"] = json!(plan.grace.as_millis() as u64);
+                    eprintln!(
+                        "restart requested ({reason}); draining for up to {}ms",
+                        plan.grace.as_millis()
+                    );
                 }
                 {
                     let _guard = shared.store.lock().map_err(|_| poisoned())?;
+                    *shared.stopping.lock().unwrap_or_else(|e| e.into_inner()) = plan;
                     shared.stop.store(true, Ordering::SeqCst);
                     shared.changed.notify_all();
                 }
-                let result = write_frame(&mut stream, &success(json!({"stopping":true})));
+                let result = write_frame(&mut stream, &success(reply));
                 let _ = UnixStream::connect(&shared.socket); // Wake the blocking accept().
                 return result;
             }
@@ -475,6 +550,11 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                                     .as_array_mut()
                                     .unwrap()
                                     .push(json!("occupancy"));
+                                // `shutdown` takes {reason, restart, grace_ms}.
+                                v["capabilities"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(json!("graceful_restart"));
                                 v["capacity"] = json!({"clients":shared.clients.load(Ordering::SeqCst),"long_lived":shared.long_clients.load(Ordering::SeqCst),"client_limit":shared.limits.clients,"long_limit":shared.limits.long,"short_reserved":shared.limits.clients-shared.limits.long,"descriptor_limit":shared.limits.descriptors});
                             }
                             success(v)
@@ -488,6 +568,29 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
         }
     }
     Ok(())
+}
+/// `shutdown` with no arguments stops at once, as it always has. With
+/// `restart`, clients are told to reconnect and in-flight requests get up to
+/// `grace_ms` (default 2s, at most 10s) to finish.
+fn shutdown_plan(args: &Value) -> Result<Stopping> {
+    check_fields(args, &["reason", "restart", "grace_ms"])?;
+    let restart = boolean(args, "restart", false)?;
+    let reason = match args.get("reason") {
+        Some(_) => {
+            let reason = string(args, "reason")?;
+            text(reason, "reason", 200, false)?;
+            Some(reason.to_owned())
+        }
+        None => None,
+    };
+    if reason.is_some() && !restart {
+        return Err(Error::invalid("reason applies only with restart"));
+    }
+    let grace = bounded(args, "grace_ms", if restart { 2000 } else { 0 }, 0, 10_000)?;
+    Ok(Stopping {
+        restart: restart.then(|| reason.unwrap_or_else(|| "restart".into())),
+        grace: Duration::from_millis(grace as u64),
+    })
 }
 /// `keepalive_start`: the daemon, not the agent, starts the keepalive's drive,
 /// so the drive never inherits a sandbox from the agent's tool call
@@ -588,7 +691,7 @@ fn wait_terminal(indefinite: bool, result: &Result<Value>) -> bool {
 fn wait_reply(result: Result<Value>) -> Value {
     match result {
         Ok(v) => success(v),
-        Err(e) => failure(e),
+        Err(e) => failure_frame(e),
     }
 }
 /// Runs a wait that the client's hang-up cancels, and replies. Returns whether
@@ -760,6 +863,11 @@ fn wait_body(
         if unexpected_input.is_some_and(|input| input.load(Ordering::SeqCst)) {
             return Err(Error::new("protocol", "unexpected input while waiting"));
         }
+        if shared.stop.load(Ordering::SeqCst) {
+            if let Some(error) = restarting(shared) {
+                return Err(error);
+            }
+        }
         if shared.stop.load(Ordering::SeqCst) || cancelled.is_some_and(|c| c.load(Ordering::SeqCst))
         {
             return Err(Error::new(
@@ -885,9 +993,12 @@ fn watch_attention(stream: &mut UnixStream, shared: &Shared, req: &Request) -> R
                         if unexpected_input.load(Ordering::SeqCst) {
                             return Err(Error::new("protocol", "attention streams are receive-only; use a separate RPC connection for acknowledgments"));
                         }
-                        if shared.stop.load(Ordering::SeqCst) || disconnected.load(Ordering::SeqCst)
-                        {
+                        if disconnected.load(Ordering::SeqCst) {
                             return Ok(());
+                        }
+                        if shared.stop.load(Ordering::SeqCst) {
+                            drop(store);
+                            return stream_stopped(stream, shared);
                         }
                         let now = Instant::now();
                         if deadline.is_some_and(|end| now >= end) {
@@ -987,7 +1098,8 @@ fn watch(stream: &mut UnixStream, shared: &Shared, req: &Request) -> Result<()> 
             let mut store = shared.store.lock().map_err(|_| poisoned())?;
             loop {
                 if shared.stop.load(Ordering::SeqCst) {
-                    return Ok(());
+                    drop(store);
+                    return stream_stopped(stream, shared);
                 }
                 let batch = store.events(cursor, 64)?;
                 if !batch.is_empty() {
@@ -1050,6 +1162,7 @@ mod metrics_tests {
             },
             socket: dir.join("bus.sock"),
             long_lived: Default::default(),
+            stopping: Mutex::new(Stopping::default()),
         });
         // Ordinary dispatch would block here. Both metrics must finish
         // before the publisher's guard is released.

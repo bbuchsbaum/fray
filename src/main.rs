@@ -206,7 +206,17 @@ enum Cmd {
         #[arg(long)]
         normal: bool,
     },
-    Stop,
+    /// Stop the daemon. With --restart, clients are told to reconnect, in-flight
+    /// requests may finish, and this returns once the daemon has exited.
+    Stop {
+        #[arg(long)]
+        restart: bool,
+        #[arg(long, requires = "restart")]
+        reason: Option<String>,
+        /// How long in-flight requests may take to finish (at most 10000).
+        #[arg(long, requires = "restart")]
+        grace_ms: Option<u64>,
+    },
     Ping,
     /// Who a daemon restart would interrupt: open waits, listeners, drives,
     /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
@@ -3362,7 +3372,28 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             server::serve(&home, normal)?;
             return Ok(None);
         }
-        Cmd::Stop => ("shutdown", json!({})),
+        Cmd::Stop { restart: false, .. } => ("shutdown", json!({})),
+        Cmd::Stop {
+            restart: true,
+            reason,
+            grace_ms,
+        } => {
+            let mut args = json!({"restart":true});
+            if let Some(reason) = reason {
+                args["reason"] = json!(reason);
+            }
+            if let Some(grace) = grace_ms {
+                args["grace_ms"] = json!(grace);
+            }
+            let mut value = send(&home, &actor, "shutdown", args, None, 10)?;
+            let grace = value["grace_ms"].as_u64().unwrap_or(2000);
+            // The replacement can start only once this daemon releases the lock.
+            value["exited"] = json!(client::await_exit(
+                &home,
+                Duration::from_millis(grace + 2000)
+            )?);
+            return Ok(Some(value));
+        }
         Cmd::Ping => ("ping", json!({})),
         Cmd::Occupancy => ("occupancy", json!({})),
         Cmd::Join {
