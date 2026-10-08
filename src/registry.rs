@@ -53,9 +53,12 @@ pub struct Record {
 pub enum Liveness {
     /// A daemon answered a ping on the home's socket.
     Running,
-    /// Nothing accepts connections on the home's socket.
+    /// Nothing accepts connections on the home's socket and the recorded pid
+    /// is gone.
     Dead,
-    /// The socket accepted but did not answer cleanly (for example a timeout).
+    /// The socket accepted but did not answer cleanly (for example a timeout),
+    /// or it refused while the recorded pid is still alive: a refused connect
+    /// can mean a full backlog on a wedged daemon or a removed `bus.sock`.
     /// Treat as possibly alive: never prune or replace on this result.
     Unknown,
 }
@@ -121,7 +124,7 @@ pub fn list_in(state_dir: &Path) -> Result<Vec<Entry>> {
         if record_path(state_dir, &record.home) != path {
             continue;
         }
-        let (liveness, ping) = probe(&record.home);
+        let (liveness, ping) = probe(&record);
         out.push(Entry {
             path,
             record,
@@ -138,10 +141,15 @@ pub fn list_in(state_dir: &Path) -> Result<Vec<Entry>> {
 /// The file is removed only if it still holds the same record and the home
 /// still does not answer, so a daemon that re-registered meanwhile keeps its
 /// record. Running and unknown entries are never pruned.
+///
+/// A daemon that registers between the last check and the removal loses its
+/// record until it next registers. The record is advisory and every reader
+/// confirms liveness by a ping, so that window is accepted rather than closed
+/// with a lock a starting daemon could then fail to take.
 pub fn prune(entry: &Entry) -> Result<bool> {
     if entry.liveness != Liveness::Dead
         || read(&entry.path).as_ref() != Some(&entry.record)
-        || probe(&entry.record.home).0 != Liveness::Dead
+        || probe(&entry.record).0 != Liveness::Dead
     {
         return Ok(false);
     }
@@ -156,11 +164,19 @@ fn read(path: &Path) -> Option<Record> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-fn probe(home: &Path) -> (Liveness, Option<Value>) {
+fn probe(record: &Record) -> (Liveness, Option<Value>) {
     // The socket is derived from the home, not taken from the record.
-    match client::rpc(home, &Request::new("ping", "", json!({})), 1) {
+    match client::probe(&record.home, &Request::new("ping", "", json!({})), 1) {
         Ok(ping) => (Liveness::Running, Some(ping)),
-        Err(error) if error.code == "unavailable" => (Liveness::Dead, None),
+        // The lock would be the authority, but taking it, even briefly, could
+        // make a starting daemon lose its try_lock. A live pid errs toward
+        // alive; a reused pid only delays pruning.
+        Err(error)
+            if error.code == "unavailable"
+                && !crate::keepalive::pid_alive(i64::from(record.pid)) =>
+        {
+            (Liveness::Dead, None)
+        }
         Err(_) => (Liveness::Unknown, None),
     }
 }
@@ -300,7 +316,10 @@ mod tests {
         let state = scratch();
         let home = state.join("home");
         fs::create_dir(&home).unwrap();
-        let path = write(&state, &record(&home, 9)).unwrap();
+        // A pid that is certainly gone: a child already reaped.
+        let mut child = process::Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        let path = write(&state, &record(&home, child.id())).unwrap();
         // A record stored under another home's hash and a malformed file.
         fs::copy(&path, state.join("daemons/misfiled.json")).unwrap();
         fs::write(state.join("daemons/junk.json"), b"{").unwrap();
@@ -312,6 +331,21 @@ mod tests {
         assert!(!path.exists());
         assert!(!prune(&entries[0]).unwrap());
         assert!(list_in(&state.join("absent")).unwrap().is_empty());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_refused_socket_with_a_live_pid_is_unknown_and_kept() {
+        let state = scratch();
+        let home = state.join("home");
+        fs::create_dir(&home).unwrap();
+        // This process is alive; its home has no socket (removed, or a backlog
+        // that refuses connections looks the same).
+        let path = write(&state, &record(&home, process::id())).unwrap();
+        let entries = list_in(&state).unwrap();
+        assert_eq!(entries[0].liveness, Liveness::Unknown);
+        assert!(!prune(&entries[0]).unwrap());
+        assert!(path.exists());
         fs::remove_dir_all(state).unwrap();
     }
 }

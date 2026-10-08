@@ -248,6 +248,14 @@ pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
         }
     }
 }
+/// One request on one connection: no compatibility handshake, no build
+/// warning, no reconnect while a daemon restarts. For read-only inspection of
+/// daemons that may be old or wedged (`fray daemons`), where `rpc`'s recovery
+/// would stall or speak on stderr.
+pub fn probe(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
+    let mut reader = connect(home, timeout)?;
+    exchange(&mut reader, req)
+}
 fn rpc_mapped(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     rpc_inner(home, req, timeout).map_err(|error| {
         if req.op == "wait"
