@@ -4,6 +4,7 @@ compile_error!("Fray currently supports Unix (Linux/macOS) only.");
 pub mod archive;
 pub mod attention;
 pub mod client;
+pub mod daemons;
 pub mod diagnostics;
 pub mod dispatch;
 pub mod dispatch_client;
