@@ -225,6 +225,10 @@ enum Cmd {
         /// Only daemons whose build differs from this client's.
         #[arg(long)]
         stale: bool,
+        /// Also find unregistered daemons (started before the registry) from
+        /// the process table. Transitional.
+        #[arg(long)]
+        scan: bool,
     },
     /// Who a daemon restart would interrupt: open waits, listeners, drives,
     /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
@@ -3403,8 +3407,8 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(Some(value));
         }
         Cmd::Ping => ("ping", json!({})),
-        Cmd::Daemons { stale } => {
-            let report = fray::daemons::report(stale)?;
+        Cmd::Daemons { stale, scan } => {
+            let report = fray::daemons::report(stale, scan)?;
             if cli.json {
                 return Ok(Some(report));
             }

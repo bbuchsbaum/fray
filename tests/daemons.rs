@@ -1,4 +1,4 @@
-//! `fray daemons` (daemon lifecycle L2) against real and fixture daemons.
+//! `fray daemons` (daemon lifecycle L2/L3) against real and fixture daemons.
 //! Every daemon here is our own child under a private state directory;
 //! assertions name only our scratch homes, never other daemons on the machine.
 use fray::{
@@ -185,6 +185,7 @@ fn stale_lists_only_daemons_on_another_build() {
     let all = s.report(&[]);
     assert_eq!(all["client"]["build"], json!(fray::model::BUILD));
     assert_eq!(all["pruned"], 0);
+    assert!(all.get("scan").is_none(), "no scan unless asked");
     let live = find(&all, &current).expect("current daemon listed");
     assert_eq!(live["state"], "running");
     assert_eq!(live["registered"], true);
@@ -258,4 +259,74 @@ fn a_dead_record_is_reported_pruned_once_then_disappears() {
     assert_eq!(second["pruned"], 0);
     let text = String::from_utf8(s.daemons(&[]).stdout).unwrap();
     assert!(text.contains("No registered daemons."), "{text}");
+}
+
+#[test]
+fn scan_finds_unregistered_daemons_by_their_command_line() {
+    let mut s = Scratch::new();
+    let elsewhere = s.root.join("elsewhere");
+    // A home with a space: `ps` shows argv joined by spaces.
+    let unregistered = s.home("un registered");
+    let pid = s.serve(&elsewhere, &unregistered);
+    // A daemon whose home came from FRAY_HOME has no --home in its argv, and a
+    // shell whose argv mentions it is not a Fray process.
+    let hidden = s.home("hidden");
+    let mut command = s.fray(&elsewhere);
+    command.env("FRAY_HOME", &hidden).arg("serve");
+    s.spawn(command, &hidden);
+    let mut decoy = Command::new("/bin/sh");
+    decoy
+        .args(["-c", "read x", "fray", "--home"])
+        .arg(&hidden)
+        .arg("serve")
+        .stdin(Stdio::piped());
+    let decoy = decoy.spawn().unwrap();
+    let decoy_pid = decoy.id();
+    s.children.push(decoy);
+
+    let plain = s.report(&[]);
+    assert!(find(&plain, &unregistered).is_none(), "{plain}");
+
+    let scanned = s.report(&["--scan"]);
+    let found = find(&scanned, &unregistered).expect("unregistered daemon found by scan");
+    assert_eq!(found["registered"], false);
+    assert_eq!(found["state"], "running");
+    assert_eq!(found["pid"], pid);
+    assert_eq!(found["stale"], false);
+    assert_eq!(found["build"], json!(fray::model::BUILD));
+    assert_eq!(found["occupancy"]["verdict"], "idle");
+    assert!(found["uptime_ms"].as_i64().is_some());
+    assert!(find(&scanned, &hidden).is_none(), "{scanned}");
+    let mentions = |pid: u32| {
+        scanned["daemons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(scanned["scan"]["unconfirmed"].as_array().unwrap())
+            .any(|d| d["pid"] == pid)
+    };
+    assert!(!mentions(decoy_pid), "a non-Fray process is never reported");
+    // Its own registry is not consulted twice: registered daemons stay registered.
+    let registered = s.home("registered");
+    let state = s.state.clone();
+    s.serve(&state, &registered);
+    let both = s.report(&["--scan"]);
+    assert_eq!(find(&both, &registered).unwrap()["registered"], true);
+    assert_eq!(
+        both["daemons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["home"] == json!(registered))
+            .count(),
+        1
+    );
+    let text = String::from_utf8(s.daemons(&["--scan"]).stdout).unwrap();
+    assert!(
+        text.contains(&format!(
+            "{}\n  running (unregistered)  pid {pid}",
+            unregistered.display()
+        )),
+        "{text}"
+    );
 }
