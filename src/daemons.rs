@@ -16,6 +16,10 @@
 //!
 //! A daemon is `stale` when its build differs from the client's. The client is
 //! the comparison point because it is the binary the owner just installed.
+//!
+//! Daemons are asked with [`client::probe`]: one request each, no reconnect
+//! wait and no stderr notes, all within [`BUDGET`]. A daemon reached after the
+//! budget is spent is listed without occupancy rather than stalling the report.
 use crate::{
     client,
     model::*,
@@ -27,7 +31,12 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
+
+/// The whole report's time for pings and occupancy beyond the registry's own
+/// pings. One wedged daemon costs at most a per-request timeout.
+pub const BUDGET: Duration = Duration::from_secs(10);
 
 /// Lists the daemons in the default registry; see [`report_in`].
 pub fn report(stale_only: bool, scan: bool) -> Result<Value> {
@@ -38,15 +47,16 @@ pub fn report(stale_only: bool, scan: bool) -> Result<Value> {
 ///
 /// With `scan`, also finds unregistered daemons from the process table (see
 /// [`scan`]). With `stale_only`, keeps only daemons whose build differs from
-/// this client's; pruned records are still counted in `pruned`.
+/// this client's, plus records pruned now (each is reported exactly once).
 pub fn report_in(state_dir: &Path, stale_only: bool, scan: bool) -> Result<Value> {
     let now = now_ms();
+    let deadline = Instant::now() + BUDGET;
     let mut daemons = Vec::new();
     let mut pruned = 0;
     let mut registered = BTreeSet::new();
     for entry in registry::list_in(state_dir)? {
         registered.insert(entry.record.home.clone());
-        let item = registered_item(&entry, now)?;
+        let item = registered_item(&entry, now, deadline)?;
         if item["pruned"] == true {
             pruned += 1;
         }
@@ -54,12 +64,18 @@ pub fn report_in(state_dir: &Path, stale_only: bool, scan: bool) -> Result<Value
     }
     let mut unconfirmed = Vec::new();
     if scan {
-        let found = self::scan(&registered)?;
-        daemons.extend(found.daemons.into_iter().map(|d| unregistered_item(d, now)));
+        let found = self::scan(&registered, deadline)?;
+        daemons.extend(
+            found
+                .daemons
+                .into_iter()
+                .map(|d| unregistered_item(d, now, deadline)),
+        );
         unconfirmed = found.unconfirmed;
     }
     if stale_only {
-        daemons.retain(|d| d["stale"] == true);
+        // A pruned record is reported once, whatever the filter.
+        daemons.retain(|d| d["stale"] == true || d["pruned"] == true);
     }
     let mut out = json!({
         "client":{"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION},
@@ -80,12 +96,13 @@ pub fn restart_command(home: &Path) -> String {
     format!("fray --home '{home}' restart")
 }
 
-fn registered_item(entry: &Entry, now: i64) -> Result<Value> {
+fn registered_item(entry: &Entry, now: i64, deadline: Instant) -> Result<Value> {
     let record = &entry.record;
     let mut item = json!({
         "home":record.home,
         "registered":true,
         "pid":record.pid,
+        "pid_mismatch":Value::Null,
         "version":record.version,
         "build":record.build,
         "protocol_version":record.protocol_version,
@@ -98,18 +115,36 @@ fn registered_item(entry: &Entry, now: i64) -> Result<Value> {
     match entry.liveness {
         Liveness::Running => {
             let ping = entry.ping.clone().unwrap_or_default();
-            describe_live(&mut item, &record.home, &ping);
+            describe_live(&mut item, &record.home, &ping, deadline);
+            // The ping describes whoever serves the home now. A record left
+            // by another process (say a crash, then a pre-registry daemon on
+            // the same home) is stale: its pid, exe and start time are not
+            // this daemon's. Older daemons do not send a pid.
+            if let Some(pid) = ping["pid"].as_u64() {
+                let mismatch = pid != u64::from(record.pid);
+                item["pid_mismatch"] = json!(mismatch);
+                if mismatch {
+                    item["record_pid"] = json!(record.pid);
+                    item["pid"] = json!(pid);
+                    for field in ["exe", "started_ms", "uptime_ms"] {
+                        item[field] = Value::Null;
+                    }
+                    item["durability"] = json!("unknown");
+                }
+            }
         }
         Liveness::Unknown => {
             // Only the record describes it; its build may still show skew.
             item["state"] = json!("unreachable");
             item["stale"] = json!(record.build != BUILD);
             item["occupancy"] = Value::Null;
+            item["occupancy_error"] = Value::Null;
         }
         Liveness::Dead => {
             item["state"] = json!("dead");
             item["stale"] = Value::Null;
             item["occupancy"] = Value::Null;
+            item["occupancy_error"] = Value::Null;
             item["uptime_ms"] = Value::Null;
             item["pruned"] = json!(registry::prune(entry)?);
         }
@@ -118,25 +153,28 @@ fn registered_item(entry: &Entry, now: i64) -> Result<Value> {
     Ok(item)
 }
 
-fn unregistered_item(daemon: Found, now: i64) -> Value {
+fn unregistered_item(daemon: Found, now: i64, deadline: Instant) -> Value {
     let mut item = json!({
         "home":daemon.home,
         "registered":false,
         "pid":daemon.pid,
-        "exe":daemon.exe,
-        "durability":if daemon.normal { "normal" } else { "full" },
+        "pid_mismatch":daemon.ping["pid"].as_u64().map(|pid| pid != u64::from(daemon.pid)),
+        // Read from `ps`: the space-joined argv, not a resolved executable.
+        "exe":Value::Null,
+        "command":daemon.command,
+        "durability":"unknown",
         "started_ms":daemon.uptime_ms.map(|up| now - up),
         "uptime_ms":daemon.uptime_ms,
         "pruned":false,
     });
-    describe_live(&mut item, &daemon.home, &daemon.ping);
+    describe_live(&mut item, &daemon.home, &daemon.ping, deadline);
     finish(&mut item);
     item
 }
 
 /// Fills in what a ping says about the daemon that owns `home` now, and its
 /// occupancy when it offers that op.
-fn describe_live(item: &mut Value, home: &Path, ping: &Value) {
+fn describe_live(item: &mut Value, home: &Path, ping: &Value, deadline: Instant) {
     for field in ["version", "build", "protocol_version"] {
         item[field] = ping[field].clone();
     }
@@ -148,17 +186,26 @@ fn describe_live(item: &mut Value, home: &Path, ping: &Value) {
     });
     item["stale"] = json!(ping["build"].as_str() != Some(BUILD));
     item["occupancy"] = Value::Null;
+    item["occupancy_error"] = Value::Null;
     let offers = ping["capabilities"]
         .as_array()
         .is_some_and(|caps| caps.iter().any(|c| c == "occupancy"));
-    if compatible && offers {
-        match client::rpc(home, &Request::new("occupancy", "", json!({})), 5) {
-            Ok(o) => {
-                item["occupancy"] =
-                    json!({"verdict":o["verdict"],"holders":o["holders"],"clients":o["clients"]});
-            }
-            Err(error) => item["occupancy_error"] = json!(error),
+    if !(compatible && offers) {
+        return;
+    }
+    if Instant::now() >= deadline {
+        item["occupancy_error"] = json!(Error::new(
+            "deadline",
+            "not asked: the report's time budget was spent"
+        ));
+        return;
+    }
+    match client::probe(home, &Request::new("occupancy", "", json!({})), 2) {
+        Ok(o) => {
+            item["occupancy"] =
+                json!({"verdict":o["verdict"],"holders":o["holders"],"clients":o["clients"]});
         }
+        Err(error) => item["occupancy_error"] = json!(error),
     }
 }
 
@@ -177,8 +224,7 @@ fn finish(item: &mut Value) {
 struct Found {
     home: PathBuf,
     pid: u32,
-    exe: String,
-    normal: bool,
+    command: String,
     uptime_ms: Option<i64>,
     ping: Value,
 }
@@ -193,17 +239,24 @@ struct Scan {
 /// existed. It may be removed once a release with the registry has shipped
 /// and every daemon has restarted onto it.
 ///
-/// Reads `ps -axo pid=,etime=,command=` and keeps processes whose program is
-/// `fray` (or `fray.<suffix>`, such as `fray.previous`) running `serve` with
-/// `--home`. `ps` joins argv with spaces, so a home that contains spaces is
+/// Reads this user's processes from `ps -ww -x -U <uid> -o pid=,etime=,command=`
+/// and keeps those whose program is an existing file named `fray` (or
+/// `fray.<suffix>`, such as `fray.previous`) running `serve` with `--home`. A
+/// wrapper (`timeout 60 fray ...`, `sh script fray ...`) is not that file, so
+/// only the daemon process itself is reported. `ps` joins argv with spaces, so a home that contains spaces is
 /// ambiguous: every split that could end the home is tried, and only a home
 /// that answers a ping counts. Homes in `skip` (already registered) are left
-/// out. Not found: daemons whose home came from `FRAY_HOME` or a relative
+/// out before any ping. Not found: daemons whose home came from `FRAY_HOME` or a relative
 /// `--home`, since `ps` shows neither; they are listed as unconfirmed when the
 /// process is visible.
-fn scan(skip: &BTreeSet<PathBuf>) -> Result<Scan> {
+fn scan(skip: &BTreeSet<PathBuf>, deadline: Instant) -> Result<Scan> {
+    let uid = Command::new("id").arg("-u").output()?;
+    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
+    if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::new("unavailable", "id -u gave no user id"));
+    }
     let out = Command::new("ps")
-        .args(["-ww", "-axo", "pid=,etime=,command="])
+        .args(["-ww", "-x", "-U", &uid, "-o", "pid=,etime=,command="])
         .output()?;
     if !out.status.success() {
         return Err(Error::new(
@@ -224,37 +277,47 @@ fn scan(skip: &BTreeSet<PathBuf>) -> Result<Scan> {
         if pid == own {
             continue;
         }
-        let Some(serve) = parse_serve(command) else {
+        let Some(serve) = parse_serve(command, is_program) else {
             continue;
         };
         let mut confirmed = None;
+        let mut known = false;
+        let mut reason = "no candidate home answered a ping";
         for candidate in &serve.homes {
             let path = Path::new(candidate);
             if !path.is_absolute() || !path.join("bus.sock").exists() {
                 continue;
             }
             let home = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            if let Ok(ping) = client::rpc(&home, &Request::new("ping", "", json!({})), 1) {
+            if seen.contains(&home) {
+                // Registered, or already found through another process.
+                known = true;
+                break;
+            }
+            if Instant::now() >= deadline {
+                reason = "not asked: the report's time budget was spent";
+                break;
+            }
+            if let Ok(ping) = client::probe(&home, &Request::new("ping", "", json!({})), 1) {
                 confirmed = Some((home, ping));
                 break;
             }
         }
         match confirmed {
             Some((home, ping)) => {
-                if seen.insert(home.clone()) {
-                    result.daemons.push(Found {
-                        home,
-                        pid,
-                        exe: serve.exe,
-                        normal: serve.normal,
-                        uptime_ms: etime,
-                        ping,
-                    });
-                }
+                seen.insert(home.clone());
+                result.daemons.push(Found {
+                    home,
+                    pid,
+                    command: command.to_owned(),
+                    uptime_ms: etime,
+                    ping,
+                });
             }
+            None if known => {}
             None => result
                 .unconfirmed
-                .push(json!({"pid":pid,"command":command})),
+                .push(json!({"pid":pid,"command":command,"reason":reason})),
         }
     }
     result.daemons.sort_by(|a, b| a.home.cmp(&b.home));
@@ -288,14 +351,23 @@ fn parse_etime(etime: &str) -> Option<i64> {
 }
 
 struct Serve {
-    exe: String,
     /// Candidate homes in order, shortest first.
     homes: Vec<String>,
-    normal: bool,
 }
 
-/// Recognizes `fray ... --home <H> ... serve` in a space-joined command line.
-fn parse_serve(command: &str) -> Option<Serve> {
+/// Whether `exe`, a program as `ps` shows it, is an existing file: a path, or
+/// a bare name found on `PATH`.
+fn is_program(exe: &str) -> bool {
+    if exe.contains('/') {
+        return Path::new(exe).is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(exe).is_file()))
+}
+
+/// Recognizes `fray ... --home <H> ... serve` in a space-joined command line,
+/// where the program must satisfy `is_program`.
+fn parse_serve(command: &str, is_program: impl Fn(&str) -> bool) -> Option<Serve> {
     // A word boundary where an argument may start: the program name ends at
     // the first flag or at the subcommand.
     let starts = |s: &str| s.starts_with('-') || is_word(s, "serve");
@@ -307,7 +379,7 @@ fn parse_serve(command: &str) -> Option<Serve> {
     let (&first, _) = boundaries.split_first()?;
     let exe = &command[..first];
     let name = exe.rsplit('/').next().unwrap_or(exe);
-    if name != "fray" && !name.starts_with("fray.") {
+    if (name != "fray" && !name.starts_with("fray.")) || !is_program(exe) {
         return None;
     }
     let args = &command[first..];
@@ -328,11 +400,7 @@ fn parse_serve(command: &str) -> Option<Serve> {
     homes.push(tail.to_owned());
     homes.retain(|h| !h.is_empty());
     homes.dedup();
-    Some(Serve {
-        exe: exe.to_owned(),
-        homes,
-        normal: args.split(' ').any(|word| word == "--normal"),
-    })
+    Some(Serve { homes })
 }
 
 fn is_word(s: &str, word: &str) -> bool {
@@ -362,6 +430,9 @@ pub fn render(report: &Value) -> String {
             out.push_str(" (unregistered)");
         }
         out.push_str(&format!("  pid {}", d["pid"]));
+        if d["pid_mismatch"] == true {
+            out.push_str(&format!(" (stale record names pid {})", d["record_pid"]));
+        }
         if state == "dead" {
             out.push_str(if d["pruned"] == true {
                 "  record pruned\n"
@@ -425,10 +496,15 @@ pub fn render(report: &Value) -> String {
         .filter(|u| !u.is_empty())
     {
         out.push_str(
-            "Fray serve processes no ping confirmed (FRAY_HOME, a relative --home, or not answering):\n",
+            "Fray serve processes not confirmed (FRAY_HOME or a relative --home hide the home):\n",
         );
         for p in unconfirmed {
-            out.push_str(&format!("  pid {}: {}\n", p["pid"], clean(&p["command"])));
+            out.push_str(&format!(
+                "  pid {}: {} ({})\n",
+                p["pid"],
+                clean(&p["command"]),
+                clean(&p["reason"])
+            ));
         }
     } else if !report["scan"].is_object() {
         out.push_str(
@@ -472,16 +548,15 @@ mod tests {
 
     #[test]
     fn serve_lines_are_recognized_only_for_fray() {
-        let s = parse_serve("/Users/me/.cargo/bin/fray --home /tmp/h serve").unwrap();
-        assert_eq!(s.exe, "/Users/me/.cargo/bin/fray");
+        let any = |_: &str| true;
+        let s = parse_serve("/Users/me/.cargo/bin/fray --home /tmp/h serve", any).unwrap();
         assert_eq!(s.homes, ["/tmp/h", "/tmp/h serve"]);
-        assert!(!s.normal);
-        let s = parse_serve("fray.previous --home=/tmp/h serve --normal").unwrap();
+        let s = parse_serve("fray.previous --home=/tmp/h serve --normal", any).unwrap();
         assert_eq!(s.homes[0], "/tmp/h");
-        assert!(s.normal);
-        // Global flags may follow the subcommand; a home may hold spaces.
-        let s = parse_serve("/opt/my tools/fray serve --home /tmp/a b c --as x").unwrap();
-        assert_eq!(s.exe, "/opt/my tools/fray");
+        // Global flags may follow the subcommand; the program and the home
+        // may hold spaces.
+        let program = |exe: &str| exe == "/opt/my tools/fray";
+        let s = parse_serve("/opt/my tools/fray serve --home /tmp/a b c --as x", program).unwrap();
         assert_eq!(s.homes, ["/tmp/a b c", "/tmp/a b c --as x"]);
         for other in [
             "python3 -m http.server --home /tmp/h serve",
@@ -491,8 +566,21 @@ mod tests {
             "fray serve",
             "/Users/me/.cargo/bin/fray --home /tmp/h wait --timeout 60",
         ] {
-            assert!(parse_serve(other).is_none(), "{other}");
+            assert!(parse_serve(other, any).is_none(), "{other}");
         }
+        // A wrapper's argv ends in a word named fray, but the program `ps`
+        // shows is the wrapper plus its arguments: not an existing file.
+        let real = |exe: &str| exe == "/bin/fray";
+        assert!(parse_serve("/bin/fray --home /tmp/h serve", real).is_some());
+        for wrapper in [
+            "timeout 60 /bin/fray --home /tmp/h serve",
+            "/usr/bin/caffeinate -i /bin/fray --home /tmp/h serve",
+            "/bin/sh wait.sh /bin/fray --home /tmp/h serve",
+        ] {
+            assert!(parse_serve(wrapper, real).is_none(), "{wrapper}");
+        }
+        assert!(is_program("/bin/sh") && is_program("sh"));
+        assert!(!is_program("/bin/sh wait.sh /bin/fray"));
     }
 
     #[test]

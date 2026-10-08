@@ -127,6 +127,14 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
 /// A registered fixture daemon that answers every request with `ping`: an
 /// installed build other than this client's, without new binaries.
 fn fixture(state: &Path, home: &Path, build: &str, protocol: u32) {
+    let ping = json!({"ok":true,"data":{"version":"0.0.1","build":build,
+        "protocol_version":protocol,"capabilities":[]}});
+    serve_fixture(state, home, build, protocol, Some(ping));
+}
+
+/// Registers `home` under this process's pid and serves its socket, replying
+/// `reply` to every request, or accepting and never replying when `None`.
+fn serve_fixture(state: &Path, home: &Path, build: &str, protocol: u32, reply: Option<Value>) {
     let record = Record {
         home: home.into(),
         socket: home.join("bus.sock"),
@@ -142,15 +150,17 @@ fn fixture(state: &Path, home: &Path, build: &str, protocol: u32) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     let listener = UnixListener::bind(home.join("bus.sock")).unwrap();
-    let ping = json!({"ok":true,"data":{"version":"0.0.1","build":build,
-        "protocol_version":protocol,"capabilities":[]}});
     thread::spawn(move || {
+        let mut held = vec![];
         for stream in listener.incoming().flatten() {
-            let ping = ping.clone();
+            let Some(reply) = reply.clone() else {
+                held.push(stream);
+                continue;
+            };
             thread::spawn(move || {
                 let mut writer = stream.try_clone().unwrap();
                 for line in BufReader::new(stream).lines() {
-                    if line.is_err() || writeln!(writer, "{ping}").is_err() {
+                    if line.is_err() || writeln!(writer, "{reply}").is_err() {
                         break;
                     }
                 }
@@ -182,6 +192,8 @@ fn stale_lists_only_daemons_on_another_build() {
     fixture(&s.state, &old, "0ld0ld0ld0ld", PROTOCOL_VERSION);
     fixture(&s.state, &ancient, "0ld0ld0ld0ld", PROTOCOL_VERSION - 1);
 
+    let quiet = s.daemons(&["--json"]);
+    assert!(quiet.stderr.is_empty(), "{quiet:?}");
     let all = s.report(&[]);
     assert_eq!(all["client"]["build"], json!(fray::model::BUILD));
     assert_eq!(all["pruned"], 0);
@@ -191,6 +203,8 @@ fn stale_lists_only_daemons_on_another_build() {
     assert_eq!(live["registered"], true);
     assert_eq!(live["stale"], false);
     assert_eq!(live["build"], json!(fray::model::BUILD));
+    assert_eq!(live["pid_mismatch"], false);
+    assert!(live["occupancy_error"].is_null());
     assert!(live["restart"].is_null());
     assert_eq!(live["occupancy"]["verdict"], "idle");
     assert_eq!(live["occupancy"]["clients"]["connected"], 0);
@@ -201,7 +215,11 @@ fn stale_lists_only_daemons_on_another_build() {
     assert_eq!(skewed["restart"], json!(restart(&old)));
     // An old daemon without the op is listed, not failed.
     assert!(skewed["occupancy"].is_null());
-    assert!(skewed.get("occupancy_error").is_none());
+    assert!(skewed["occupancy_error"].is_null());
+    assert!(
+        skewed["pid_mismatch"].is_null(),
+        "older daemons send no pid"
+    );
     let other = find(&all, &ancient).expect("old-protocol daemon listed");
     assert_eq!(other["state"], "incompatible");
     assert_eq!(other["stale"], true);
@@ -245,7 +263,20 @@ fn a_dead_record_is_reported_pruned_once_then_disappears() {
         Liveness::Dead
     );
 
-    let first = s.report(&[]);
+    // Text mode under --stale still names the pruned record, once.
+    let text = String::from_utf8(s.daemons(&["--stale"]).stdout).unwrap();
+    assert!(
+        text.contains(&format!(
+            "{}\n  dead  pid {pid}  record pruned\n",
+            home.display()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("1 dead record(s) pruned"), "{text}");
+    assert!(!path.exists());
+    let pid = s.serve(&state, &home);
+    s.kill(pid);
+    let first = s.report(&["--stale"]);
     let dead = find(&first, &home).expect("dead record shown");
     assert_eq!(dead["state"], "dead");
     assert_eq!(dead["pruned"], true);
@@ -259,6 +290,92 @@ fn a_dead_record_is_reported_pruned_once_then_disappears() {
     assert_eq!(second["pruned"], 0);
     let text = String::from_utf8(s.daemons(&[]).stdout).unwrap();
     assert!(text.contains("No registered daemons."), "{text}");
+}
+
+#[test]
+fn a_possibly_live_daemon_is_unreachable_and_never_pruned() {
+    let s = Scratch::new();
+    // Accepts connections but never answers: a wedged daemon.
+    let wedged = s.home("wedged");
+    serve_fixture(&s.state, &wedged, "0ld0ld0ld0ld", PROTOCOL_VERSION, None);
+    // Refuses connections while its recorded pid (this process) is alive: a
+    // full backlog or a removed socket, not proof of death.
+    let refused = s.home("refused");
+    let record = Record {
+        home: refused.clone(),
+        socket: refused.join("bus.sock"),
+        pid: std::process::id(),
+        version: "0.0.1".into(),
+        build: fray::model::BUILD.into(),
+        protocol_version: PROTOCOL_VERSION,
+        exe: "/old/fray".into(),
+        started_ms: 1,
+        durability: "full".into(),
+    };
+    let path = registry::record_path(&s.state, &refused);
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    for _ in 0..2 {
+        let report = s.report(&[]);
+        assert_eq!(report["pruned"], 0);
+        let w = find(&report, &wedged).expect("wedged daemon listed");
+        assert_eq!(w["state"], "unreachable");
+        assert_eq!(w["pruned"], false);
+        assert_eq!(w["stale"], true, "the record's build still shows skew");
+        assert_eq!(w["restart"], json!(restart(&wedged)));
+        let r = find(&report, &refused).expect("refused daemon listed");
+        assert_eq!(r["state"], "unreachable");
+        assert_eq!(r["pruned"], false);
+    }
+    assert!(registry::record_path(&s.state, &wedged).exists());
+    assert!(path.exists());
+}
+
+#[test]
+fn a_record_naming_another_pid_is_flagged_and_the_ping_wins() {
+    let mut s = Scratch::new();
+    let home = s.home("replaced");
+    let elsewhere = s.root.join("elsewhere");
+    // The home is served by a daemon this registry does not know, while the
+    // record still names another (live) process.
+    let daemon = s.serve(&elsewhere, &home);
+    let record = Record {
+        home: home.clone(),
+        socket: home.join("bus.sock"),
+        pid: std::process::id(),
+        version: "0.0.1".into(),
+        build: "0ld0ld0ld0ld".into(),
+        protocol_version: PROTOCOL_VERSION,
+        exe: "/old/fray".into(),
+        started_ms: 1,
+        durability: "normal".into(),
+    };
+    let path = registry::record_path(&s.state, &home);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let report = s.report(&[]);
+    let d = find(&report, &home).unwrap();
+    assert_eq!(d["state"], "running");
+    assert_eq!(d["pid"], daemon);
+    assert_eq!(d["pid_mismatch"], true);
+    assert_eq!(d["record_pid"], std::process::id());
+    assert_eq!(
+        d["build"],
+        json!(fray::model::BUILD),
+        "build comes from the ping"
+    );
+    assert_eq!(d["stale"], false);
+    assert!(d["exe"].is_null() && d["started_ms"].is_null() && d["uptime_ms"].is_null());
+    assert_eq!(d["durability"], "unknown");
+    let text = String::from_utf8(s.daemons(&[]).stdout).unwrap();
+    assert!(
+        text.contains(&format!(
+            "pid {daemon} (stale record names pid {})",
+            std::process::id()
+        )),
+        "{text}"
+    );
 }
 
 #[test]
@@ -283,6 +400,20 @@ fn scan_finds_unregistered_daemons_by_their_command_line() {
     let decoy = decoy.spawn().unwrap();
     let decoy_pid = decoy.id();
     s.children.push(decoy);
+    // A wrapper whose argv runs the real fray binary: `ps` shows the wrapper.
+    let script = s.root.join("wait.sh");
+    fs::write(&script, "read x\n").unwrap();
+    let mut wrapper = Command::new("/bin/sh");
+    wrapper
+        .arg(&script)
+        .arg(FRAY)
+        .arg("--home")
+        .arg(&hidden)
+        .arg("serve")
+        .stdin(Stdio::piped());
+    let wrapper = wrapper.spawn().unwrap();
+    let wrapper_pid = wrapper.id();
+    s.children.push(wrapper);
 
     let plain = s.report(&[]);
     assert!(find(&plain, &unregistered).is_none(), "{plain}");
@@ -296,6 +427,13 @@ fn scan_finds_unregistered_daemons_by_their_command_line() {
     assert_eq!(found["build"], json!(fray::model::BUILD));
     assert_eq!(found["occupancy"]["verdict"], "idle");
     assert!(found["uptime_ms"].as_i64().is_some());
+    assert!(found["exe"].is_null());
+    assert_eq!(found["durability"], "unknown");
+    assert!(found["command"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("--home {} serve", unregistered.display())));
+    assert_eq!(found["pid_mismatch"], false);
     assert!(find(&scanned, &hidden).is_none(), "{scanned}");
     let mentions = |pid: u32| {
         scanned["daemons"]
@@ -306,6 +444,7 @@ fn scan_finds_unregistered_daemons_by_their_command_line() {
             .any(|d| d["pid"] == pid)
     };
     assert!(!mentions(decoy_pid), "a non-Fray process is never reported");
+    assert!(!mentions(wrapper_pid), "a wrapper is not the daemon");
     // Its own registry is not consulted twice: registered daemons stay registered.
     let registered = s.home("registered");
     let state = s.state.clone();
