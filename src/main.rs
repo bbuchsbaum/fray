@@ -3387,11 +3387,21 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             let mut value = send(&home, &actor, "shutdown", args, None, 10)?;
             let grace = value["grace_ms"].as_u64().unwrap_or(2000);
-            // The replacement can start only once this daemon releases the lock.
-            value["exited"] = json!(client::await_exit(
-                &home,
-                Duration::from_millis(grace + 2000)
-            )?);
+            let window = Duration::from_millis(grace + 2000);
+            // The replacement can start only once this daemon has exited and
+            // released the lock; say so if it has not, rather than succeed.
+            let pid = value["pid"].as_u64().and_then(|p| u32::try_from(p).ok());
+            if !pid.is_some_and(|pid| client::await_exit(pid, window)) {
+                return Err(Error::new(
+                    "stop_incomplete",
+                    match pid {
+                        Some(pid) => format!("the daemon accepted the restart, but process {pid} had not exited within {}ms; start a replacement only once it has (ps -p {pid})", window.as_millis()),
+                        None => "the daemon accepted the restart but did not report its pid, so its exit cannot be confirmed; start a replacement only once it has exited".into(),
+                    },
+                )
+                .with_details(value));
+            }
+            value["exited"] = json!(true);
             return Ok(Some(value));
         }
         Cmd::Ping => ("ping", json!({})),

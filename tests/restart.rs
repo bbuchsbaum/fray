@@ -1,7 +1,7 @@
 //! A graceful restart (`shutdown` with `restart`): every long-lived client is
 //! told to reconnect, nothing is acknowledged by that notice, and clients
 //! resume from their own cursors on the replacement daemon.
-use fray::model::random_key;
+use fray::model::{random_key, Request};
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -221,9 +221,10 @@ fn ping_advertises_graceful_restart_and_rejects_bad_shutdown_arguments() {
     // None of those stopped it.
     assert_eq!(c.call("ping", "", json!({}))["protocol_version"], 2);
     let reply = c.call("shutdown", "", json!({"restart": true, "grace_ms": 0}));
+    let pid = home.daemon.as_ref().unwrap().id();
     assert_eq!(
         reply,
-        json!({"stopping": true, "restart": true, "reason": "restart", "grace_ms": 0})
+        json!({"stopping": true, "restart": true, "reason": "restart", "grace_ms": 0, "pid": pid})
     );
     home.reap();
 }
@@ -524,4 +525,141 @@ fn an_attention_listener_reconnects_quietly_and_delivers_after_a_restart() {
     let lines: Vec<_> = stderr.lines().collect();
     assert_eq!(lines.len(), 1, "{stderr}");
     assert!(lines[0].contains("daemon restarting (upgrade)"), "{stderr}");
+}
+
+/// A scripted daemon: answers each request with `respond(op, args, n)`,
+/// where n counts earlier requests with that op, and records every request.
+struct Mock {
+    root: PathBuf,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl Mock {
+    fn new(respond: fn(&str, &Value, usize) -> Value) -> Self {
+        let root = PathBuf::from("/tmp").join(format!("fray-rm-{}", &random_key().unwrap()[..8]));
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(root.join("bus.sock")).unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = seen.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let log = log.clone();
+                thread::spawn(move || {
+                    let reader = BufReader::new(stream.try_clone().unwrap());
+                    for line in reader.lines() {
+                        let Ok(line) = line else { return };
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        let op = req["op"].as_str().unwrap().to_owned();
+                        let n = {
+                            let mut log = log.lock().unwrap();
+                            let n = log.iter().filter(|r| r["op"] == op).count();
+                            log.push(req.clone());
+                            n
+                        };
+                        let reply = respond(&op, &req["args"], n).to_string() + "\n";
+                        if stream.write_all(reply.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self { root, seen }
+    }
+
+    fn requests(&self, op: &str) -> Vec<Value> {
+        let seen = self.seen.lock().unwrap();
+        seen.iter().filter(|r| r["op"] == op).cloned().collect()
+    }
+}
+
+impl Drop for Mock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn restarting_frame() -> Value {
+    json!({"ok":false,"type":"restarting","reason":"upgrade","error":{"code":"unavailable","message":"daemon restarting (upgrade)","details":{"restarting":true,"reason":"upgrade"}}})
+}
+
+fn hello() -> Value {
+    json!({"ok":true,"data":{"version":"0.2.1","protocol_version":2,"capabilities":[],"cursor":0}})
+}
+
+#[test]
+fn a_restart_pause_never_outlasts_the_callers_own_timeout() {
+    // A daemon that stays "restarting": every request, ping included, is refused.
+    let mock = Mock::new(|_, _, _| restarting_frame());
+    for (req, timeout) in [
+        (Request::new("agents", "alice", json!({})), 1),
+        (Request::new("wait", "alice", json!({"timeout": 1})), 2),
+    ] {
+        let started = Instant::now();
+        let error = fray::client::rpc(&mock.root, &req, timeout).unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(error.code, "unavailable", "{error:?}");
+        assert_eq!(error.details.unwrap()["restarting"], true);
+        // The budget, plus at most one bounded probe; never the 30 s window.
+        assert!(
+            elapsed < Duration::from_secs(timeout + 2),
+            "{} with timeout {timeout}s paused {elapsed:?}",
+            req.op
+        );
+    }
+}
+
+#[test]
+fn a_resent_wait_without_a_timeout_keeps_what_is_left_of_the_default() {
+    let mock = Mock::new(|op, _, n| match (op, n) {
+        ("wait", 0) => restarting_frame(),
+        ("wait", _) => json!({"ok":true,"data":{"items":[],"total":0,"timed_out":true}}),
+        _ => hello(),
+    });
+    let page =
+        fray::client::rpc(&mock.root, &Request::new("wait", "alice", json!({})), 305).unwrap();
+    assert_eq!(page["timed_out"], true);
+    let waits = mock.requests("wait");
+    assert_eq!(waits.len(), 2, "{waits:?}");
+    assert!(waits[0]["args"].get("timeout").is_none(), "{waits:?}");
+    let resent = waits[1]["args"]["timeout"].as_u64().unwrap();
+    assert!((295..=300).contains(&resent), "{waits:?}");
+}
+
+#[test]
+fn stop_restart_fails_when_the_daemon_has_not_exited() {
+    // The "daemon" acknowledges the restart, naming a process that stays
+    // alive: this test itself.
+    let mock = Mock::new(|op, _, _| match op {
+        "shutdown" => {
+            json!({"ok":true,"data":{"stopping":true,"restart":true,"reason":"upgrade","grace_ms":0,"pid":std::process::id()}})
+        }
+        _ => hello(),
+    });
+    let started = Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_fray"))
+        .args([
+            "--home",
+            mock.root.to_str().unwrap(),
+            "--json",
+            "stop",
+            "--restart",
+        ])
+        .env_remove("FRAY_AGENT")
+        .env_remove("FRAY_SESSION")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reply["error"]["code"], "stop_incomplete", "{reply}");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&std::process::id().to_string()),
+        "{reply}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(6));
+    assert_eq!(mock.requests("shutdown").len(), 1);
 }
