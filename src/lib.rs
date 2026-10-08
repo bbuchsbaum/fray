@@ -17,6 +17,7 @@ pub mod owner;
 pub mod presence;
 pub mod recovery;
 pub mod registry;
+pub mod restart;
 pub mod retention;
 pub mod review;
 pub mod routing;
