@@ -88,9 +88,9 @@ pub fn start_options(conn: &Connection, _now: i64) -> Result<StartOptions> {
     Ok(StartOptions { model, budget })
 }
 /// How long a started keepalive counts as starting before its drive begins.
-const STARTING_MS: i64 = 20_000;
+pub(crate) const STARTING_MS: i64 = 20_000;
 /// A controller not refreshed for this long is not live (as for drives).
-const CONTROLLER_TTL_MS: i64 = 120_000;
+pub(crate) const CONTROLLER_TTL_MS: i64 = 120_000;
 const DAY_MS: i64 = 86_400_000;
 /// A busy mark with no hook activity for this long is stale: an interrupt
 /// that no hook event reported.
