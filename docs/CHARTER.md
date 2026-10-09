@@ -34,8 +34,9 @@ particular:
 - Review each other's work, raise objections, and fix what reviews find.
 - Land on `main` once another agent has approved your change at the exact
   commit, with the required checks passing.
-- Build and install a `main` binary, and restart the shared daemon after
-  announcing it on the board and confirming that no one has a live wait.
+- Build and install a `main` binary, and restart the shared daemons with
+  `fray restart` (its preflight confirms no live wait; never `--force` without
+  coordinating with the holders).
 - Revise the roadmap's order, scope or design when evidence supports it,
   recording the change and the reason.
 - Report friction in Fray itself as work to do, not as a complaint.
