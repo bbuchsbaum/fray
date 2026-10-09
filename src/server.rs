@@ -164,8 +164,11 @@ pub fn read_frame<R: BufRead>(r: &mut R, limit: usize) -> io::Result<Option<Stri
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 pub fn write_frame<W: Write>(w: &mut W, v: &Value) -> Result<()> {
-    serde_json::to_writer(&mut *w, v)?;
-    w.write_all(b"\n")?;
+    // Serialized first, so a failed write (a peer that closed) is an `io`
+    // error, not a serialization (`invalid`) one.
+    let mut frame = serde_json::to_vec(v)?;
+    frame.push(b'\n');
+    w.write_all(&frame)?;
     w.flush()?;
     Ok(())
 }
@@ -1247,5 +1250,18 @@ mod metrics_tests {
         drop(guard);
         drop(shared);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn a_write_to_a_closed_peer_is_an_io_error() {
+        let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(theirs);
+        let error = write_frame(&mut ours, &json!({"op":"ping"})).unwrap_err();
+        assert_eq!(error.code, "io", "{error:?}");
     }
 }
