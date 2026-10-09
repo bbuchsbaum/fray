@@ -344,7 +344,9 @@ answers with the expected build, the same store and a new process. The replaceme
 posted notice posts `abandoned`, and a notice that cannot be posted stops the
 restart before anything changes. `--all-stale` applies this to each running
 daemon whose build differs from the replacement's, one at a time, and reports
-the rest as skipped.
+the rest as skipped. It rechecks each home just before acting: a daemon that
+stopped, or a home that vanished, since the listing is never started or
+created, and a home already on the target build is not restarted again.
 
 ## 6. Delivering bytes is not delivering attention
 

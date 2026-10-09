@@ -32,7 +32,9 @@ be registered with an external service.
 `.cargo/config.toml` sets `FRAY_STATE_DIR=target/fray-state` for `cargo test`
 and `cargo run`, so a daemon started from the checkout (`cargo run -- start`)
 never appears in your real daemon registry. `FRAY_SCAN_ROOT` is for tests and
-rehearsals only: it limits `fray daemons --scan` to homes under one directory.
+rehearsals only: it limits the process-table search of `fray daemons --scan` to
+homes whose canonical path is under one directory. It does not filter registry
+entries, which `FRAY_STATE_DIR` selects.
 
 ### Upgrading an installed binary
 
@@ -55,7 +57,9 @@ so `fray.previous` then holds the bad build: do not roll back twice.
 
 Installing does not restart a running daemon, and nothing restarts one
 automatically. After installing, `scripts/install.sh` lists the daemons still on
-another build and prints the commands that would restart them; the list is
+another build. When one of them is running, it prints the `fray restart
+--all-stale` commands that would restart them; unreachable and incompatible ones
+are listed with a note that `--all-stale` would skip them. The report is
 advisory, and a failure to produce it does not fail the install.
 
 ### Restarting daemons onto a new build
@@ -88,7 +92,11 @@ turns survives the restart and moves onto the new binary. A daemon that
 becomes busy after the notice is not stopped. `--all-stale` restarts only
 running daemons; it lists busy, armed, unreachable and incompatible ones,
 any home another `fray restart` holds, and (without `--no-announce`) any
-that cannot post a notice, as skipped.
+that cannot post a notice, as skipped. It checks each home again just before
+acting: one whose daemon has stopped or whose directory has gone since the
+listing is skipped and never started, and one already on the target build is
+skipped as current. Those two skips, and dead records, do not affect the exit
+status.
 
 A daemon built before restart notices existed has no `announce` capability:
 restart it once with `--no-announce`, and its replacement posts the
