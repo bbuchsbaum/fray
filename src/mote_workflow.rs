@@ -506,7 +506,7 @@ impl<'a> Context<'a> {
         if let Some(why) = mote::unsupported_authority(&status) {
             return Err(Error::new(
                 "mote_authority_required",
-                format!("{why}; nothing was changed"),
+                format!("{why}; this check changed nothing"),
             ));
         }
         if status["schema"] != "mote.authority-status.v1"
