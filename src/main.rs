@@ -366,7 +366,7 @@ enum Cmd {
     /// Post a daemon maintenance notice to everyone, authored by `fray`.
     /// Needs no join; records --as (or $USER) as the requester.
     Announce {
-        #[arg(long, value_parser = ["restart", "stop", "restarted"])]
+        #[arg(long, value_parser = ["restart", "stop", "restarted", "abandoned"])]
         action: String,
         #[arg(long)]
         reason: String,

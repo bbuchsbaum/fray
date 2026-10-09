@@ -75,6 +75,8 @@ struct Shared {
     clients: AtomicUsize,
     long_clients: AtomicUsize,
     metrics_readers: AtomicUsize,
+    /// Connections waiting between requests; a drain does not wait for them.
+    idle_clients: AtomicUsize,
     limits: Limits,
     socket: PathBuf,
     /// Open long-lived connections, for `occupancy`.
@@ -222,6 +224,7 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         clients: AtomicUsize::new(0),
         long_clients: AtomicUsize::new(0),
         metrics_readers: AtomicUsize::new(0),
+        idle_clients: AtomicUsize::new(0),
         limits,
         socket: socket.clone(),
         long_lived: Default::default(),
@@ -290,7 +293,18 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
         .unwrap_or_else(|e| e.into_inner())
         .grace;
     let deadline = Instant::now() + grace;
-    while shared.clients.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+    // Idle connections (between requests) do not hold the drain; they close
+    // when the daemon exits. A request arriving just as the last busy one
+    // ends gets one short settle to begin.
+    let busy =
+        || shared.clients.load(Ordering::SeqCst) > shared.idle_clients.load(Ordering::SeqCst);
+    while Instant::now() < deadline {
+        if !busy() {
+            thread::sleep(Duration::from_millis(20));
+            if !busy() {
+                break;
+            }
+        }
         thread::sleep(Duration::from_millis(10));
     }
     drop(registration);
@@ -331,41 +345,15 @@ fn clone_for_client(stream: &UnixStream) -> Result<UnixStream> {
         )
     })
 }
-/// How often a connection between requests checks whether the daemon is
-/// stopping, and how long it may stay idle at all.
-const IDLE_POLL: Duration = Duration::from_millis(100);
-const IDLE_LIMIT: Duration = Duration::from_secs(30);
-/// Waits for the first bytes of the next request, or its end of stream:
-/// true. False once the daemon is stopping with nothing begun, so an idle
-/// connection never holds a drain open. Nothing is consumed while waiting.
-fn await_request(reader: &mut BufReader<UnixStream>, shared: &Shared) -> Result<bool> {
-    let deadline = Instant::now() + IDLE_LIMIT;
-    reader.get_ref().set_read_timeout(Some(IDLE_POLL))?;
-    let ready = loop {
-        if shared.stop.load(Ordering::SeqCst) {
-            break false;
-        }
-        match reader.fill_buf() {
-            Ok(_) => break true,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) =>
-            {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::from(io::ErrorKind::TimedOut).into());
-                }
-            }
-            Err(e) => return Err(e.into()),
-        }
-    };
-    reader
-        .get_ref()
-        .set_read_timeout(Some(Duration::from_secs(30)))?;
-    Ok(ready)
+/// Waits, unconsumed, for the first bytes of the next request (or end of
+/// stream) while counted idle. A drain need not wait for an idle connection:
+/// it stays open and is refused like any other until the daemon exits, and
+/// one whose request has begun counts as busy again.
+fn await_request(reader: &mut BufReader<UnixStream>, shared: &Shared) -> Result<()> {
+    shared.idle_clients.fetch_add(1, Ordering::SeqCst);
+    let ready = reader.fill_buf().map(|_| ());
+    shared.idle_clients.fetch_sub(1, Ordering::SeqCst);
+    Ok(ready?)
 }
 fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -382,10 +370,8 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
     // after the wait had replied. It begins the next frame.
     let mut carry = Vec::new();
     loop {
-        if carry.is_empty() && reader.buffer().is_empty() && !await_request(&mut reader, shared)? {
-            // Stopping, with no request begun on this connection: close it
-            // now rather than hold the drain for its whole grace.
-            return Ok(());
+        if carry.is_empty() && reader.buffer().is_empty() {
+            await_request(&mut reader, shared)?;
         }
         let frame = if carry.is_empty() {
             read_frame(&mut reader, REQUEST_LIMIT)?
@@ -556,7 +542,12 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     reply["pid"] = json!(std::process::id());
                     // Until a replacement binds, a client that cannot connect
                     // waits for it (within its own budget) instead of failing.
-                    if let Some(home) = shared.socket.parent() {
+                    // A restarter's own marker (it outlives this process) is kept.
+                    if let Some(home) = shared
+                        .socket
+                        .parent()
+                        .filter(|home| crate::restart::marker(home).is_none())
+                    {
                         if let Err(e) = crate::restart::write_marker(home, reason) {
                             eprintln!("restart marker not written: {e}");
                         }
@@ -1217,6 +1208,7 @@ mod metrics_tests {
             clients: AtomicUsize::new(0),
             long_clients: AtomicUsize::new(0),
             metrics_readers: AtomicUsize::new(0),
+            idle_clients: AtomicUsize::new(0),
             limits: Limits {
                 clients: 128,
                 long: 112,

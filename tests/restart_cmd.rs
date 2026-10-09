@@ -427,7 +427,7 @@ fn an_idle_keepalive_survives_and_only_a_running_turn_blocks() {
 fn a_failed_announcement_never_restarts() {
     let fake = Fake::start(
         &["sessions", "agents_all", "announce", "graceful_restart"],
-        |op| match op {
+        |op, _| match op {
             "announce" => {
                 Some(json!({"ok":false,"error":{"code":"internal","message":"disk full"}}))
             }
@@ -452,7 +452,7 @@ fn a_failed_announcement_never_restarts() {
 
 #[test]
 fn a_daemon_without_announce_needs_no_announce_and_old_daemons_are_restarted() {
-    let fake = Fake::start(&["sessions", "agents_all"], |_| None);
+    let fake = Fake::start(&["sessions", "agents_all"], |_, _| None);
     let (code, out, _) = fake.home.json(&["restart"]);
     assert_eq!(code, 1, "{out}");
     assert_eq!(out["error"]["code"], "announce_unsupported", "{out}");
@@ -505,9 +505,18 @@ fn a_replacement_of_another_build_fails_loudly() {
         message.contains(home.home.join("daemon.log").to_str().unwrap()),
         "{message}"
     );
-    // The restart notice went out; no restarted notice follows a failure.
+    // The restart notice went out, and an abandoned one followed it.
     let notices = home.notices();
-    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert_eq!(notices[0].1, "superseded", "{notices:?}");
+    assert!(
+        notices[1].0.starts_with("Fray daemon restart abandoned: "),
+        "{notices:?}"
+    );
+    assert!(
+        out["error"]["details"]["announce"]["abandoned"].is_i64(),
+        "{out}"
+    );
 }
 
 #[test]
@@ -515,10 +524,30 @@ fn a_short_request_in_the_drain_gap_waits_for_the_replacement() {
     let home = Home::new("g");
     home.start(BIN);
     home.ok("alice", &["join"]);
-    // A graceful stop leaves the marker; the replacement removes it.
+    // A graceful stop with no restarter leaves the daemon's own marker, which
+    // dies with it: a dead home's clients never wait for it.
     let stopped = home.ok("tester", &["stop", "--restart", "--reason", "gap"]);
     assert_eq!(stopped["exited"], true);
-    assert!(fray::restart::marker(&home.home).is_some());
+    assert!(home.home.join("daemon.restarting").exists());
+    assert_eq!(fray::restart::marker(&home.home), None);
+    let fails_fast = |what: &str| {
+        let started = Instant::now();
+        let out = home
+            .command(BIN)
+            .args(["--json", "--as", "alice", "agents"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{what}: {}", text(&out));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{what}: {:?}",
+            started.elapsed()
+        );
+    };
+    fails_fast("the daemon's marker after it exited");
+    // A live restarter's marker (this test's process): the request waits.
+    fray::restart::write_marker(&home.home, "gap").unwrap();
+    assert_eq!(fray::restart::marker(&home.home).as_deref(), Some("gap"));
     let started = Instant::now();
     let request = home
         .command(BIN)
@@ -537,33 +566,62 @@ fn a_short_request_in_the_drain_gap_waits_for_the_replacement() {
         "{}",
         text(&out)
     );
+    // The replacement removed it on bind.
     assert!(!home.home.join("daemon.restarting").exists());
-    // Without a marker, or with a stale one, the same gap fails at once.
     let _ = home.command(BIN).arg("stop").output();
     let end = Instant::now() + Duration::from_secs(5);
     while home.ping().is_some() && Instant::now() < end {
         thread::sleep(Duration::from_millis(20));
     }
-    for marker in [
-        None,
-        Some(json!({"reason":"old","pid":1,"written_ms":fray::model::now_ms() - 200_000})),
+    fails_fast("no marker");
+    let me = std::process::id();
+    for (what, marker) in [
+        (
+            "an old marker of a live writer",
+            json!({"reason":"old","pid":me,"written_ms":fray::model::now_ms() - 31_000}),
+        ),
+        (
+            "a fresh marker of a dead writer",
+            json!({"reason":"dead","pid":999_999,"written_ms":fray::model::now_ms()}),
+        ),
     ] {
-        if let Some(marker) = &marker {
-            std::fs::write(home.home.join("daemon.restarting"), marker.to_string()).unwrap();
-        }
-        let started = Instant::now();
-        let out = home
-            .command(BIN)
-            .args(["--json", "--as", "alice", "agents"])
-            .output()
-            .unwrap();
-        assert!(!out.status.success(), "{}", text(&out));
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{marker:?}: {:?}",
-            started.elapsed()
-        );
+        std::fs::write(home.home.join("daemon.restarting"), marker.to_string()).unwrap();
+        fails_fast(what);
     }
+}
+
+/// A connect that dies before even the handshake ping is answered (a daemon
+/// exiting from a drain) sent nothing operational: with a live restarter's
+/// marker, the request waits for the replacement.
+#[test]
+fn a_handshake_cut_off_by_an_exiting_daemon_is_resent_to_the_replacement() {
+    let home = Home::new("h");
+    let socket = home.home.join("bus.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fray::restart::write_marker(&home.home, "cut").unwrap();
+    let closer = thread::spawn(move || {
+        // Accept one connection and close it unanswered, then go away.
+        let (stream, _) = listener.accept().unwrap();
+        let _ = std::fs::remove_file(&socket);
+        drop(stream);
+    });
+    let request = home
+        .command(BIN)
+        .args(["--json", "--as", "alice", "agents"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    closer.join().unwrap();
+    thread::sleep(Duration::from_millis(500));
+    home.start(BIN);
+    let out = request.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("daemon restarting (cut)"),
+        "{}",
+        text(&out)
+    );
 }
 
 /// An idle open connection must not hold the drain for its whole grace.
@@ -603,24 +661,113 @@ fn idle_connections_are_closed_early_in_the_drain() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    // The idle connection was closed, not answered.
+    // It stayed open until the daemon exited, and was then closed.
     assert!(idle.get().is_none());
+}
+
+/// While something busy holds the drain, an idle connection is still
+/// answered: its next request gets the retryable restarting refusal, never
+/// a dropped connection.
+#[test]
+fn an_idle_connection_sending_during_a_drain_is_refused_retryably() {
+    let home = Home::new("e");
+    let mut daemon = home
+        .command(BIN)
+        .arg("serve")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(5);
+    while home.ping().is_none() {
+        assert!(Instant::now() < end, "daemon did not start");
+        thread::sleep(Duration::from_millis(25));
+    }
+    let mut idle = home.connect();
+    idle.send("ping", "", json!({}));
+    assert_eq!(idle.get().unwrap()["ok"], true);
+    // A request begun but not finished: busy until the grace ends.
+    let mut partial = home.connect();
+    partial.stream.write_all(b"{\"op\":\"ping\"").unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let mut stop = home.connect();
+    stop.send(
+        "shutdown",
+        "",
+        json!({"restart":true,"reason":"held","grace_ms":2000}),
+    );
+    assert_eq!(stop.get().unwrap()["ok"], true);
+    thread::sleep(Duration::from_millis(300));
+    idle.send("agents", "alice", json!({}));
+    let frame = idle.get().expect("refused, not dropped");
+    assert_eq!(frame["type"], "restarting", "{frame}");
+    assert_eq!(frame["error"]["details"]["restarting"], true, "{frame}");
+    // A request arriving with the stop, already in the buffer, is answered.
+    let started = Instant::now();
+    while daemon.try_wait().unwrap().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain never ended"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A connection whose ping is already buffered when the stop arrives is
+/// answered (or refused retryably), never closed unread.
+#[test]
+fn a_request_racing_the_stop_is_never_dropped_unread() {
+    for _ in 0..10 {
+        let home = Home::new("r");
+        let mut daemon = home
+            .command(BIN)
+            .arg("serve")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while home.ping().is_none() {
+            assert!(Instant::now() < end, "daemon did not start");
+            thread::sleep(Duration::from_millis(25));
+        }
+        let mut racer = home.connect();
+        let mut stop = home.connect();
+        racer.send("agents", "alice", json!({}));
+        stop.send(
+            "shutdown",
+            "",
+            json!({"restart":true,"reason":"race","grace_ms":2000}),
+        );
+        let frame = racer.get().expect("answered or refused, not dropped");
+        assert!(
+            frame["ok"] == true || frame["type"] == "restarting",
+            "{frame}"
+        );
+        let _ = stop.get();
+        let _ = daemon.wait();
+    }
 }
 
 /// A daemon that predates the lifecycle work: it answers `ping` without a
 /// pid (with the given capabilities), `agents` with nobody, and `shutdown`
-/// by acknowledging and going away. `respond` may answer other ops.
+/// by acknowledging and going away. `respond` (given the op and how many of
+/// it came before) may answer any op first.
 struct Fake {
     home: Home,
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Fake {
-    fn start(capabilities: &[&str], respond: fn(&str) -> Option<Value>) -> Self {
+    fn start(
+        capabilities: &[&str],
+        respond: impl Fn(&str, usize) -> Option<Value> + Send + Sync + 'static,
+    ) -> Self {
+        let respond = Arc::new(respond);
         let home = Home::new("o");
         let socket = home.home.join("bus.sock");
         let listener = UnixListener::bind(&socket).unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
         let capabilities: Vec<String> = capabilities.iter().map(|c| (*c).to_owned()).collect();
         thread::spawn(move || {
@@ -629,24 +776,35 @@ impl Fake {
                 let seen = seen.clone();
                 let capabilities = capabilities.clone();
                 let socket = socket.clone();
+                let respond = respond.clone();
                 thread::spawn(move || {
                     let mut writer = stream.try_clone().unwrap();
                     for line in BufReader::new(stream).lines() {
                         let Ok(line) = line else { return };
                         let req: Value = serde_json::from_str(&line).unwrap();
                         let op = req["op"].as_str().unwrap().to_owned();
-                        seen.lock().unwrap().push(req.clone());
-                        let frame = match op.as_str() {
-                            "ping" => json!({"ok":true,"data":{"version":"0.2.1","build":"oldbuild","protocol_version":2,
-                                "capabilities":capabilities,"capacity":{"clients":1,"long_lived":0},"cursor":0,"time_ms":1}}),
-                            "agents" => json!({"ok":true,"data":{"items":[],"more":false}}),
-                            "shutdown" => {
-                                let _ = std::fs::remove_file(&socket);
-                                json!({"ok":true,"data":{"stopping":true}})
-                            }
-                            other => respond(other).unwrap_or_else(|| {
-                                json!({"ok":false,"error":{"code":"invalid","message":format!("unknown operation: {other}")}})
-                            }),
+                        let before = {
+                            let mut seen = seen.lock().unwrap();
+                            let before = seen.iter().filter(|r| r["op"] == op.as_str()).count();
+                            seen.push(req.clone());
+                            before
+                        };
+                        if op == "shutdown" {
+                            let _ = std::fs::remove_file(&socket);
+                        }
+                        let frame = match respond(&op, before) {
+                            Some(frame) => frame,
+                            None => match op.as_str() {
+                                "ping" => {
+                                    json!({"ok":true,"data":{"version":"0.2.1","build":"oldbuild","protocol_version":2,
+                                "capabilities":capabilities,"capacity":{"clients":1,"long_lived":0},"cursor":0,"time_ms":1}})
+                                }
+                                "agents" => json!({"ok":true,"data":{"items":[],"more":false}}),
+                                "shutdown" => json!({"ok":true,"data":{"stopping":true}}),
+                                other => {
+                                    json!({"ok":false,"error":{"code":"invalid","message":format!("unknown operation: {other}")}})
+                                }
+                            },
                         };
                         if writeln!(writer, "{frame}").is_err() {
                             return;
@@ -676,6 +834,134 @@ impl Fake {
             .map(|r| r["args"].clone())
             .collect()
     }
+}
+
+#[test]
+fn a_second_restart_on_the_same_home_fails_fast() {
+    use fs2::FileExt;
+    let home = Home::new("l");
+    home.start(BIN);
+    let pid = home.pid();
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.home.join("restart.lock"))
+        .unwrap();
+    held.try_lock_exclusive().unwrap();
+    let (code, out, _) = home.json(&["restart"]);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(out["error"]["code"], "restart_in_progress", "{out}");
+    assert_eq!(home.pid(), pid);
+    assert!(home.notices().is_empty());
+    drop(held);
+    let (code, out, err) = home.json(&["restart"]);
+    assert_eq!(code, 0, "{out} {err}");
+}
+
+/// Someone arriving between the announcement and the shutdown: the restart
+/// is abandoned, said so on the board, and nothing is stopped.
+#[test]
+fn a_daemon_that_becomes_busy_after_the_announcement_is_not_stopped() {
+    let fake = Fake::start(
+        &["sessions", "agents_all", "announce", "graceful_restart"],
+        |op, before| match (op, before) {
+            ("agents", 0) => None,
+            ("agents", _) => Some(json!({"ok":true,"data":{"more":false,"items":[{
+                "name":"late","enabled":true,"recently_seen":true,"controller":null,"keepalive":null,
+                "listener":{"live":true,"run_id":"r9"},"session":{"bound":null,"recent_takeover":null}}]}})),
+            ("announce", n) => Some(json!({"ok":true,"data":{"card":{"id":10 + n}}})),
+            _ => None,
+        },
+    );
+    let (code, out, err) = fake.home.json(&["restart"]);
+    assert_eq!(code, 3, "{out} {err}");
+    assert_eq!(out["action"], "abandoned", "{out}");
+    assert_eq!(out["announce"]["restart"], 10, "{out}");
+    assert_eq!(out["announce"]["abandoned"], 11, "{out}");
+    assert_eq!(out["preflight"]["interrupts"][0]["actor"], "late", "{out}");
+    let announced: Vec<Value> = fake
+        .requests("announce")
+        .iter()
+        .map(|a| a["action"].clone())
+        .collect();
+    assert_eq!(announced, [json!("restart"), json!("abandoned")]);
+    assert!(!fake.ops().contains(&"shutdown".to_owned()));
+    assert!(!fake.home.home.join("daemon.restarting").exists());
+}
+
+/// The old daemon's socket went silent but its pid still looks alive (a
+/// reused pid): the replacement is started anyway, with a warning.
+#[test]
+fn a_silent_daemon_whose_pid_lingers_is_replaced_with_a_warning() {
+    let lingering = Arc::new(Mutex::new(Command::new("sleep").arg("30").spawn().unwrap()));
+    let pid = lingering.lock().unwrap().id();
+    let fake = Fake::start(
+        &["sessions", "agents_all", "graceful_restart"],
+        move |op, _| {
+            (op == "shutdown").then(|| {
+            json!({"ok":true,"data":{"stopping":true,"restart":true,"reason":"x","grace_ms":0,"pid":pid}})
+        })
+        },
+    );
+    let (code, out, err) = fake.home.json(&["restart", "--no-announce"]);
+    assert_eq!(code, 0, "{out} {err}");
+    assert_eq!(out["before"]["pid"], pid, "{out}");
+    assert!(
+        out["warnings"].as_array().unwrap().iter().any(|w| w
+            .as_str()
+            .unwrap()
+            .contains(&format!("process {pid} still appears"))),
+        "{out}"
+    );
+    assert_eq!(fake.home.ping().unwrap()["build"], out["exe"]["build"]);
+    let mut child = lingering.lock().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A replacement of another build may not adopt keepalive drives, so an idle
+/// one counts as live for it.
+#[test]
+fn an_idle_keepalive_blocks_a_restart_onto_another_build() {
+    let home = Home::new("q");
+    home.start(BIN);
+    home.ok("alice", &["join"]);
+    let mut stand_in = Command::new("sleep").arg("60").spawn().unwrap();
+    let db = home.db();
+    let now = fray::model::now_ms();
+    db.execute(
+        "INSERT INTO keepalives(agent,session,companion,host,cwd,log,pid,budget,stop_requested,started_ms) VALUES('alice','keepalive:c1','alice-k','claude','/tmp','/tmp/k.log',?,1000,0,?)",
+        rusqlite::params![stand_in.id(), now],
+    )
+    .unwrap();
+    until_preflight(&home, 0);
+    let wrapper = home.root.join("fray-other");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'fray 0.0.0 (other-build)'; exit 0; fi\nexec '{BIN}' \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pid = home.pid();
+    let (code, out, _) = home.json(&["restart", "--exe", wrapper.to_str().unwrap()]);
+    assert_eq!(code, 3, "{out}");
+    assert!(
+        out["preflight"]["interrupts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "keepalive"
+                && i["class"] == "live"
+                && i["detail"].as_str().unwrap().contains("may not adopt")),
+        "{out}"
+    );
+    assert_eq!(home.pid(), pid);
+    db.execute("DELETE FROM keepalives", []).unwrap();
+    let _ = stand_in.kill();
+    let _ = stand_in.wait();
 }
 
 /// A real pre-lifecycle daemon, when FRAY_OLD_BIN names one (e.g. the
