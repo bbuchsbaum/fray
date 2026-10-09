@@ -297,21 +297,21 @@ struct Scan {
 /// process is visible.
 ///
 /// `FRAY_SCAN_ROOT=DIR` keeps only processes with a candidate home under
-/// `DIR` and drops the rest unreported. It exists so tests (and anyone
+/// `DIR` (compared canonically) and drops the rest unreported. It filters
+/// the process table only, never registry entries (`FRAY_STATE_DIR` picks
+/// the registry). It exists so tests (and anyone
 /// rehearsing `fray restart --all-stale --scan`) can scan scratch homes
 /// without touching the other daemons on the machine.
 fn scan(skip: &BTreeSet<PathBuf>, deadline: Instant) -> Result<Scan> {
+    // Both sides canonical, so `<root>/../elsewhere` is not under the root;
+    // a root or candidate that cannot be resolved is not under it either.
     let root = std::env::var_os(SCAN_ROOT)
         .filter(|r| !r.is_empty())
-        .map(PathBuf::from);
-    let under_root = |candidate: &str| {
-        root.as_ref().is_none_or(|root| {
-            let path = Path::new(candidate);
-            path.starts_with(root)
-                || fs::canonicalize(path).is_ok_and(|p| {
-                    p.starts_with(fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
-                })
-        })
+        .map(|r| fs::canonicalize(PathBuf::from(r)).ok());
+    let under_root = |candidate: &str| match &root {
+        None => true,
+        Some(None) => false,
+        Some(Some(root)) => fs::canonicalize(candidate).is_ok_and(|p| p.starts_with(root)),
     };
     let uid = Command::new("id").arg("-u").output()?;
     let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
@@ -351,7 +351,7 @@ fn scan(skip: &BTreeSet<PathBuf>, deadline: Instant) -> Result<Scan> {
         let mut reason = "no candidate home answered a ping";
         for candidate in &serve.homes {
             let path = Path::new(candidate);
-            if !path.is_absolute() || !path.join("bus.sock").exists() {
+            if !path.is_absolute() || !path.join("bus.sock").exists() || !under_root(candidate) {
                 continue;
             }
             let home = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

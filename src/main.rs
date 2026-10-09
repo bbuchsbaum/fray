@@ -227,7 +227,8 @@ enum Cmd {
         stale: bool,
         /// Also find unregistered daemons (started before the registry) from
         /// the process table. Transitional. FRAY_SCAN_ROOT=DIR limits it to
-        /// homes under DIR (for tests and rehearsals on scratch homes).
+        /// homes under DIR (for tests and rehearsals on scratch homes); it
+        /// does not filter registry entries, which FRAY_STATE_DIR selects.
         #[arg(long)]
         scan: bool,
     },
@@ -3524,6 +3525,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 normal: normal.then_some(true),
                 actor: actor.clone(),
                 requested_by,
+                only_if_stale: true,
             };
             let report = fray::restart_all::run(
                 &fray::registry::state_dir()?,
@@ -3563,6 +3565,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 normal: normal.then_some(true),
                 actor: actor.clone(),
                 requested_by,
+                only_if_stale: false,
             };
             let outcome = fray::restart::run(&home, &options)?;
             if cli.json {

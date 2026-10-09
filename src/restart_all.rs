@@ -14,23 +14,34 @@
 //!
 //! # Outcomes
 //!
-//! Each result's `outcome` is one of `restarted`, `started` (its daemon had
-//! gone by the time it was reached), `skipped_busy`, `skipped_armed`,
-//! `skipped_unannounced` (a daemon that predates restart notices, without
-//! `--no-announce`), `skipped_in_progress` (another `fray restart` holds the
-//! home's restart lock), `skipped_state` or `failed`. A home that became busy
-//! or armed between its restart notice and the shutdown is not stopped; it
-//! is `skipped_busy` or `skipped_armed` with `abandoned: true` and the
-//! `announce` state, since the board then shows the notice and an
-//! `abandoned` one. A dry run reads each
-//! preflight instead and reports `would_restart` or `would_start` in place
-//! of the first two, and the same skips.
+//! Each result's `outcome` is one of:
+//!
+//! - `restarted`;
+//! - `skipped_busy` or `skipped_armed`, with the holders. A home that became
+//!   busy or armed between its restart notice and the shutdown is not
+//!   stopped either; it has `abandoned: true` and the `announce` state, since
+//!   its board then shows the notice and an `abandoned` one;
+//! - `skipped_unannounced`: a daemon that predates restart notices, without
+//!   `--no-announce`;
+//! - `skipped_in_progress`: another `fray restart` holds the home's lock;
+//! - `skipped_state`: not running when listed (unreachable, incompatible,
+//!   dead), or no longer running when reached: its daemon stopped since the
+//!   listing, or its home directory is gone. Such a home is never started
+//!   and never created (restart in batch mode, [`Options::only_if_stale`]);
+//! - `skipped_current`: it was upgraded onto the target build since the
+//!   listing, so it is not restarted again;
+//! - `failed`.
+//!
+//! A dry run reads each preflight instead and reports `would_restart` in
+//! place of `restarted`, and the same skips.
 //!
 //! # Exit status
 //!
 //! 0 when every stale daemon was restarted (or would be), or none is stale;
-//! 1 when any failed; otherwise 4, when at least one was skipped. A dead record (pruned by the listing) is listed but does not
-//! count as a skip: there was no daemon to restart.
+//! 1 when any failed; otherwise 4, when at least one was skipped. Skips that
+//! leave nothing to restart do not count: `skipped_current`, a home whose
+//! daemon stopped or whose directory went away since the listing, and a
+//! dead record (pruned by the listing).
 //!
 //! # `--json`
 //!
@@ -40,7 +51,8 @@
 //! JSON), `refusal` (its refusal or abandonment JSON) with `holders` and
 //! `hint` (and `abandoned`, `announce` when abandoned), `hint`
 //! (and in a real run the refusing `error`) for an unannounced skip, `reason`
-//! for a state skip, `error` for a failure, and `preflight` in a dry run.
+//! for a state skip, `why` (`stopped`, `missing` or `current`) and `reason`
+//! for a home that changed since the listing, `error` for a failure, and `preflight` in a dry run.
 //! `counts` has every outcome above as a key.
 use crate::{
     model::*,
@@ -49,11 +61,10 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const OUTCOMES: [&str; 10] = [
+const OUTCOMES: [&str; 9] = [
     "restarted",
-    "started",
     "would_restart",
-    "would_start",
+    "skipped_current",
     "skipped_busy",
     "skipped_armed",
     "skipped_unannounced",
@@ -80,6 +91,10 @@ pub fn run(
         None => std::env::current_exe()?,
     };
     let target = restart::exe_build(&exe)?;
+    let opts = &Options {
+        only_if_stale: true,
+        ..opts.clone()
+    };
     let listing = crate::daemons::report_against(state_dir, true, scan, &target)?;
     let mut results = Vec::new();
     for d in listing["daemons"].as_array().into_iter().flatten() {
@@ -110,8 +125,12 @@ pub fn run(
                     if target != BUILD {
                         pre.assume_no_adoption(&target);
                     }
-                    let outcome = predict(&pre, opts);
+                    let outcome = predict(&pre, opts, &target);
                     result["outcome"] = json!(outcome);
+                    if let Some((why, reason)) = changed(&pre, &target) {
+                        result["why"] = json!(why);
+                        result["reason"] = json!(reason);
+                    }
                     if outcome == "skipped_unannounced" {
                         result["hint"] = json!(UNANNOUNCED);
                     } else if outcome.starts_with("skipped") {
@@ -126,6 +145,15 @@ pub fn run(
             }
         } else {
             match restart::run(&home, opts) {
+                Ok(Outcome::NotStale { why, detail, .. }) => {
+                    result["outcome"] = json!(if why == "current" {
+                        "skipped_current"
+                    } else {
+                        "skipped_state"
+                    });
+                    result["why"] = json!(why);
+                    result["reason"] = json!(format!("{why} since listed: {detail}"));
+                }
                 Ok(Outcome::Done(v)) => {
                     result["outcome"] = v["action"].clone();
                     result["restart"] = v;
@@ -190,11 +218,17 @@ pub fn run(
 }
 
 /// What the restart would do with this preflight under `opts`.
-fn predict(pre: &Preflight, opts: &Options) -> &'static str {
+fn predict(pre: &Preflight, opts: &Options, target: &str) -> &'static str {
+    if let Some((why, _)) = changed(pre, target) {
+        return if why == "current" {
+            "skipped_current"
+        } else {
+            "skipped_state"
+        };
+    }
     match pre.verdict {
         Verdict::Busy if !opts.force => "skipped_busy",
         Verdict::Armed if !(opts.force || opts.allow_armed) => "skipped_armed",
-        Verdict::NotRunning => "would_start",
         _ if !opts.no_announce
             && !pre
                 .daemon
@@ -231,6 +265,22 @@ fn refused(result: &mut Value, pre: &Preflight) {
     });
 }
 
+/// How a home listed as stale changed before it was reached, as a dry run
+/// sees it (the restart itself checks the same under its lock).
+fn changed(pre: &Preflight, target: &str) -> Option<(&'static str, String)> {
+    match pre.daemon.as_ref().map(|d| d["build"].as_str()) {
+        None => Some((
+            "stopped",
+            "stopped since listed: no daemon answers any more".into(),
+        )),
+        Some(Some(build)) if build == target => Some((
+            "current",
+            format!("current since listed: it already runs build {target}"),
+        )),
+        Some(_) => None,
+    }
+}
+
 fn state_reason(state: &str, d: &Value) -> String {
     let home = d["home"].as_str().unwrap_or("?");
     match state {
@@ -253,8 +303,9 @@ pub fn exit_code(report: &Value) -> i32 {
     } else if any(&|r| {
         r["outcome"]
             .as_str()
-            .is_some_and(|o| o.starts_with("skipped"))
+            .is_some_and(|o| o.starts_with("skipped") && o != "skipped_current")
             && r["state"] != "dead"
+            && r["why"].is_null()
     }) {
         4
     } else {
@@ -324,7 +375,7 @@ fn detail(r: &Value) -> String {
             .join("; ")
     };
     match r["outcome"].as_str().unwrap_or("") {
-        "restarted" | "started" => {
+        "restarted" => {
             let v = &r["restart"];
             let mut s = format!(
                 "build {} -> {}, pid {} -> {}",
@@ -341,7 +392,7 @@ fn detail(r: &Value) -> String {
             }
             s
         }
-        "would_restart" | "would_start" => {
+        "would_restart" => {
             let p = &r["preflight"];
             let mut s = format!(
                 "build {}, preflight {}",
@@ -370,6 +421,7 @@ fn detail(r: &Value) -> String {
             s
         }
         "skipped_in_progress" => clean(&r["hint"]),
+        "skipped_current" => clean(&r["reason"]),
         "skipped_unannounced" => format!("build {}. {}", clean(&r["build"]), clean(&r["hint"])),
         "skipped_state" => clean(&r["reason"]),
         _ => format!(
@@ -428,6 +480,10 @@ mod tests {
             4
         );
         assert_eq!(exit_code(&report(&[("skipped_state", "unreachable")])), 4);
+        assert_eq!(exit_code(&report(&[("skipped_current", "running")])), 0);
+        let stopped =
+            json!({"results":[{"outcome":"skipped_state","state":"running","why":"stopped"}]});
+        assert_eq!(exit_code(&stopped), 0);
         assert_eq!(
             exit_code(&report(&[
                 ("skipped_armed", "running"),
