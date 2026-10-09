@@ -19,6 +19,7 @@ pub mod presence;
 pub mod recovery;
 pub mod registry;
 pub mod restart;
+pub mod restart_all;
 pub mod retention;
 pub mod review;
 pub mod routing;

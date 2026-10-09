@@ -469,3 +469,64 @@ fn scan_finds_unregistered_daemons_by_their_command_line() {
         "{text}"
     );
 }
+
+/// Occupancy is shown as the restart preflight reads it: a keepalive drive
+/// between turns survives a restart, so the daemon reads idle (the op itself
+/// still says busy), and the same drive mid-turn reads busy.
+#[test]
+fn occupancy_shows_the_preflight_reading_of_an_idle_keepalive() {
+    let mut s = Scratch::new();
+    let home = s.home("k");
+    let state = s.state.clone();
+    s.serve(&state, &home);
+    let joined = s
+        .fray(&s.state)
+        .arg("--home")
+        .arg(&home)
+        .args(["--as", "alice", "join"])
+        .output()
+        .unwrap();
+    assert!(joined.status.success(), "{joined:?}");
+    let mut stand_in = Command::new("sleep").arg("60").spawn().unwrap();
+    let db = rusqlite::Connection::open(home.join("state.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let now = fray::model::now_ms();
+    db.execute(
+        "INSERT INTO keepalives(agent,session,companion,host,cwd,log,pid,budget,stop_requested,started_ms) VALUES('alice','keepalive:c1','alice-k','claude','/tmp','/tmp/k.log',?,1000,0,?)",
+        rusqlite::params![stand_in.id(), now],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO controllers(agent,run_id,state,updated_ms,reason) VALUES('alice','r1','waiting',?,NULL)",
+        [now],
+    )
+    .unwrap();
+    let report = s.report(&[]);
+    let d = find(&report, &home).unwrap();
+    assert_eq!(
+        d["occupancy"]["verdict"], "busy",
+        "the op is unchanged: {d}"
+    );
+    assert_eq!(d["preflight"]["verdict"], "idle", "{d}");
+    assert_eq!(d["preflight"]["survives"], json!(["alice"]), "{d}");
+    assert_eq!(d["preflight"]["live"], json!([]), "{d}");
+    let text = String::from_utf8(s.daemons(&[]).stdout).unwrap();
+    assert!(
+        text.contains("  idle (1 keepalive survives, 0 clients)\n"),
+        "{text}"
+    );
+    db.execute(
+        "UPDATE controllers SET state='running',updated_ms=? WHERE agent='alice'",
+        [fray::model::now_ms()],
+    )
+    .unwrap();
+    let report = s.report(&[]);
+    let d = find(&report, &home).unwrap();
+    assert_eq!(d["preflight"]["verdict"], "busy", "{d}");
+    assert_eq!(d["preflight"]["live"], json!(["alice"]), "{d}");
+    let text = String::from_utf8(s.daemons(&[]).stdout).unwrap();
+    assert!(text.contains("  busy: alice (0 clients)\n"), "{text}");
+    db.execute("DELETE FROM keepalives", []).unwrap();
+    let _ = stand_in.kill();
+    let _ = stand_in.wait();
+}

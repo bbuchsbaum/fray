@@ -253,32 +253,47 @@ impl Preflight {
 
 /// Read what a restart of `home`'s daemon would interrupt. Never mutates.
 pub fn preflight(home: &Path) -> Result<Preflight> {
+    let ping = match crate::client::rpc(home, &Request::new("ping", "", json!({})), 5) {
+        Ok(ping) => ping,
+        Err(e) if e.code == "unavailable" => {
+            return Ok(Preflight {
+                home: home.to_path_buf(),
+                verdict: Verdict::NotRunning,
+                source: "none",
+                degraded: false,
+                daemon: None,
+                interruptions: Vec::new(),
+                present: Vec::new(),
+                report: Value::Null,
+            })
+        }
+        Err(e) => return Err(e),
+    };
+    let request = if has(&ping, "occupancy") {
+        Request::new("occupancy", "", json!({}))
+    } else {
+        Request::new("agents", "", json!({"limit":100}))
+    };
+    let report = crate::client::rpc(home, &request, 10)?;
+    Ok(classify(home, ping, report))
+}
+
+/// The preflight's reading of a daemon's `ping` and its report: the
+/// `occupancy` report when the ping offers that capability, else its `agents`
+/// listing (degraded). `fray daemons` shows occupancy through this, so the
+/// two never disagree about an idle keepalive or an armed wait.
+pub fn classify(home: &Path, ping: Value, report: Value) -> Preflight {
     let mut pre = Preflight {
         home: home.to_path_buf(),
         verdict: Verdict::NotRunning,
-        source: "none",
+        source: "occupancy",
         degraded: false,
         daemon: None,
         interruptions: Vec::new(),
         present: Vec::new(),
         report: Value::Null,
     };
-    let ping = match crate::client::rpc(home, &Request::new("ping", "", json!({})), 5) {
-        Ok(ping) => ping,
-        Err(e) if e.code == "unavailable" => return Ok(pre),
-        Err(e) => return Err(e),
-    };
-    let has_occupancy = ping["capabilities"]
-        .as_array()
-        .is_some_and(|caps| caps.iter().any(|c| c == "occupancy"));
-    let request = if has_occupancy {
-        Request::new("occupancy", "", json!({}))
-    } else {
-        Request::new("agents", "", json!({"limit":100}))
-    };
-    let report = crate::client::rpc(home, &request, 10)?;
-    if has_occupancy {
-        pre.source = "occupancy";
+    if has(&ping, "occupancy") {
         read_occupancy(&mut pre, &report);
     } else {
         pre.source = "agents";
@@ -296,7 +311,7 @@ pub fn preflight(home: &Path) -> Result<Preflight> {
     };
     pre.daemon = Some(ping);
     pre.report = report;
-    Ok(pre)
+    pre
 }
 
 fn text(v: &Value) -> String {
@@ -710,7 +725,7 @@ fn done_text(v: &Value) -> String {
     s
 }
 
-fn has(ping: &Value, capability: &str) -> bool {
+pub(crate) fn has(ping: &Value, capability: &str) -> bool {
     ping["capabilities"]
         .as_array()
         .is_some_and(|caps| caps.iter().any(|c| c == capability))

@@ -20,6 +20,13 @@
 //! Daemons are asked with [`client::probe`]: one request each, no reconnect
 //! wait and no stderr notes, all within [`BUDGET`]. A daemon reached after the
 //! budget is spent is listed without occupancy rather than stalling the report.
+//!
+//! Occupancy is shown as the restart preflight reads it
+//! ([`crate::restart::classify`]): `idle`, `busy` or `armed`, with live
+//! holders, armed waiters and keepalive drives that would survive a restart.
+//! The `occupancy` op's own verdict, which counts every live keepalive and
+//! armed wait as busy, stays in the JSON under `occupancy`; the reading
+//! shown is under `preflight`.
 use crate::{
     client,
     model::*,
@@ -38,6 +45,9 @@ use std::{
 /// pings. One wedged daemon costs at most a per-request timeout.
 pub const BUDGET: Duration = Duration::from_secs(10);
 
+/// Limits `--scan` to homes under a directory; see [`scan`].
+pub const SCAN_ROOT: &str = "FRAY_SCAN_ROOT";
+
 /// Lists the daemons in the default registry; see [`report_in`].
 pub fn report(stale_only: bool, scan: bool) -> Result<Value> {
     report_in(&registry::state_dir()?, stale_only, scan)
@@ -49,6 +59,18 @@ pub fn report(stale_only: bool, scan: bool) -> Result<Value> {
 /// [`scan`]). With `stale_only`, keeps only daemons whose build differs from
 /// this client's, plus records pruned now (each is reported exactly once).
 pub fn report_in(state_dir: &Path, stale_only: bool, scan: bool) -> Result<Value> {
+    report_against(state_dir, stale_only, scan, BUILD)
+}
+
+/// [`report_in`], with `stale` meaning a build other than `build` (say the
+/// binary `fray restart --all-stale --exe` would start) rather than this
+/// client's. The report names it as `compared_build`.
+pub fn report_against(
+    state_dir: &Path,
+    stale_only: bool,
+    scan: bool,
+    build: &str,
+) -> Result<Value> {
     let now = now_ms();
     let deadline = Instant::now() + BUDGET;
     let mut daemons = Vec::new();
@@ -56,7 +78,7 @@ pub fn report_in(state_dir: &Path, stale_only: bool, scan: bool) -> Result<Value
     let mut registered = BTreeSet::new();
     for entry in registry::list_in(state_dir)? {
         registered.insert(entry.record.home.clone());
-        let item = registered_item(&entry, now, deadline)?;
+        let item = registered_item(&entry, build, now, deadline)?;
         if item["pruned"] == true {
             pruned += 1;
         }
@@ -69,7 +91,7 @@ pub fn report_in(state_dir: &Path, stale_only: bool, scan: bool) -> Result<Value
             found
                 .daemons
                 .into_iter()
-                .map(|d| unregistered_item(d, now, deadline)),
+                .map(|d| unregistered_item(d, build, now, deadline)),
         );
         unconfirmed = found.unconfirmed;
     }
@@ -79,6 +101,7 @@ pub fn report_in(state_dir: &Path, stale_only: bool, scan: bool) -> Result<Value
     }
     let mut out = json!({
         "client":{"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION},
+        "compared_build":build,
         "state_dir":state_dir,
         "stale_only":stale_only,
         "daemons":daemons,
@@ -96,7 +119,7 @@ pub fn restart_command(home: &Path) -> String {
     format!("fray --home '{home}' restart")
 }
 
-fn registered_item(entry: &Entry, now: i64, deadline: Instant) -> Result<Value> {
+fn registered_item(entry: &Entry, build: &str, now: i64, deadline: Instant) -> Result<Value> {
     let record = &entry.record;
     let mut item = json!({
         "home":record.home,
@@ -115,7 +138,7 @@ fn registered_item(entry: &Entry, now: i64, deadline: Instant) -> Result<Value> 
     match entry.liveness {
         Liveness::Running => {
             let ping = entry.ping.clone().unwrap_or_default();
-            describe_live(&mut item, &record.home, &ping, deadline);
+            describe_live(&mut item, &record.home, &ping, build, deadline);
             // The ping describes whoever serves the home now. A record left
             // by another process (say a crash, then a pre-registry daemon on
             // the same home) is stale: its pid, exe and start time are not
@@ -136,15 +159,17 @@ fn registered_item(entry: &Entry, now: i64, deadline: Instant) -> Result<Value> 
         Liveness::Unknown => {
             // Only the record describes it; its build may still show skew.
             item["state"] = json!("unreachable");
-            item["stale"] = json!(record.build != BUILD);
+            item["stale"] = json!(record.build != build);
             item["occupancy"] = Value::Null;
             item["occupancy_error"] = Value::Null;
+            item["preflight"] = Value::Null;
         }
         Liveness::Dead => {
             item["state"] = json!("dead");
             item["stale"] = Value::Null;
             item["occupancy"] = Value::Null;
             item["occupancy_error"] = Value::Null;
+            item["preflight"] = Value::Null;
             item["uptime_ms"] = Value::Null;
             item["pruned"] = json!(registry::prune(entry)?);
         }
@@ -153,7 +178,7 @@ fn registered_item(entry: &Entry, now: i64, deadline: Instant) -> Result<Value> 
     Ok(item)
 }
 
-fn unregistered_item(daemon: Found, now: i64, deadline: Instant) -> Value {
+fn unregistered_item(daemon: Found, build: &str, now: i64, deadline: Instant) -> Value {
     let mut item = json!({
         "home":daemon.home,
         "registered":false,
@@ -167,14 +192,14 @@ fn unregistered_item(daemon: Found, now: i64, deadline: Instant) -> Value {
         "uptime_ms":daemon.uptime_ms,
         "pruned":false,
     });
-    describe_live(&mut item, &daemon.home, &daemon.ping, deadline);
+    describe_live(&mut item, &daemon.home, &daemon.ping, build, deadline);
     finish(&mut item);
     item
 }
 
 /// Fills in what a ping says about the daemon that owns `home` now, and its
 /// occupancy when it offers that op.
-fn describe_live(item: &mut Value, home: &Path, ping: &Value, deadline: Instant) {
+fn describe_live(item: &mut Value, home: &Path, ping: &Value, build: &str, deadline: Instant) {
     for field in ["version", "build", "protocol_version"] {
         item[field] = ping[field].clone();
     }
@@ -184,9 +209,10 @@ fn describe_live(item: &mut Value, home: &Path, ping: &Value, deadline: Instant)
     } else {
         "incompatible"
     });
-    item["stale"] = json!(ping["build"].as_str() != Some(BUILD));
+    item["stale"] = json!(ping["build"].as_str() != Some(build));
     item["occupancy"] = Value::Null;
     item["occupancy_error"] = Value::Null;
+    item["preflight"] = Value::Null;
     let offers = ping["capabilities"]
         .as_array()
         .is_some_and(|caps| caps.iter().any(|c| c == "occupancy"));
@@ -204,9 +230,29 @@ fn describe_live(item: &mut Value, home: &Path, ping: &Value, deadline: Instant)
         Ok(o) => {
             item["occupancy"] =
                 json!({"verdict":o["verdict"],"holders":o["holders"],"clients":o["clients"]});
+            item["preflight"] = reading(&crate::restart::classify(home, ping.clone(), o));
         }
         Err(error) => item["occupancy_error"] = json!(error),
     }
+}
+
+/// The preflight's reading, compactly: its verdict and the actors behind each
+/// class, each named once.
+fn reading(pre: &crate::restart::Preflight) -> Value {
+    let names = |items: Vec<&crate::restart::Interruption>| {
+        let names: BTreeSet<&str> = items
+            .into_iter()
+            .map(|i| i.actor.as_str())
+            .filter(|a| !a.is_empty())
+            .collect();
+        json!(names)
+    };
+    json!({
+        "verdict":pre.verdict.as_str(),
+        "live":names(pre.live().collect()),
+        "armed":names(pre.armed().collect()),
+        "survives":names(pre.survives().collect()),
+    })
 }
 
 fn finish(item: &mut Value) {
@@ -249,7 +295,24 @@ struct Scan {
 /// out before any ping. Not found: daemons whose home came from `FRAY_HOME` or a relative
 /// `--home`, since `ps` shows neither; they are listed as unconfirmed when the
 /// process is visible.
+///
+/// `FRAY_SCAN_ROOT=DIR` keeps only processes with a candidate home under
+/// `DIR` and drops the rest unreported. It exists so tests (and anyone
+/// rehearsing `fray restart --all-stale --scan`) can scan scratch homes
+/// without touching the other daemons on the machine.
 fn scan(skip: &BTreeSet<PathBuf>, deadline: Instant) -> Result<Scan> {
+    let root = std::env::var_os(SCAN_ROOT)
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from);
+    let under_root = |candidate: &str| {
+        root.as_ref().is_none_or(|root| {
+            let path = Path::new(candidate);
+            path.starts_with(root)
+                || fs::canonicalize(path).is_ok_and(|p| {
+                    p.starts_with(fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+                })
+        })
+    };
     let uid = Command::new("id").arg("-u").output()?;
     let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
     if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) {
@@ -280,6 +343,9 @@ fn scan(skip: &BTreeSet<PathBuf>, deadline: Instant) -> Result<Scan> {
         let Some(serve) = parse_serve(command, is_program) else {
             continue;
         };
+        if !serve.homes.iter().any(|h| under_root(h)) {
+            continue;
+        }
         let mut confirmed = None;
         let mut known = false;
         let mut reason = "no candidate home answered a ping";
@@ -486,19 +552,29 @@ pub fn render(report: &Value) -> String {
             out.push_str(&format!("  up {}", duration(up)));
         }
         let o = &d["occupancy"];
-        if o.is_object() {
-            let holders: Vec<_> = o["holders"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(clean)
-                .collect();
-            out.push_str(&format!("  {}", clean(&o["verdict"])));
+        let p = &d["preflight"];
+        if o.is_object() && p.is_object() {
+            let names = |key: &str| -> Vec<String> {
+                p[key].as_array().into_iter().flatten().map(clean).collect()
+            };
+            let verdict = clean(&p["verdict"]);
+            out.push_str(&format!("  {verdict}"));
+            let holders = names(if verdict == "armed" { "armed" } else { "live" });
             if !holders.is_empty() {
                 out.push_str(&format!(": {}", holders.join(", ")));
             }
+            let mut notes = Vec::new();
+            let survivors = names("survives").len();
+            if survivors > 0 {
+                notes.push(format!(
+                    "{survivors} keepalive{} survive{}",
+                    if survivors == 1 { "" } else { "s" },
+                    if survivors == 1 { "s" } else { "" }
+                ));
+            }
             let n = o["clients"]["connected"].as_u64().unwrap_or(0);
-            out.push_str(&format!(" ({n} client{})", if n == 1 { "" } else { "s" }));
+            notes.push(format!("{n} client{}", if n == 1 { "" } else { "s" }));
+            out.push_str(&format!(" ({})", notes.join(", ")));
         } else if let Some(code) = d["occupancy_error"]["code"].as_str() {
             out.push_str(&format!("  occupancy failed ({})", clean_str(code)));
         } else if state == "running" {

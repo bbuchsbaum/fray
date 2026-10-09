@@ -226,7 +226,8 @@ enum Cmd {
         #[arg(long)]
         stale: bool,
         /// Also find unregistered daemons (started before the registry) from
-        /// the process table. Transitional.
+        /// the process table. Transitional. FRAY_SCAN_ROOT=DIR limits it to
+        /// homes under DIR (for tests and rehearsals on scratch homes).
         #[arg(long)]
         scan: bool,
     },
@@ -241,9 +242,24 @@ enum Cmd {
     /// Exit 0 restarted or started, 1 failed (the error names the step),
     /// 3 busy, 5 armed. --dry-run only reads: exit 0 idle, 3 busy, 5 armed,
     /// 6 an old daemon with nothing live visible, 7 no daemon running.
+    ///
+    /// --all-stale restarts every daemon `fray daemons --stale` lists (stale:
+    /// a build other than the one being started), one at a time, ignoring
+    /// --home. Only running daemons are restarted; unreachable, incompatible
+    /// and dead ones are listed as skipped. Busy and armed daemons are skipped
+    /// unless --force or --allow-armed is given. Exit 0 all restarted (or none
+    /// stale), 1 any failed, 4 some skipped and none failed; with --dry-run the
+    /// same codes say what a run would do.
     Restart {
         #[arg(long)]
         dry_run: bool,
+        /// Restart every stale daemon in the registry instead of this home's.
+        #[arg(long)]
+        all_stale: bool,
+        /// With --all-stale, also restart unregistered daemons found in the
+        /// process table and confirmed by a ping (as `fray daemons --scan`).
+        #[arg(long, requires = "all_stale")]
+        scan: bool,
         /// Restart even when busy, interrupting the named holders. Waits and
         /// watches reconnect to the replacement.
         #[arg(long)]
@@ -3482,7 +3498,9 @@ fn run(cli: Cli) -> Result<Option<Value>> {
         }
         Cmd::Occupancy => ("occupancy", json!({})),
         Cmd::Restart {
-            dry_run: false,
+            all_stale: true,
+            dry_run,
+            scan,
             force,
             allow_armed,
             no_announce,
@@ -3491,17 +3509,50 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             grace_ms,
             normal,
         } => {
-            let requested_by = if actor.is_empty() && !no_announce {
-                let user = std::env::var("USER").unwrap_or_default();
-                if user.is_empty() {
-                    return Err(Error::invalid(
-                        "fray restart needs --as NAME or $USER to record who asked for the notice",
-                    ));
-                }
-                Some(user)
-            } else {
+            let requested_by = if dry_run {
                 None
+            } else {
+                restart_requested_by(&actor, no_announce)?
             };
+            let options = fray::restart::Options {
+                force,
+                allow_armed,
+                no_announce,
+                reason,
+                exe,
+                grace_ms,
+                normal: normal.then_some(true),
+                actor: actor.clone(),
+                requested_by,
+            };
+            let report = fray::restart_all::run(
+                &fray::registry::state_dir()?,
+                scan,
+                dry_run,
+                &options,
+                !cli.json,
+            )?;
+            if cli.json {
+                output(&report, true)?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(fray::restart_all::render(&report).as_bytes())?;
+                stdout.flush()?;
+            }
+            std::process::exit(fray::restart_all::exit_code(&report));
+        }
+        Cmd::Restart {
+            dry_run: false,
+            force,
+            allow_armed,
+            no_announce,
+            reason,
+            exe,
+            grace_ms,
+            normal,
+            ..
+        } => {
+            let requested_by = restart_requested_by(&actor, no_announce)?;
             let options = fray::restart::Options {
                 force,
                 allow_armed,
@@ -4734,6 +4785,20 @@ fn human(v: &Value, out: &mut String) {
         out.push('\n');
     }
 }
+/// Who asked for a restart's notices, when no `--as` identity posts them.
+fn restart_requested_by(actor: &str, no_announce: bool) -> Result<Option<String>> {
+    if !actor.is_empty() || no_announce {
+        return Ok(None);
+    }
+    let user = std::env::var("USER").unwrap_or_default();
+    if user.is_empty() {
+        return Err(Error::invalid(
+            "fray restart needs --as NAME or $USER to record who asked for the notice",
+        ));
+    }
+    Ok(Some(user))
+}
+
 fn output(v: &Value, as_json: bool) -> Result<()> {
     if as_json {
         server::write_frame(&mut io::stdout().lock(), v)
