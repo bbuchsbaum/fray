@@ -934,6 +934,60 @@ class Keepalive(unittest.TestCase):
         self.assertEqual(self.status("alice")["pid"], pid)
         self.assertEqual([c["cards"] for c in self.calls()], [[first], [second], [third]])
 
+    def environment(self, pid):
+        out = subprocess.run(["ps", "eww", "-o", "command=", "-p", str(pid)], text=True,
+                             capture_output=True).stdout
+        self.assertTrue(out.strip(), f"no process {pid}")
+        return out
+
+    def test_a_handoff_never_reaches_another_daemon_or_drive(self):
+        foreign = json.dumps({"run_id": "r-other", "actor": "mallory",
+                              "session": "keepalive:other", "home": "/elsewhere",
+                              "keep": {"fork": "someone-elses-fork"}})
+        # A daemon given a handoff in its environment (as by a leak): the
+        # drives it starts do not inherit it, and work as usual.
+        self.shutdown()
+        self.launch(FRAY_KEEPALIVE_HANDOFF=foreign)
+        self.assertIn("FRAY_KEEPALIVE_HANDOFF", self.environment(self.server.pid))
+        self.start("alice", "claude:leak-1")
+        pid = self.status("alice")["pid"]
+        self.assertNotIn("FRAY_KEEPALIVE_HANDOFF", self.environment(pid))
+        card = self.ask("alice", "Whose fork is this?")
+        self.await_reply(card, "alice")
+        call = self.calls()[0]
+        self.assertIn("--fork-session", call["argv"])
+        self.assertNotIn("someone-elses-fork", call["argv"])
+        self.assertNotIn("handoff_ignored", self.drive_log("alice"))
+
+        # A drive started with a handoff that is not its own, and no daemon
+        # running: the daemon it starts does not inherit the handoff, and the
+        # drive ignores it.
+        self.shutdown()
+        result = subprocess.run(
+            [str(BINARY), "--home", self.home, "--as", "ghost", "drive", "--keepalive"],
+            env=dict(self.env, FRAY_SESSION="keepalive:ghost", FRAY_KEEPALIVE_HANDOFF=foreign),
+            cwd=self.repo, text=True, capture_output=True, timeout=30,
+        )
+        ps = subprocess.run(["ps", "-Ao", "pid=,command="], text=True,
+                            capture_output=True, check=True).stdout
+        daemons = [int(line.split()[0]) for line in ps.splitlines()
+                   if self.root.name in line and line.rstrip().endswith(" serve")]
+        try:
+            self.assertIn("handoff_ignored", result.stderr)
+            self.assertEqual(len(daemons), 1, ps)
+            self.assertNotIn("FRAY_KEEPALIVE_HANDOFF", self.environment(daemons[0]))
+        finally:
+            try:
+                self.rpc("shutdown")
+            except OSError:
+                pass
+            for daemon in daemons:
+                deadline = time.monotonic() + 5
+                while alive(daemon) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if alive(daemon):
+                    os.kill(daemon, signal.SIGKILL)
+
     def test_a_sandboxed_daemon_refuses(self):
         self.shutdown()
         self.launch(FRAY_TEST_SANDBOXED="1")

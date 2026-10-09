@@ -436,6 +436,28 @@ pub fn parse_lines(stdout: &str) -> std::result::Result<Value, String> {
         .map(Value::Array)
 }
 
+/// Whether a `mote authority status` names an authority format Fray reads.
+/// Version 1 is shared admission order, holder-checked handoff and checked
+/// landing; version 2 adds only session-bound claims, which Mote enforces on
+/// its own writes and reports through the same events, so Fray reads both.
+pub fn authority_version_supported(status: &Value) -> bool {
+    status["authority_version"]
+        .as_u64()
+        .is_some_and(|v| (1..=2).contains(&v))
+}
+
+/// Why Fray must not use an enabled authority whose format it does not know.
+/// A newer format may order or fence claims differently, so Fray stops rather
+/// than guess, and never falls back to filename order on an authority store.
+pub fn unsupported_authority(status: &Value) -> Option<String> {
+    (status["enabled"] == true && !authority_version_supported(status)).then(|| {
+        format!(
+            "Mote authority format version {} is not one this Fray reads (1 or 2); upgrade Fray",
+            status["authority_version"]
+        )
+    })
+}
+
 /// The event categories a sync reads (section 6). Candidate events only mark
 /// candidates that left the pending list; their cards come from the
 /// candidate's current state.

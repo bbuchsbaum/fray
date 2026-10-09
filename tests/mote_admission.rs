@@ -281,6 +281,55 @@ fn stale_coverage_or_missing_recipient_notice_keeps_normal_reconciliation() {
         );
         assert_eq!(result["created"].as_array().unwrap().len(), 2);
     }
+    // dave was not on the board when the feed saw the handoff, so no card
+    // reached him; once he joins, reconciliation still tells him.
+    let mut s = fixture();
+    let fed = ingest(
+        &mut s,
+        1,
+        Value::Null,
+        json!("gift"),
+        json!([{"entity":"work","to":"dave","by":"alice","op_id":"gift"}]),
+    );
+    assert_eq!(fed["unknown_recipients"], json!(["dave"]));
+    call(&mut s, "dave", "join", json!({"topics":[]}));
+    let result = call(
+        &mut s,
+        "alice",
+        "mote_ingest",
+        json!({"store_id":"st-test","sync_revision":2,"after":"gift","cursor":"gift","items":[],"reconcile":[{"entity":"work","expect":null,"holder":"dave","marker":"snapshot","covered_by_feed":{"op_id":"gift","cursor":"gift"}}]}),
+    );
+    assert_eq!(result["created"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_holders_own_claim_seen_by_the_feed_is_not_reconciled_back_to_them() {
+    let mut s = fixture();
+    let fed = ingest(
+        &mut s,
+        1,
+        Value::Null,
+        json!("self"),
+        json!([{"entity":"work","to":"bob","by":"bob","op_id":"self"}]),
+    );
+    assert!(fed["created"].as_array().unwrap().is_empty());
+    let result = call(
+        &mut s,
+        "alice",
+        "mote_ingest",
+        json!({"store_id":"st-test","sync_revision":2,"after":"self","cursor":"self","items":[],"reconcile":[{"entity":"work","expect":null,"holder":"bob","marker":"snapshot","covered_by_feed":{"op_id":"self","cursor":"self"}}]}),
+    );
+    assert!(result["created"].as_array().unwrap().is_empty(), "{result}");
+    assert_eq!(
+        call(
+            &mut s,
+            "alice",
+            "mote_claims",
+            json!({"store_id":"st-test"})
+        )["holders"]["work"],
+        "bob"
+    );
+    // Without the feed's proof it is ordinary reconciliation, which tells bob.
     let mut s = fixture();
     ingest(
         &mut s,
@@ -293,7 +342,7 @@ fn stale_coverage_or_missing_recipient_notice_keeps_normal_reconciliation() {
         &mut s,
         "alice",
         "mote_ingest",
-        json!({"store_id":"st-test","sync_revision":2,"after":"self","cursor":"self","items":[],"reconcile":[{"entity":"work","expect":null,"holder":"bob","marker":"snapshot","covered_by_feed":{"op_id":"self","cursor":"self"}}]}),
+        json!({"store_id":"st-test","sync_revision":2,"after":"self","cursor":"self","items":[],"reconcile":[{"entity":"work","expect":null,"holder":"bob","marker":"snapshot"}]}),
     );
     assert_eq!(result["created"].as_array().unwrap().len(), 1);
 }

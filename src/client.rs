@@ -734,7 +734,14 @@ pub fn start_exe(
         .open(home.join("daemon.log"))?;
     let spawn = || -> Result<std::process::Child> {
         let mut command = Command::new("nohup");
-        command.arg(exe).arg("--home").arg(&home).arg("serve");
+        command
+            .arg(exe)
+            .arg("--home")
+            .arg(&home)
+            .arg("serve")
+            // A daemon started by a keepalive drive must not pass that drive's
+            // run on to the drives it starts.
+            .env_remove(crate::keepalive::HANDOFF_ENV);
         if normal {
             command.arg("--normal");
         }
