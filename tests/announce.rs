@@ -159,6 +159,40 @@ fn a_new_notice_supersedes_the_open_one() {
 }
 
 #[test]
+fn a_restarted_notice_follows_and_supersedes_the_restart_notice() {
+    let mut s = Store::memory().unwrap();
+    let before = at(&mut s, "m", "announce", restart("upgrade"))["card"]["id"].clone();
+    let after = at(
+        &mut s,
+        "m",
+        "announce",
+        json!({"action":"restarted","reason":"upgrade","from_build":"aaa111","to_build":"bbb222"}),
+    );
+    assert_eq!(
+        after["card"]["tags"],
+        json!(["maintenance", "maintenance:restarted"])
+    );
+    assert_eq!(after["card"]["author"], "fray");
+    assert_eq!(after["maintenance"]["action"], "restarted");
+    assert!(
+        after["card"]["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Fray daemon restarted: upgrade"),
+        "{after}"
+    );
+    assert!(
+        after["card"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Build aaa111 -> bbb222. Reason: upgrade. The daemon is back"),
+        "{after}"
+    );
+    let old = at(&mut s, "m", "show", json!({"id":before}));
+    assert_eq!(old["card"]["status"], "superseded");
+}
+
+#[test]
 fn the_system_name_is_reserved() {
     let mut s = Store::memory().unwrap();
     // The owner's rule: case, separators, a numeric suffix and common

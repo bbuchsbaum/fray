@@ -3026,7 +3026,7 @@ fn read(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         "ping" => {
             check_fields(a, &[])?;
             Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"pid":std::process::id(),"capabilities":["mote_rpc_receipts","dispatch","mote_admission_order","mote_workflows","peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations","announce"],"cursor":highwater(conn)?,"time_ms":now}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"build":BUILD,"protocol_version":PROTOCOL_VERSION,"pid":std::process::id(),"store_id":conn.query_row("SELECT value FROM meta WHERE key='store_id'",[],|r|r.get::<_,String>(0))?,"capabilities":["mote_rpc_receipts","dispatch","mote_admission_order","mote_workflows","peer_discovery","review_subjects","reply_ack_batch","agents_all","reply_refs","long_messages","inbox_filters","attention_stream","wait_filters","attention_filters","wait_indefinite","read_batches","thread_unread","thread_compact","sessions","objection_gate","card_attention","mute","idle_readiness","ack_last","pending_send","addressed_full_text","owner_channel","lanes","session_continue","partner_routing","stats","mote_adapter","mote_sync","mote_reconcile","mote_subjects","mote_requests","ask_deadlines","escalations","announce"],"cursor":highwater(conn)?,"time_ms":now}),
             )
         }
         "brief" => {
@@ -5023,8 +5023,8 @@ fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         &["action", "reason", "from_build", "to_build", "requested_by"],
     )?;
     let action = string(a, "action")?;
-    if !["restart", "stop"].contains(&action) {
-        return Err(Error::invalid("action: restart|stop"));
+    if !["restart", "stop", "restarted"].contains(&action) {
+        return Err(Error::invalid("action: restart|stop|restarted"));
     }
     let reason = string(a, "reason")?;
     text(reason, "reason", 500, false)?;
@@ -5079,10 +5079,10 @@ fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         (None, Some(t)) => format!(" New build {t}."),
         (None, None) => String::new(),
     };
-    let effect = if action == "restart" {
-        "Waits and watches may be interrupted; re-run them once the daemon is back."
-    } else {
-        "Fray is unavailable on this board until the daemon is started again."
+    let effect = match action {
+        "restart" => "Waits and watches may be interrupted; re-run them once the daemon is back.",
+        "restarted" => "The daemon is back; re-run any wait or watch that did not reconnect.",
+        _ => "Fray is unavailable on this board until the daemon is started again.",
     };
     let maintenance = json!({"action":action,"reason":reason,"from_build":from,"to_build":to,
         "requested_by":requested_by,"requested_session":req.session});
