@@ -89,8 +89,9 @@ Mote's returned event order. Raw ids are anchors, not lexical timestamps.
 Format 2 changes no event or ordering rule Fray reads; Mote itself refuses
 writes to a session-bound claim from outside its session, and Fray keeps such a
 refused workflow step pending for a resume from that session. Any other enabled
-format version stops sync and workflows with an error naming it: Fray never
-falls back to filename order on an authority store.
+format version stops sync and workflows with an error naming it. Sync keeps
+filename order only when Mote has no `authority status` command; a status of
+another schema, or any other refusal, stops sync before the board is seeded.
 Cursor and revision CAS, claim-event identity deduplication and card writes commit
 together. Snapshot reconciliation has separate claim state, so it cannot invent
 reverse feed transitions when it runs ahead of the feed.

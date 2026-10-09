@@ -1343,7 +1343,17 @@ fn mote_sync(home: &Path, actor: &str) -> Result<Value> {
         mote::read_timeout(),
     ) {
         mote::Outcome::Ok(status) if status["schema"] == "mote.authority-status.v1" => Some(status),
-        mote::Outcome::Ok(_) | mote::Outcome::Invalid(_) => None,
+        // Only a Mote without the command at all keeps filename order.
+        mote::Outcome::Invalid(why) if why.contains("unrecognized subcommand") => None,
+        mote::Outcome::Ok(status) => {
+            return Err(Error::new(
+                "mote_authority_required",
+                format!(
+                    "Mote authority status schema {} is not one this Fray reads; upgrade Fray. Cursor unchanged",
+                    status["schema"]
+                ),
+            ))
+        }
         other => {
             return Err(Error::new(
                 "mote_unavailable",
