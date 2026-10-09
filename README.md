@@ -370,7 +370,8 @@ now held by bob"), never by guessing who did it. A release is recorded
 quietly.
 
 Strict workflows require upgraded Mote writers sharing the store and enabled
-authority v1; a version string is insufficient. Reads never enable authority.
+authority (format version 1, or 2 once session-bound claims exist); a
+version string is insufficient. Reads never enable authority.
 No installed binary or existing store was migrated by the local sweep.
 
 ```sh

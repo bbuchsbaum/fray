@@ -83,8 +83,14 @@ where available; it is not renewed authority or a renewed lease.
 ## Admission-ordered attention
 
 Legacy stores retain filename cursors and their historical three-timeout reseed.
-For enabled authority, Fray binds `admission_v1` to the genesis digest and uses
+For enabled authority (format version 1, or 2 once Mote has a session-bound
+claim), Fray binds `admission_v1` to the genesis digest and uses
 Mote's returned event order. Raw ids are anchors, not lexical timestamps.
+Format 2 changes no event or ordering rule Fray reads; Mote itself refuses
+writes to a session-bound claim from outside its session, and Fray keeps such a
+refused workflow step pending for a resume from that session. Any other enabled
+format version stops sync and workflows with an error naming it: Fray never
+falls back to filename order on an authority store.
 Cursor and revision CAS, claim-event identity deduplication and card writes commit
 together. Snapshot reconciliation has separate claim state, so it cannot invent
 reverse feed transitions when it runs ahead of the feed.
@@ -95,7 +101,8 @@ remain current. A later claim or issue status operation disqualifies coverage,
 including holder and close/reopen cycles. Verification does not advance the
 cursor. Reconciliation retains its snapshot CAS and update, but skips redundant
 notices only when the current feed token/holder, consumed cursor and delivered
-recipient card all match. Failed verification or an older daemon retains ordinary
+recipient card all match; a holder's own claim owes no card, so the feed's record
+of it stands in for one. Failed verification or an older daemon retains ordinary
 reconciliation. A crash between feed ingest and reconciliation can conservatively
 produce a later reconciliation notice; this is same-sync suppression, not a
 durable cross-restart association. These observations are not ownership fences.

@@ -52,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix="fray-feed-",dir="/tmp") as tmp:
   seeded=sync();assert seeded["mote_sync"]["history_suppressed"] and meta()["mote_cursor_initialized"]=="true" and "mote_cursor" not in meta(),seeded
   state["events"]=[raw("20990101T000000.000000Z-future","alice")];state["holder"]="alice";save()
   first=sync();assert first["mote_sync"]["events"]==1 and meta().get("mote_cursor")==state["events"][0]["op_id"],(first,meta())
+  # Alice's own claim, seen by the feed, is not reconciled back to her.
+  assert not first["mote_sync"]["created"],first
   checks.append("empty admitted seed has a nullable initialized anchor; first claim is read")
   projection={"event_id":"projection-expiry","op_id":"old-reserve","type":"reservation.expiring","actor":"alice","ts":"2026-01-01T00:00:00Z","data":{"holder":"alice","reservation_id":"rv-test","entity":"work","paths":["src/a"],"deadline":"2026-12-01T00:00:00Z"}}
   state["events"].append(projection);save();warn=sync();assert warn["mote_sync"]["created"] and meta()["mote_cursor"]==state["events"][0]["op_id"],warn
@@ -63,9 +65,11 @@ with tempfile.TemporaryDirectory(prefix="fray-feed-",dir="/tmp") as tmp:
   assert not sync()["mote_sync"]["created"]
   checks.append("later admitted earlier-spelled claim advances feed anchor and remains quiet on retry")
   state["events"].append(raw("19990101T000000.000000Z-next","alice","bob"));state["holder"]="alice";state["verify_fail"]=True;save()
-  # Alice's original current-holder state key already exists: ordinary
-  # reconciliation deduplicates it while still notifying the previous holder.
-  fallback=sync();assert len(fallback["mote_sync"]["created"])==2 and fallback["mote_sync"]["duplicate"]==1 and "verification unavailable" in fallback["mote_sync"]["reconcile_note"],fallback
+  # Without verification, ordinary reconciliation repeats the feed's notice
+  # to alice as current state and notifies the previous holder; the expiring
+  # reservation still in the feed is deduplicated.
+  fallback=sync();assert len(fallback["mote_sync"]["created"])==3 and fallback["mote_sync"]["duplicate"]==1 and "verification unavailable" in fallback["mote_sync"]["reconcile_note"],fallback
+  assert any(i["card"]["title"]=="Mote: you now hold work" for i in fray("alice","inbox","--selection","all")["items"])
   assert any(i["card"]["title"]=="Mote: work is now held by alice" for i in fray("bob","inbox","--selection","all")["items"])
   state.pop("verify_fail");save();assert not sync()["mote_sync"]["created"]
   checks.append("verification read failure retains ordinary reconciliation and discloses conservative fallback")
