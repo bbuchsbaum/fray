@@ -882,6 +882,34 @@ fn the_event_path_and_reconciliation_share_keys() {
 }
 
 #[test]
+fn the_legacy_event_path_and_reconciliation_share_one_table() {
+    // On the legacy cursor the feed and reconciliation share one claim table:
+    // a change the feed delivered leaves reconciliation nothing to do.
+    let Some(p) = Project::pre_authority("shared-legacy") else {
+        return;
+    };
+    p.sync(&[], "alice").unwrap();
+    let w = p.bead("alice");
+    assert!(p.mote("alice", &["claim", &w]).status.success());
+    assert!(p
+        .mote("alice", &["handoff", &w, "--to", "bob"])
+        .status
+        .success());
+    let s = p.sync(&[], "alice").unwrap();
+    assert_eq!(s["created"].as_array().unwrap().len(), 1, "{s}");
+    assert_eq!(
+        s["reconciled_claims"], 0,
+        "the table already matches the board: {s}"
+    );
+    assert_eq!(p.titles("bob").len(), 1);
+    assert!(p.titles("alice").is_empty(), "{:?}", p.titles("alice"));
+    let (ok, out) = p.fray(&[], "alice", &["--json", "mote", "status"]);
+    assert!(ok, "{out}");
+    let status: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(status["mote"]["binding"]["cursor_mode"], "legacy_filename");
+}
+
+#[test]
 fn a_legacy_board_rebinds_quietly_when_mote_enables_authority() {
     // Mote enables authority at a store's first claim. A board seeded before
     // then rebinds to admission ordering and re-baselines without replaying
@@ -942,17 +970,62 @@ impl Project {
     /// A Mote that reports authority format `version`; everything else is
     /// the real Mote.
     fn mote_reporting_authority(&self, version: u32) -> PathBuf {
-        let bin = self.t.0.join(format!("authority-v{version}-mote"));
+        self.mote_answering_authority_status(
+            &format!("v{version}"),
+            &format!("mote \"$@\" | sed 's/\"authority_version\":[0-9]*/\"authority_version\":{version}/'"),
+        )
+    }
+    /// A Mote that answers `authority status` with `answer` (shell); everything
+    /// else is the real Mote.
+    fn mote_answering_authority_status(&self, tag: &str, answer: &str) -> PathBuf {
+        let bin = self.t.0.join(format!("authority-{tag}-mote"));
         fs::write(
             &bin,
             format!(
-                "#!/bin/sh\ncase \" $* \" in *\" authority status \"*) mote \"$@\" | sed 's/\"authority_version\":[0-9]*/\"authority_version\":{version}/'; exit;; esac\nexec mote \"$@\"\n"
+                "#!/bin/sh\ncase \" $* \" in *\" authority status \"*) {answer}; exit;; esac\nexec mote \"$@\"\n"
             ),
         )
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         bin
     }
+}
+
+#[test]
+fn only_a_mote_without_authority_status_keeps_filename_order() {
+    // Fray uses filename order only when Mote lacks the command. Any other
+    // answer it cannot read stops sync before the board is seeded.
+    let Some(p) = Project::new("schema") else {
+        return;
+    };
+    let unseeded = |p: &Project| {
+        let (_, out) = p.fray(&[], "alice", &["--json", "mote", "status"]);
+        let b = serde_json::from_str::<Value>(&out).unwrap()["mote"]["binding"].clone();
+        b.is_null() || (b["cursor"].is_null() && b["cursor_initialized"] == false)
+    };
+    let newer = p.mote_answering_authority_status(
+        "schema",
+        "mote \"$@\" | sed 's/mote.authority-status.v1/mote.authority-status.v9/'",
+    );
+    let err = p
+        .sync(&[("FRAY_MOTE_BIN", newer.to_str().unwrap())], "alice")
+        .unwrap_err();
+    assert!(err.contains("mote.authority-status.v9"), "{err}");
+    assert!(unseeded(&p));
+    let refusing = p.mote_answering_authority_status(
+        "usage",
+        "echo 'error: the store refused the read' >&2; exit 3",
+    );
+    let err = p
+        .sync(&[("FRAY_MOTE_BIN", refusing.to_str().unwrap())], "alice")
+        .unwrap_err();
+    assert!(err.contains("cannot establish event ordering"), "{err}");
+    assert!(unseeded(&p));
+    // The real Mote binds admission order.
+    p.sync(&[], "alice").unwrap();
+    let (_, out) = p.fray(&[], "alice", &["--json", "mote", "status"]);
+    let status: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(status["mote"]["binding"]["cursor_mode"], "admission_v1");
 }
 
 #[test]

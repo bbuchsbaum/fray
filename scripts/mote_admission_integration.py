@@ -65,12 +65,16 @@ with tempfile.TemporaryDirectory(prefix="fray-feed-",dir="/tmp") as tmp:
   assert not sync()["mote_sync"]["created"]
   checks.append("later admitted earlier-spelled claim advances feed anchor and remains quiet on retry")
   state["events"].append(raw("19990101T000000.000000Z-next","alice","bob"));state["holder"]="alice";state["verify_fail"]=True;save()
-  # Without verification, ordinary reconciliation repeats the feed's notice
-  # to alice as current state and notifies the previous holder; the expiring
-  # reservation still in the feed is deduplicated.
-  fallback=sync();assert len(fallback["mote_sync"]["created"])==3 and fallback["mote_sync"]["duplicate"]==1 and "verification unavailable" in fallback["mote_sync"]["reconcile_note"],fallback
-  assert any(i["card"]["title"]=="Mote: you now hold work" for i in fray("alice","inbox","--selection","all")["items"])
-  assert any(i["card"]["title"]=="Mote: work is now held by alice" for i in fray("bob","inbox","--selection","all")["items"])
+  # Without verification, ordinary reconciliation runs: the previous holder
+  # is told, and the new holder keeps the feed's notice. Ordinary
+  # reconciliation may also restate alice's current hold; that conservative
+  # repeat is tolerated, not owed. The expiring reservation still in the
+  # feed is deduplicated.
+  fallback=sync();assert fallback["mote_sync"]["duplicate"]==1 and "verification unavailable" in fallback["mote_sync"]["reconcile_note"],fallback
+  created=set(fallback["mote_sync"]["created"])
+  delivered={(who,i["card"]["title"]) for who in ("alice","bob") for i in fray(who,"inbox","--selection","all")["items"] if i["card"]["id"] in created}
+  owed={("alice","Mote: bob handed you work"),("bob","Mote: work is now held by alice")}
+  assert owed<=delivered<=owed|{("alice","Mote: you now hold work")} and len(delivered)==len(created),(fallback,delivered)
   state.pop("verify_fail");save();assert not sync()["mote_sync"]["created"]
   checks.append("verification read failure retains ordinary reconciliation and discloses conservative fallback")
   before=meta();state["timeout"]=True;save()
