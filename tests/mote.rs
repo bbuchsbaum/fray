@@ -240,7 +240,9 @@ exit 2"#,
         },
         Some("alice"),
         &["candidate", "land", "cand-test"],
-        Duration::from_secs(2),
+        // The stub answers at once; the bound is for a loaded machine, not
+        // latency (bd-01M4EYGJ95BA9EEJJ0989GDCP1).
+        Duration::from_secs(60),
     );
     assert_eq!(
         result,
