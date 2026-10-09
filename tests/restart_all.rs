@@ -506,3 +506,110 @@ fn real_old_daemons_when_one_is_given() {
         assert_eq!(ping(home).unwrap()["build"], BUILD);
     }
 }
+
+/// `scripts/install.sh` (daemon lifecycle L11) into a scratch DEST: after a
+/// successful install it lists the stale daemons and prints the restart
+/// commands, restarts nothing, and never fails the install over the report.
+#[test]
+fn install_reports_stale_daemons_and_the_restart_commands() {
+    let mut s = Scratch::new();
+    let current = s.home("cur");
+    let registered = s.home("reg");
+    let unregistered = s.home("unreg");
+    let stale = s.stale_bin();
+    s.start(BIN, &current);
+    let dest = s.root.join("inst/fray");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    let install = |state: &Path| {
+        let out = s
+            .command("/bin/sh", state)
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh"))
+            .arg(BIN)
+            .arg(&dest)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "install failed: {}", text(&out));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let shown = install(&s.state);
+    assert!(
+        shown.contains("install: no running daemons are out of date\n"),
+        "{shown}"
+    );
+    assert!(!shown.contains("restart --all-stale"), "{shown}");
+
+    s.start(&stale, &registered);
+    s.start_in(&stale, &s.root.join("elsewhere"), &unregistered);
+    let pids: Vec<Value> = [&registered, &unregistered]
+        .iter()
+        .map(|h| ping(h).unwrap()["pid"].clone())
+        .collect();
+    let shown = install(&s.state);
+    assert!(
+        shown.contains("install: daemons still running another build:\n"),
+        "{shown}"
+    );
+    for home in [&registered, &unregistered] {
+        assert!(
+            shown.contains(&format!("install:   {}\n", home.display())),
+            "{shown}"
+        );
+    }
+    assert!(shown.contains("(unregistered)"), "{shown}");
+    assert!(
+        !shown.contains(&format!("{}\n", current.display())),
+        "{shown}"
+    );
+    let dest = dest.display();
+    assert!(
+        shown.contains(&format!(
+            "install:   {dest} restart --all-stale --scan --dry-run\n"
+        )),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!("install:   {dest} restart --all-stale --scan\n")),
+        "{shown}"
+    );
+    let now: Vec<Value> = [&registered, &unregistered]
+        .iter()
+        .map(|h| ping(h).unwrap()["pid"].clone())
+        .collect();
+    assert_eq!(now, pids, "installing restarts nothing");
+
+    // Without unregistered ones, the commands need no --scan.
+    let out = s.on(BIN, &unregistered, &["stop"]);
+    assert!(out.status.success(), "{}", text(&out));
+    until("the unregistered daemon to stop", || {
+        ping(&unregistered).is_none()
+    });
+    let shown = install(&s.state);
+    assert!(
+        shown.contains(&format!(
+            "install:   {dest} restart --all-stale --dry-run\n"
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("--scan --dry-run"), "{shown}");
+
+    // A report that cannot run is a warning; the install still succeeds.
+    let broken = s.root.join("not-a-dir");
+    std::fs::write(&broken, b"").unwrap();
+    let out = s
+        .command("/bin/sh", &broken)
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh"))
+        .arg(BIN)
+        .arg(s.root.join("inst/fray"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("install: warning: could not list stale daemons"),
+        "{}",
+        text(&out)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("install: fray "));
+}
