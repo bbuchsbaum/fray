@@ -648,6 +648,12 @@ pub struct Options {
     /// Who asked: the `--as` identity, else empty with `requested_by`.
     pub actor: String,
     pub requested_by: Option<String>,
+    /// Batch mode (`--all-stale`): act only while the home still has a
+    /// running daemon on a build other than the one being started, as when
+    /// it was listed. Otherwise return [`Outcome::NotStale`] having changed
+    /// nothing: never create the home, never start a daemon its owner
+    /// stopped, never restart one already upgraded.
+    pub only_if_stale: bool,
 }
 
 /// How a restart that did not fail ended.
@@ -660,13 +666,22 @@ pub enum Outcome {
     Abandoned(Preflight, Value),
     /// Restarted (or, with no daemon running, started). The `--json` form.
     Done(Value),
+    /// Batch mode only ([`Options::only_if_stale`]): the home no longer
+    /// needs a restart; nothing was changed. `why` is `missing` (the home
+    /// directory is gone), `stopped` (no daemon answers) or `current` (it
+    /// already runs the build being started).
+    NotStale {
+        home: PathBuf,
+        why: &'static str,
+        detail: String,
+    },
 }
 
 impl Outcome {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Refused(pre) | Self::Abandoned(pre, _) => pre.verdict.exit_code(),
-            Self::Done(_) => 0,
+            Self::Done(_) | Self::NotStale { .. } => 0,
         }
     }
 
@@ -690,6 +705,9 @@ impl Outcome {
                 "preflight":pre.to_json(),
             }),
             Self::Done(v) => v.clone(),
+            Self::NotStale { home, why, detail } => {
+                json!({"home":home,"action":"not_stale","why":why,"detail":detail})
+            }
         }
     }
 
@@ -703,6 +721,9 @@ impl Outcome {
                 refusal_hint(pre.verdict)
             ),
             Self::Done(v) => done_text(v),
+            Self::NotStale { home, detail, .. } => {
+                format!("not restarted {}: {detail}\n", home.display())
+            }
         }
     }
 }
@@ -884,7 +905,24 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
         None => (std::env::current_exe()?, "current_exe"),
     };
     let build = exe_build(&exe)?;
-    let home = &crate::server::initialize(home)?;
+    let not_stale = |home: &Path, why, detail: String| {
+        Ok(Outcome::NotStale {
+            home: home.to_path_buf(),
+            why,
+            detail,
+        })
+    };
+    let home = &if opts.only_if_stale {
+        // Never create a home that has gone since it was listed.
+        match std::fs::canonicalize(home) {
+            Ok(home) => home,
+            Err(e) => {
+                return not_stale(home, "missing", format!("the home directory is gone ({e})"))
+            }
+        }
+    } else {
+        crate::server::initialize(home)?
+    };
     let _exclusive = lock(home)?;
     let check = |home: &Path| -> Result<Preflight> {
         let mut pre = preflight(home)?;
@@ -899,6 +937,15 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
         _ => false,
     };
     let pre = check(home)?;
+    if opts.only_if_stale {
+        match pre.daemon.as_ref().map(|d| d["build"].as_str()) {
+            None => return not_stale(home, "stopped", "no daemon answers any more".into()),
+            Some(Some(running)) if running == build => {
+                return not_stale(home, "current", format!("it already runs build {build}"))
+            }
+            Some(_) => {}
+        }
+    }
     if blocked(&pre) {
         return Ok(Outcome::Refused(pre));
     }

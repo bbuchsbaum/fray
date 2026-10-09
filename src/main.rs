@@ -3524,6 +3524,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 normal: normal.then_some(true),
                 actor: actor.clone(),
                 requested_by,
+                only_if_stale: true,
             };
             let report = fray::restart_all::run(
                 &fray::registry::state_dir()?,
@@ -3563,6 +3564,7 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 normal: normal.then_some(true),
                 actor: actor.clone(),
                 requested_by,
+                only_if_stale: false,
             };
             let outcome = fray::restart::run(&home, &options)?;
             if cli.json {

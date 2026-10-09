@@ -417,8 +417,9 @@ fn fake_daemon(
     state: &Path,
     home: &Path,
     capabilities: &'static [&'static str],
-    respond: fn(&str, usize) -> Option<Value>,
+    respond: impl Fn(&str, usize) -> Option<Value> + Send + Sync + 'static,
 ) -> Ops {
+    let respond = std::sync::Arc::new(respond);
     let record = serde_json::to_value(Record {
         home: home.into(),
         socket: home.join("bus.sock"),
@@ -440,6 +441,7 @@ fn fake_daemon(
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let seen = seen.clone();
+            let respond = respond.clone();
             thread::spawn(move || {
                 let mut writer = stream.try_clone().unwrap();
                 for line in BufReader::new(stream).lines() {
@@ -799,4 +801,106 @@ fn install_reports_stale_daemons_and_the_restart_commands() {
         text(&out)
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("install: fray "));
+}
+
+/// `fray --home HOME ARGS` with `bin` against a private registry, from a
+/// fake daemon's hook (which cannot borrow the Scratch).
+fn fray_at(bin: &str, state: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new(bin)
+        .env("FRAY_STATE_DIR", state)
+        .env("USER", "tester")
+        .env_remove("FRAY_HOME")
+        .env_remove("FRAY_AGENT")
+        .env_remove("FRAY_SESSION")
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn stop_and_wait(state: &Path, home: &Path) {
+    let pid = ping(home).unwrap()["pid"].as_u64().unwrap() as u32;
+    let out = fray_at(BIN, state, home, &["stop"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(fray::client::await_exit(pid, Duration::from_secs(5)));
+}
+
+/// Homes change between the listing and their turn: the first home (a fake
+/// old daemon, reached first in home order) changes the others the moment
+/// its own preflight asks it for `agents`, which only happens after the
+/// listing. A home whose daemon was stopped is not started again, one whose
+/// directory was removed is not recreated, and one already upgraded is not
+/// restarted again.
+fn changed_since_listing(dry_run: bool) {
+    let mut s = Scratch::new();
+    let stale = s.stale_bin();
+    let first = s.home("a");
+    let stopped = s.home("b");
+    let upgraded = s.home("c");
+    let removed = s.home("d");
+    for home in [&stopped, &upgraded, &removed] {
+        s.start(&stale, home);
+    }
+    let state = s.state.clone();
+    let (b, c, d) = (stopped.clone(), upgraded.clone(), removed.clone());
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let once = fired.clone();
+    fake_daemon(
+        &state.clone(),
+        &first,
+        &["sessions", "agents_all"],
+        move |op, _| {
+            if op == "agents" && !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                stop_and_wait(&state, &b);
+                stop_and_wait(&state, &c);
+                let out = fray_at(BIN, &state, &c, &["start"]);
+                assert!(out.status.success(), "{}", text(&out));
+                stop_and_wait(&state, &d);
+                std::fs::remove_dir_all(&d).unwrap();
+            }
+            None
+        },
+    );
+    let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
+    let (code, report) = s.all_stale(args);
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{report}");
+    // The fake itself predates notices: the only skip that counts.
+    assert_eq!(code, 4, "{report}");
+    let upgraded_pid = ping(&upgraded).unwrap()["pid"].clone();
+    assert_eq!(result(&report, &first)["outcome"], "skipped_unannounced");
+    let r = result(&report, &stopped);
+    assert_eq!(r["outcome"], "skipped_state", "{r}");
+    assert_eq!(r["why"], "stopped", "{r}");
+    assert!(
+        ping(&stopped).is_none(),
+        "a stopped daemon is never revived"
+    );
+    let r = result(&report, &upgraded);
+    assert_eq!(r["outcome"], "skipped_current", "{r}");
+    assert_eq!(r["why"], "current", "{r}");
+    assert_eq!(ping(&upgraded).unwrap()["pid"], upgraded_pid);
+    assert_eq!(notices(&upgraded), 0, "not restarted again");
+    let r = result(&report, &removed);
+    assert_eq!(r["outcome"], "skipped_state", "{r}");
+    assert!(!removed.exists(), "a removed home is never recreated");
+    assert_eq!(report["counts"]["skipped_current"], 1);
+    assert_eq!(report["counts"]["skipped_state"], 2);
+    // Without the fake, the changed homes alone leave nothing to restart.
+    let mut rest = report.clone();
+    rest["results"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|r| r["home"] != json!(first));
+    assert_eq!(fray::restart_all::exit_code(&rest), 0, "{rest}");
+}
+
+#[test]
+fn homes_that_changed_since_the_listing_are_left_alone() {
+    changed_since_listing(false);
+}
+
+#[test]
+fn a_dry_run_sees_homes_that_changed_since_the_listing() {
+    changed_since_listing(true);
 }
