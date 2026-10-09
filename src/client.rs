@@ -679,7 +679,10 @@ pub fn start(home: &Path, normal: bool) -> Result<Value> {
         .arg(env::current_exe()?)
         .arg("--home")
         .arg(&home)
-        .arg("serve");
+        .arg("serve")
+        // A daemon started by a keepalive drive must not pass that drive's
+        // run on to the drives it starts.
+        .env_remove(crate::keepalive::HANDOFF_ENV);
     if normal {
         command.arg("--normal");
     }

@@ -2896,6 +2896,9 @@ fn join_args(role: Option<String>, topics: Option<Vec<String>>) -> Value {
     v
 }
 fn main() {
+    // Before any thread exists: a keepalive's handoff leaves the environment
+    // at once, so nothing this process starts can inherit it.
+    driver::take_handoff();
     let cli = Cli::parse();
     let json = cli.json;
     let brief_budget = match &cli.command {
