@@ -5032,8 +5032,8 @@ fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         &["action", "reason", "from_build", "to_build", "requested_by"],
     )?;
     let action = string(a, "action")?;
-    if !["restart", "stop", "restarted"].contains(&action) {
-        return Err(Error::invalid("action: restart|stop|restarted"));
+    if !["restart", "stop", "restarted", "abandoned"].contains(&action) {
+        return Err(Error::invalid("action: restart|stop|restarted|abandoned"));
     }
     let reason = string(a, "reason")?;
     text(reason, "reason", 500, false)?;
@@ -5091,6 +5091,7 @@ fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
     let effect = match action {
         "restart" => "Waits and watches may be interrupted; re-run them once the daemon is back.",
         "restarted" => "The daemon is back; re-run any wait or watch that did not reconnect.",
+        "abandoned" => "The announced restart did not complete; check `fray ping` before relying on the daemon.",
         _ => "Fray is unavailable on this board until the daemon is started again.",
     };
     let maintenance = json!({"action":action,"reason":reason,"from_build":from,"to_build":to,
@@ -5105,7 +5106,11 @@ fn announce(conn: &Connection, req: &Request, now: i64) -> Result<Value> {
         conn,
         SYSTEM,
         &json!({"kind":"note","topic":"*","priority":1,
-            "title":clip(&format!("Fray daemon {action}: {reason}"), 160),
+            "title":clip(&if action == "abandoned" {
+                format!("Fray daemon restart abandoned: {reason}")
+            } else {
+                format!("Fray daemon {action}: {reason}")
+            }, 160),
             "summary":clip(&format!("Requested by {requested_by}.{change} Reason: {reason}. {effect}"), 2000),
             "tags":["maintenance", format!("maintenance:{action}")]}),
         json!({"maintenance":maintenance}),

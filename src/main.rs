@@ -382,7 +382,7 @@ enum Cmd {
     /// Post a daemon maintenance notice to everyone, authored by `fray`.
     /// Needs no join; records --as (or $USER) as the requester.
     Announce {
-        #[arg(long, value_parser = ["restart", "stop", "restarted"])]
+        #[arg(long, value_parser = ["restart", "stop", "restarted", "abandoned"])]
         action: String,
         #[arg(long)]
         reason: String,
@@ -4785,18 +4785,22 @@ fn human(v: &Value, out: &mut String) {
         out.push('\n');
     }
 }
-/// Who asked for a restart's notices, when no `--as` identity posts them.
+/// Who asked for a restart's notices, when no `--as` identity posts them:
+/// required unless none will be posted in advance (an old daemon's
+/// replacement still says it restarted).
 fn restart_requested_by(actor: &str, no_announce: bool) -> Result<Option<String>> {
-    if !actor.is_empty() || no_announce {
-        return Ok(None);
-    }
     let user = std::env::var("USER").unwrap_or_default();
-    if user.is_empty() {
-        return Err(Error::invalid(
+    if !actor.is_empty() {
+        Ok(None)
+    } else if !user.is_empty() {
+        Ok(Some(user))
+    } else if no_announce {
+        Ok(None)
+    } else {
+        Err(Error::invalid(
             "fray restart needs --as NAME or $USER to record who asked for the notice",
-        ));
+        ))
     }
-    Ok(Some(user))
 }
 
 fn output(v: &Value, as_json: bool) -> Result<()> {

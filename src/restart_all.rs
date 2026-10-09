@@ -17,7 +17,12 @@
 //! Each result's `outcome` is one of `restarted`, `started` (its daemon had
 //! gone by the time it was reached), `skipped_busy`, `skipped_armed`,
 //! `skipped_unannounced` (a daemon that predates restart notices, without
-//! `--no-announce`), `skipped_state` or `failed`. A dry run reads each
+//! `--no-announce`), `skipped_in_progress` (another `fray restart` holds the
+//! home's restart lock), `skipped_state` or `failed`. A home that became busy
+//! or armed between its restart notice and the shutdown is not stopped; it
+//! is `skipped_busy` or `skipped_armed` with `abandoned: true` and the
+//! `announce` state, since the board then shows the notice and an
+//! `abandoned` one. A dry run reads each
 //! preflight instead and reports `would_restart` or `would_start` in place
 //! of the first two, and the same skips.
 //!
@@ -32,7 +37,8 @@
 //! `{client_build, target_build, exe, dry_run, scan, results, counts,
 //! unconfirmed, exit_code}`. Each result is `{home, outcome, registered,
 //! state, build, pid}` plus, by outcome: `restart` (the single-home restart's
-//! JSON), `refusal` (its refusal JSON) with `holders` and `hint`, `hint`
+//! JSON), `refusal` (its refusal or abandonment JSON) with `holders` and
+//! `hint` (and `abandoned`, `announce` when abandoned), `hint`
 //! (and in a real run the refusing `error`) for an unannounced skip, `reason`
 //! for a state skip, `error` for a failure, and `preflight` in a dry run.
 //! `counts` has every outcome above as a key.
@@ -43,7 +49,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const OUTCOMES: [&str; 9] = [
+const OUTCOMES: [&str; 10] = [
     "restarted",
     "started",
     "would_restart",
@@ -51,6 +57,7 @@ const OUTCOMES: [&str; 9] = [
     "skipped_busy",
     "skipped_armed",
     "skipped_unannounced",
+    "skipped_in_progress",
     "skipped_state",
     "failed",
 ];
@@ -97,7 +104,12 @@ pub fn run(
         }
         if dry_run {
             match restart::preflight(&home) {
-                Ok(pre) => {
+                Ok(mut pre) => {
+                    // As the restart reads it: a replacement of another
+                    // build may not adopt keepalive drives.
+                    if target != BUILD {
+                        pre.assume_no_adoption(&target);
+                    }
                     let outcome = predict(&pre, opts);
                     result["outcome"] = json!(outcome);
                     if outcome == "skipped_unannounced" {
@@ -126,6 +138,24 @@ pub fn run(
                     });
                     refused(&mut result, &pre);
                     result["refusal"] = Outcome::Refused(pre).to_json();
+                }
+                Ok(Outcome::Abandoned(pre, notice)) => {
+                    result["outcome"] = json!(if pre.verdict == Verdict::Busy {
+                        "skipped_busy"
+                    } else {
+                        "skipped_armed"
+                    });
+                    refused(&mut result, &pre);
+                    result["abandoned"] = json!(true);
+                    result["announce"] = notice.clone();
+                    result["refusal"] = Outcome::Abandoned(pre, notice).to_json();
+                }
+                Err(e) if e.code == "restart_in_progress" => {
+                    result["outcome"] = json!("skipped_in_progress");
+                    result["hint"] = json!(
+                        "Another fray restart is running on this home; rerun once it has finished."
+                    );
+                    result["error"] = json!(e);
                 }
                 // Refused before anything changed: a skip, not a failure.
                 Err(e) if e.code == "announce_unsupported" => {
@@ -323,8 +353,23 @@ fn detail(r: &Value) -> String {
             }
             s
         }
-        "skipped_busy" => format!("holders: {}. {}", holders(), clean(&r["hint"])),
-        "skipped_armed" => format!("armed: {}. {}", holders(), clean(&r["hint"])),
+        "skipped_busy" | "skipped_armed" => {
+            let mut s = format!(
+                "{}: {}. {}",
+                if r["outcome"] == "skipped_busy" {
+                    "holders"
+                } else {
+                    "armed"
+                },
+                holders(),
+                clean(&r["hint"])
+            );
+            if r["abandoned"] == true {
+                s += " (Abandoned after the restart notice was posted; an `abandoned` notice followed it.)";
+            }
+            s
+        }
+        "skipped_in_progress" => clean(&r["hint"]),
         "skipped_unannounced" => format!("build {}. {}", clean(&r["build"]), clean(&r["hint"])),
         "skipped_state" => clean(&r["reason"]),
         _ => format!(
@@ -403,6 +448,8 @@ mod tests {
                     "before":{"build":"old","pid":1},"after":{"build":"new","pid":2},"warnings":[]}},
                 {"home":"/b","outcome":"skipped_busy","state":"running","hint":"rerun with --force",
                     "holders":[{"actor":"bob","session":"s1","detail":"open wait connection"}]},
+                {"home":"/e","outcome":"skipped_armed","state":"running","hint":"rerun with --allow-armed","abandoned":true,
+                    "holders":[{"actor":"carol","session":null,"detail":"armed wait"}]},
                 {"home":"/c","outcome":"skipped_state","state":"unreachable","reason":"unreachable: wedged"},
                 {"home":"/d","outcome":"failed","state":"running","error":{"code":"startup","message":"no replacement"}},
             ],
@@ -415,6 +462,10 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("skipped-busy   /b\n    holders: bob session s1: open wait connection. rerun with --force\n"), "{shown}");
+        assert!(
+            shown.contains("skipped-armed  /e\n    armed: carol: armed wait. rerun with --allow-armed (Abandoned after the restart notice was posted; an `abandoned` notice followed it.)\n"),
+            "{shown}"
+        );
         assert!(
             shown.contains("skipped-state  /c\n    unreachable: wedged\n"),
             "{shown}"

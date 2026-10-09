@@ -193,6 +193,35 @@ fn a_restarted_notice_follows_and_supersedes_the_restart_notice() {
 }
 
 #[test]
+fn an_abandoned_notice_says_the_restart_did_not_complete() {
+    let mut s = Store::memory().unwrap();
+    let before = at(&mut s, "m", "announce", restart("upgrade"))["card"]["id"].clone();
+    let after = at(
+        &mut s,
+        "m",
+        "announce",
+        json!({"action":"abandoned","reason":"upgrade (no replacement started)"}),
+    );
+    assert_eq!(
+        after["card"]["title"],
+        "Fray daemon restart abandoned: upgrade (no replacement started)"
+    );
+    assert_eq!(
+        after["card"]["tags"],
+        json!(["maintenance", "maintenance:abandoned"])
+    );
+    assert!(
+        after["card"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("did not complete"),
+        "{after}"
+    );
+    let old = at(&mut s, "m", "show", json!({"id":before}));
+    assert_eq!(old["card"]["status"], "superseded");
+}
+
+#[test]
 fn the_system_name_is_reserved() {
     let mut s = Store::memory().unwrap();
     // The owner's rule: case, separators, a numeric suffix and common

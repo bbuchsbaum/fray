@@ -400,10 +400,25 @@ fn armed_daemons_are_skipped_unless_allowed_and_never_forced_implicitly() {
     assert_eq!(ping(&home).unwrap()["build"], BUILD);
 }
 
+type Ops = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 /// A registered daemon that predates restart notices: it answers `ping`
 /// (current protocol, no `announce`, no pid) and `agents` with nobody, and
 /// records every op it is sent. It is never asked to shut down here.
-fn unannounced_daemon(state: &Path, home: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+fn unannounced_daemon(state: &Path, home: &Path) -> Ops {
+    fake_daemon(state, home, &["sessions", "agents_all"], |_, _| None)
+}
+
+/// A registered fake old daemon (no `occupancy`, no pid) with the given
+/// capabilities. `respond(op, n)` may answer the `n`th request of an op;
+/// otherwise `ping` and an empty `agents` are answered and anything else
+/// is refused. Records every op it is sent.
+fn fake_daemon(
+    state: &Path,
+    home: &Path,
+    capabilities: &'static [&'static str],
+    respond: fn(&str, usize) -> Option<Value>,
+) -> Ops {
     let record = serde_json::to_value(Record {
         home: home.into(),
         socket: home.join("bus.sock"),
@@ -431,17 +446,25 @@ fn unannounced_daemon(state: &Path, home: &Path) -> std::sync::Arc<std::sync::Mu
                     let Ok(line) = line else { return };
                     let req: Value = serde_json::from_str(&line).unwrap();
                     let op = req["op"].as_str().unwrap_or("").to_owned();
-                    seen.lock().unwrap().push(op.clone());
-                    let frame = match op.as_str() {
-                        "ping" => {
-                            json!({"ok":true,"data":{"version":"0.2.1","build":"0ld0ld0ld0ld",
-                            "protocol_version":fray::model::PROTOCOL_VERSION,"capabilities":["sessions","agents_all"],
+                    let before = {
+                        let mut seen = seen.lock().unwrap();
+                        let before = seen.iter().filter(|o| **o == op).count();
+                        seen.push(op.clone());
+                        before
+                    };
+                    let frame = match respond(&op, before) {
+                        Some(frame) => frame,
+                        None => match op.as_str() {
+                            "ping" => {
+                                json!({"ok":true,"data":{"version":"0.2.1","build":"0ld0ld0ld0ld",
+                            "protocol_version":fray::model::PROTOCOL_VERSION,"capabilities":capabilities,
                             "capacity":{"clients":1,"long_lived":0},"cursor":0,"time_ms":1}})
-                        }
-                        "agents" => json!({"ok":true,"data":{"items":[],"more":false}}),
-                        other => {
-                            json!({"ok":false,"error":{"code":"invalid","message":format!("unknown operation: {other}")}})
-                        }
+                            }
+                            "agents" => json!({"ok":true,"data":{"items":[],"more":false}}),
+                            other => {
+                                json!({"ok":false,"error":{"code":"invalid","message":format!("unknown operation: {other}")}})
+                            }
+                        },
                     };
                     if writeln!(writer, "{frame}").is_err() {
                         return;
@@ -489,6 +512,67 @@ fn a_daemon_without_restart_notices_is_skipped_not_failed() {
     assert_eq!(code, 4);
     assert!(shown.contains("skipped-unannounced"), "{shown}");
     assert!(shown.contains("--no-announce"), "{shown}");
+}
+
+/// Someone arriving between the restart notice and the shutdown: the home is
+/// abandoned (and says so on its board), reported as a busy skip.
+#[test]
+fn a_home_abandoned_after_its_notice_is_a_busy_skip() {
+    let mut s = Scratch::new();
+    let home = s.home("late");
+    let ops = fake_daemon(
+        &s.state,
+        &home,
+        &["sessions", "agents_all", "announce", "graceful_restart"],
+        |op, before| match (op, before) {
+            ("agents", 0) => None,
+            ("agents", _) => Some(json!({"ok":true,"data":{"more":false,"items":[{
+                "name":"late","enabled":true,"recently_seen":true,"controller":null,"keepalive":null,
+                "listener":{"live":true,"run_id":"r9"},"session":{"bound":null,"recent_takeover":null}}]}})),
+            ("announce", n) => Some(json!({"ok":true,"data":{"card":{"id":10 + n}}})),
+            _ => None,
+        },
+    );
+    let (code, report) = s.all_stale(&[]);
+    assert_eq!(code, 4, "{report}");
+    let r = result(&report, &home);
+    assert_eq!(r["outcome"], "skipped_busy", "{r}");
+    assert_eq!(r["abandoned"], true, "{r}");
+    assert_eq!(r["announce"]["restart"], 10, "{r}");
+    assert_eq!(r["announce"]["abandoned"], 11, "{r}");
+    assert_eq!(r["holders"][0]["actor"], "late", "{r}");
+    assert_eq!(r["refusal"]["action"], "abandoned", "{r}");
+    assert!(!ops.lock().unwrap().contains(&"shutdown".to_owned()));
+}
+
+/// Another `fray restart` holding the home's restart lock: skipped, not failed.
+#[test]
+fn a_home_another_restart_holds_is_skipped_in_progress() {
+    use fs2::FileExt;
+    let mut s = Scratch::new();
+    let stale = s.stale_bin();
+    let home = s.home("busy");
+    s.start(&stale, &home);
+    let pid = ping(&home).unwrap()["pid"].clone();
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.join("restart.lock"))
+        .unwrap();
+    held.try_lock_exclusive().unwrap();
+    let (code, report) = s.all_stale(&[]);
+    assert_eq!(code, 4, "{report}");
+    let r = result(&report, &home);
+    assert_eq!(r["outcome"], "skipped_in_progress", "{r}");
+    assert_eq!(r["error"]["code"], "restart_in_progress", "{r}");
+    assert_eq!(report["counts"]["skipped_in_progress"], 1);
+    assert_eq!(ping(&home).unwrap()["pid"], pid);
+    assert_eq!(notices(&home), 0);
+    drop(held);
+    let (code, report) = s.all_stale(&[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(result(&report, &home)["outcome"], "restarted");
 }
 
 #[test]

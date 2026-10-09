@@ -122,6 +122,9 @@ fn write_request(stream: &mut UnixStream, req: &Request) -> Result<()> {
 }
 fn exchange(reader: &mut BufReader<UnixStream>, req: &Request) -> Result<Value> {
     write_request(reader.get_mut(), req)?;
+    receive(reader)
+}
+fn receive(reader: &mut BufReader<UnixStream>) -> Result<Value> {
     let line = read_frame(reader, RESPONSE_LIMIT)?.ok_or_else(|| {
         Error::new(
             "protocol",
@@ -302,7 +305,12 @@ fn rpc_mapped(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             && (matches!(error.code.as_str(), "io" | "busy")
                 || (error.code == "protocol" && error.message.starts_with("connection closed")))
         {
-            Error::new("unavailable", format!("wait transport failed: {error}"))
+            let details = error.details.clone();
+            let mapped = Error::new("unavailable", format!("wait transport failed: {error}"));
+            match details {
+                Some(details) => mapped.with_details(details),
+                None => mapped,
+            }
         } else {
             error
         }
@@ -316,7 +324,9 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     // All other requests are checked on the SAME connection, with no cached
     // compatibility decision that could survive a daemon replacement.
     if !matches!(req.op.as_str(), "ping" | "shutdown") {
-        let daemon = handshake(&mut reader, home)?;
+        // Only the read-only ping went out: a transport failure here (a
+        // daemon exiting from a drain) left nothing operational received.
+        let daemon = handshake(&mut reader, home).map_err(unsent)?;
         wire_request = session_request(req, &daemon)?;
         // Optional excerpt control: a daemon without full text needs no limit.
         if !daemon["capabilities"]
@@ -446,7 +456,22 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     } else {
         Some(Duration::from_secs(timeout.max(1)))
     })?;
-    exchange(&mut reader, &wire_request)
+    // A write the daemon refused (it closed the connection) delivered nothing.
+    write_request(reader.get_mut(), &wire_request).map_err(unsent)?;
+    receive(&mut reader)
+}
+/// Marks a transport failure as one before anything operational reached a
+/// daemon, so callers may resend it (and wait out a restart for it).
+fn unsent(error: Error) -> Error {
+    if !matches!(error.code.as_str(), "io" | "protocol") {
+        return error;
+    }
+    let mut details = match error.details.clone() {
+        Some(Value::Object(map)) => Value::Object(map),
+        _ => json!({}),
+    };
+    details["not_sent"] = json!(true);
+    error.with_details(details)
 }
 
 fn session_request(req: &Request, daemon: &Value) -> Result<Request> {

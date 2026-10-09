@@ -300,7 +300,14 @@ pub fn classify(home: &Path, ping: Value, report: Value) -> Preflight {
         pre.degraded = true;
         read_agents(&mut pre, &ping, &report);
     }
-    pre.verdict = if pre.live().next().is_some() {
+    pre.verdict = decide(&pre);
+    pre.daemon = Some(ping);
+    pre.report = report;
+    pre
+}
+
+fn decide(pre: &Preflight) -> Verdict {
+    if pre.live().next().is_some() {
         Verdict::Busy
     } else if pre.armed().next().is_some() {
         Verdict::Armed
@@ -308,10 +315,28 @@ pub fn classify(home: &Path, ping: Value, report: Value) -> Preflight {
         Verdict::DegradedIdle
     } else {
         Verdict::Idle
-    };
-    pre.daemon = Some(ping);
-    pre.report = report;
-    pre
+    }
+}
+
+impl Preflight {
+    /// Survival assumes a replacement that adopts keepalive drives (L8).
+    /// When the replacement is another build than this one, that cannot be
+    /// known before it runs: count them as live instead.
+    pub fn assume_no_adoption(&mut self, build: &str) {
+        if self.verdict == Verdict::NotRunning {
+            return;
+        }
+        for i in &mut self.interruptions {
+            if i.class == Class::Survives {
+                i.class = Class::Live;
+                i.detail = format!(
+                    "{}; the replacement (build {build}) may not adopt it",
+                    i.detail
+                );
+            }
+        }
+        self.verdict = decide(self);
+    }
 }
 
 fn text(v: &Value) -> String {
@@ -553,14 +578,18 @@ fn read_agents(pre: &mut Preflight, ping: &Value, r: &Value) {
 }
 
 /// `<home>/daemon.restarting`: a restart is in progress on this home. Written
-/// when a daemon accepts a restart (and by `fray restart` itself, for old
-/// daemons that do not write it); removed by the replacement once it has
-/// bound its socket. While it is fresh, a client whose connect finds no
-/// daemon treats that like a `restarting` refusal and waits for the
+/// by `fray restart` for its whole run, or (when no restarter wrote one) by a
+/// daemon accepting a restart shutdown; removed by the replacement once it
+/// has bound its socket. While it is honoured, a client whose connect finds
+/// no daemon treats that like a `restarting` refusal and waits for the
 /// replacement within its own budget, instead of failing in the gap.
+///
+/// It is honoured only while its writer is alive and for at most
+/// [`MARKER_FRESH_MS`]: a killed restarter, or a `fray stop --restart` with
+/// no start after it, never makes clients of a dead home wait.
 pub const MARKER: &str = "daemon.restarting";
-/// A marker older than this is ignored: its restart failed or was abandoned.
-pub const MARKER_FRESH_MS: i64 = 120_000;
+/// The client's own restart window: no marker is honoured for longer.
+pub const MARKER_FRESH_MS: i64 = 30_000;
 
 /// Writes the marker atomically. Advisory: callers report a failure and go on.
 pub fn write_marker(home: &Path, reason: &str) -> std::io::Result<()> {
@@ -589,7 +618,9 @@ pub fn marker(home: &Path) -> Option<String> {
     let body: Value = serde_json::from_slice(&std::fs::read(home.join(MARKER)).ok()?).ok()?;
     let written = body["written_ms"].as_i64()?;
     let age = now_ms() - written;
-    ((0..MARKER_FRESH_MS).contains(&age)).then(|| body["reason"].as_str().unwrap_or("").to_owned())
+    let writer = body["pid"].as_i64()?;
+    ((0..MARKER_FRESH_MS).contains(&age) && crate::keepalive::pid_alive(writer))
+        .then(|| body["reason"].as_str().unwrap_or("").to_owned())
 }
 
 pub fn clear_marker(home: &Path) {
@@ -623,6 +654,10 @@ pub struct Options {
 pub enum Outcome {
     /// The preflight refused (busy or armed); nothing was changed.
     Refused(Preflight),
+    /// The daemon became busy (or armed) between the announcement and the
+    /// shutdown: nothing was stopped, and the notice was followed by an
+    /// `abandoned` one. The announcement state is the second field.
+    Abandoned(Preflight, Value),
     /// Restarted (or, with no daemon running, started). The `--json` form.
     Done(Value),
 }
@@ -630,7 +665,7 @@ pub enum Outcome {
 impl Outcome {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Refused(pre) => pre.verdict.exit_code(),
+            Self::Refused(pre) | Self::Abandoned(pre, _) => pre.verdict.exit_code(),
             Self::Done(_) => 0,
         }
     }
@@ -645,6 +680,15 @@ impl Outcome {
                 "hint":refusal_hint(pre.verdict),
                 "preflight":pre.to_json(),
             }),
+            Self::Abandoned(pre, notice) => json!({
+                "home":pre.home,
+                "action":"abandoned",
+                "verdict":pre.verdict.as_str(),
+                "exit_code":pre.verdict.exit_code(),
+                "hint":refusal_hint(pre.verdict),
+                "announce":notice,
+                "preflight":pre.to_json(),
+            }),
             Self::Done(v) => v.clone(),
         }
     }
@@ -652,6 +696,12 @@ impl Outcome {
     pub fn text(&self) -> String {
         match self {
             Self::Refused(pre) => format!("{}refused: {}\n", pre.text(), refusal_hint(pre.verdict)),
+            Self::Abandoned(pre, _) => format!(
+                "{}abandoned: it became {} after the restart was announced. {}\n",
+                pre.text(),
+                pre.verdict.as_str(),
+                refusal_hint(pre.verdict)
+            ),
             Self::Done(v) => done_text(v),
         }
     }
@@ -815,14 +865,16 @@ fn announce(home: &Path, opts: &Options, args: Value) -> Result<i64> {
 
 /// `fray restart`: preflight, announce, drain, start, verify (L9).
 ///
-/// Refuses a `busy` daemon without `force` and an `armed` one without
-/// `allow_armed` (or `force`), changing nothing. An old daemon read in
-/// degraded mode proceeds with the label. With no daemon running, it only
-/// starts one. Any failure before the shutdown leaves the daemon running;
-/// a failed announcement never leads to a restart.
+/// One run per home at a time (`restart.lock`). Refuses a `busy` daemon
+/// without `force` and an `armed` one without `allow_armed` (or `force`),
+/// changing nothing, and checks again after the announcement: a daemon that
+/// became busy meanwhile is not stopped ([`Outcome::Abandoned`]). With a
+/// replacement of another build, idle keepalives count as live. An old
+/// daemon read in degraded mode proceeds with the label. With no daemon
+/// running, it only starts one. A failed announcement never leads to a
+/// restart, and any failure after a posted notice posts an `abandoned` one.
 pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
     let started = std::time::Instant::now();
-    let home = &std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let (exe, exe_source) = match &opts.exe {
         Some(exe) => (
             std::fs::canonicalize(exe)
@@ -832,13 +884,22 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
         None => (std::env::current_exe()?, "current_exe"),
     };
     let build = exe_build(&exe)?;
-    let pre = preflight(home)?;
-    let blocked = match pre.verdict {
+    let home = &crate::server::initialize(home)?;
+    let _exclusive = lock(home)?;
+    let check = |home: &Path| -> Result<Preflight> {
+        let mut pre = preflight(home)?;
+        if build != BUILD {
+            pre.assume_no_adoption(&build);
+        }
+        Ok(pre)
+    };
+    let blocked = |pre: &Preflight| match pre.verdict {
         Verdict::Busy => !opts.force,
         Verdict::Armed => !(opts.force || opts.allow_armed),
         _ => false,
     };
-    if blocked {
+    let pre = check(home)?;
+    if blocked(&pre) {
         return Ok(Outcome::Refused(pre));
     }
     if pre.degraded {
@@ -901,7 +962,7 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
             .is_some_and(|r| Some(u64::from(r.pid)) == old_pid && r.durability == "normal")
     });
     // Announce first. Without a posted notice, nothing restarts.
-    let mut notice = json!({"restart":null,"restarted":null,"skipped":null});
+    let mut notice = json!({"restart":null,"restarted":null,"abandoned":null,"skipped":null});
     let announcing = !opts.no_announce;
     if opts.no_announce {
         notice["skipped"] = json!("--no-announce");
@@ -924,6 +985,33 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
         })?;
         notice["restart"] = json!(id);
     }
+    // Whoever arrived while the notice went out counts too.
+    let notice_from = (from_build.as_str(), build.as_str());
+    let pre = match check(home) {
+        Ok(again) if blocked(&again) => {
+            abandon(
+                home,
+                opts,
+                &mut notice,
+                &reason,
+                "the daemon became busy",
+                notice_from,
+            );
+            return Ok(Outcome::Abandoned(again, notice));
+        }
+        Ok(again) => again,
+        Err(e) => {
+            abandon(
+                home,
+                opts,
+                &mut notice,
+                &reason,
+                "the second preflight failed",
+                notice_from,
+            );
+            return Err(with_notice(e, &notice));
+        }
+    };
     // Drain: the old daemon tells long-lived clients to reconnect and lets
     // in-flight requests finish; an old one without that just stops.
     let graceful = has(&ping, "graceful_restart");
@@ -937,35 +1025,51 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
             args["grace_ms"] = json!(grace);
         }
     }
-    let stop_failed = |e: Error, what: &str| {
-        clear_marker(home);
-        let mut details = json!({"announce":notice});
-        details["cause"] = serde_json::to_value(&e).unwrap_or(Value::Null);
-        Error::new(&e.code, format!("{what}: {}", e.message)).with_details(details)
+    let reply = match crate::client::rpc(home, &Request::new("shutdown", "", args), 10) {
+        Ok(reply) => reply,
+        Err(e) => {
+            clear_marker(home);
+            abandon(
+                home,
+                opts,
+                &mut notice,
+                &reason,
+                "the shutdown was not accepted",
+                notice_from,
+            );
+            let message = format!(
+                "shutdown was not accepted; nothing restarted: {}",
+                e.message
+            );
+            return Err(with_notice(Error::new(&e.code, message), &notice));
+        }
     };
-    let reply = crate::client::rpc(home, &Request::new("shutdown", "", args), 10)
-        .map_err(|e| stop_failed(e, "shutdown was not accepted; nothing restarted"))?;
     let old_pid = reply["pid"].as_u64().or(old_pid);
     let grace = reply["grace_ms"].as_u64().unwrap_or(0);
     let window = std::time::Duration::from_millis(grace + 5000);
     let stopping = std::time::Instant::now();
-    let gone = gone(home, window)
-        && old_pid
-            .and_then(|p| u32::try_from(p).ok())
-            .is_none_or(|pid| {
-                crate::client::await_exit(pid, window.saturating_sub(stopping.elapsed()))
-            });
-    if !gone {
-        return Err(stop_failed(
-            Error::new(
-                "stop_incomplete",
-                match old_pid {
-                    Some(pid) => format!("process {pid} had not exited within {}ms (ps -p {pid}); start a replacement only once it has", window.as_millis()),
-                    None => format!("the daemon still answered after {}ms", window.as_millis()),
-                },
-            ),
-            "the old daemon did not stop; nothing started",
-        ));
+    if !gone(home, window) {
+        clear_marker(home);
+        abandon(
+            home,
+            opts,
+            &mut notice,
+            &reason,
+            "the old daemon did not stop",
+            notice_from,
+        );
+        let message = format!(
+            "the old daemon still answered {}ms after accepting the shutdown; nothing started",
+            window.as_millis()
+        );
+        return Err(with_notice(Error::new("stop_incomplete", message), &notice));
+    }
+    // Its socket is silent. A pid that still looks alive may have been
+    // reused: start anyway, since the daemon lock decides, and say so.
+    if let Some(pid) = old_pid.and_then(|p| u32::try_from(p).ok()) {
+        if !crate::client::await_exit(pid, window.saturating_sub(stopping.elapsed())) {
+            warnings.push(format!("process {pid} still appears to run after its daemon stopped answering (ps -p {pid}); started the replacement anyway, which the daemon lock arbitrates"));
+        }
     }
     let drained_ms = stopping.elapsed().as_millis() as u64;
     if old_pid.is_none() {
@@ -974,17 +1078,44 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
     let start_window = std::time::Duration::from_secs(10);
     if let Err(e) = crate::client::start_exe(home, normal, &exe, start_window, true) {
         clear_marker(home);
-        return Err(Error::new(
+        abandon(
+            home,
+            opts,
+            &mut notice,
+            &reason,
+            "no replacement started",
+            notice_from,
+        );
+        return Err(with_notice(Error::new(
             "startup",
             format!("the old daemon stopped but no replacement answered ({}); the home has no daemon. Inspect {}", e.message, log.display()),
-        )
-        .with_details(json!({"announce":notice,"exe":exe,"cause":e})));
+        ), &notice));
     }
     // An exe of an older build does not clear the marker itself.
     clear_marker(home);
-    let after = verify(home, &build, before_store.as_deref(), old_pid, &log)?;
-    if announcing {
-        if has(&after, "announce") {
+    let after = match verify(home, &build, before_store.as_deref(), old_pid, &log) {
+        Ok(after) => after,
+        Err(e) => {
+            let why = "the replacement failed verification";
+            abandon(home, opts, &mut notice, &reason, why, notice_from);
+            return Err(with_notice(e, &notice));
+        }
+    };
+    // An old daemon could not announce the restart; its replacement can at
+    // least say it happened. An explicit --no-announce on a daemon that
+    // could have announced means no notices at all.
+    let unannounceable = !has(&ping, "announce");
+    if announcing || unannounceable {
+        let reason = if announcing {
+            reason.clone()
+        } else {
+            format!("{reason}; no advance notice was possible: the old daemon (build {from_build}) predated restart notices")
+        };
+        if opts.actor.is_empty() && opts.requested_by.is_none() {
+            warnings.push(
+                "the restarted notice was not posted: no --as or $USER to record who asked".into(),
+            );
+        } else if has(&after, "announce") {
             let args = json!({"action":"restarted","reason":reason,"from_build":from_build,"to_build":after["build"]});
             match announce(home, opts, args) {
                 Ok(id) => notice["restarted"] = json!(id),
@@ -1014,6 +1145,61 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
     out["warnings"] = json!(warnings);
     out["duration_ms"] = json!(started.elapsed().as_millis() as u64);
     Ok(Outcome::Done(out))
+}
+
+/// Holds `<home>/restart.lock` for one `fray restart` at a time. Separate
+/// from `daemon.lock`, so it never competes with a starting daemon.
+fn lock(home: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(home.join("restart.lock"))?;
+    file.try_lock_exclusive().map_err(|_| {
+        Error::new(
+            "restart_in_progress",
+            format!(
+                "another fray restart is running on {}; nothing was changed",
+                home.display()
+            ),
+        )
+    })?;
+    Ok(file)
+}
+
+/// After a posted restart notice, a failure says so on the board (best
+/// effort: a home with no daemon has no board to tell).
+fn abandon(
+    home: &Path,
+    opts: &Options,
+    notice: &mut Value,
+    reason: &str,
+    why: &str,
+    (from, to): (&str, &str),
+) {
+    if notice["restart"].is_null() {
+        return;
+    }
+    let args = json!({"action":"abandoned","reason":format!("{reason} ({why})"),"from_build":from,"to_build":to});
+    match announce(home, opts, args) {
+        Ok(id) => notice["abandoned"] = json!(id),
+        Err(e) => notice["abandoned_error"] = json!(format!("{}: {}", e.code, e.message)),
+    }
+}
+
+/// Attach the announcement state to a failure, keeping its own details.
+fn with_notice(e: Error, notice: &Value) -> Error {
+    let mut details = match e.details.clone() {
+        Some(Value::Object(map)) => Value::Object(map),
+        Some(other) => json!({"cause":other}),
+        None => json!({}),
+    };
+    details["announce"] = notice.clone();
+    e.with_details(details)
 }
 
 /// Waits until nothing answers on the home's socket.
