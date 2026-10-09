@@ -260,7 +260,27 @@ respawned.
   applied once; the move follows it. An idle drive moves within one
   heartbeat (30 s), or at once when attention wakes it, before that turn.
   Each daemon build and binary is tried once, so a failed `exec` (logged)
-  leaves the drive running as it was rather than retrying in a loop.
+  leaves the drive running as it was rather than retrying in a loop. Before
+  the `exec` the drive runs the target with `--version`; a binary that does
+  not report the daemon's build (one too old to take the handoff) is
+  skipped, logged, and the drive stays on its own.
+- **The handoff is the drive's alone.** It names the agent, the keepalive
+  session and the board's canonical home, and applies only when all three
+  match; the new image then continues the run only if the board still
+  holds that controller run (its lease was renewed just before the
+  `exec`). Anything else is logged as `handoff_ignored` and a new run
+  begins. The variable leaves the process's environment before `main` does
+  anything else, and the daemon and keepalive spawns remove it too, so
+  neither a daemon a drive starts nor the drives that daemon starts can
+  inherit another drive's run. Just after a restart, a drive with a
+  handoff waits (within the 30 s window) for a daemon that is slow to
+  answer rather than exiting.
+- **The `exec` is a crash for the drive's background Mote sync.** That
+  thread is not told: a sync or escalation tick in flight is cut off, and a
+  `mote` child it started is orphaned and finishes on its own. This is
+  safe for the same reason a crashed drive is: the sync resumes from its
+  stored cursor and revision guards, and the new image starts the thread
+  again.
 
 Why not stop and respawn: a drive mid-turn cannot stop at once, so the new
 daemon would have to wait for the old pid to exit before starting a

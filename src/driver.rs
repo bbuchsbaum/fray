@@ -29,10 +29,9 @@ use std::{
 };
 
 const HEARTBEAT_SECS: u64 = 30;
-/// The run a keepalive carries into its daemon's binary when it re-executes
-/// itself after a restart (docs/design/keepalive.md, "Across a daemon
-/// restart"). Set only by the drive itself; never passed to a turn.
-const HANDOFF_ENV: &str = "FRAY_KEEPALIVE_HANDOFF";
+use keepalive::HANDOFF_ENV;
+/// The handoff this process was started with, taken out of its environment.
+static HANDOFF: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 /// Times a keepalive resends a request no daemon accepted, each after a
 /// replacement answered.
 const UNSENT_RETRIES: usize = 3;
@@ -1463,8 +1462,27 @@ impl Run<'_> {
             // Stopping: it exits at the boundary instead.
             return Ok(());
         }
-        let handoff = json!({"run_id":self.id,"detail":self.detail.borrow().clone(),
-            "keep":keep.handoff(),"upgraded_for":target});
+        // Only a binary that reports the daemon's build can take the handoff
+        // (an older one would begin a second run beside this one).
+        let reports = Command::new(exe)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|out| {
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout).contains(&format!("({build})"))
+            });
+        if !reports {
+            eprintln!(
+                "fray drive: {}",
+                json!({"run_id":self.id,"upgrade_skipped":{"exe":exe,"reason":format!("{exe} --version does not report the daemon's build {build}; staying on this binary")}})
+            );
+            return Ok(());
+        }
+        let handoff = json!({"run_id":self.id,"actor":self.actor,
+            "session":fray::session::current()?,"home":fs::canonicalize(self.home)?,
+            "detail":self.detail.borrow().clone(),"keep":keep.handoff(),"upgraded_for":target});
         eprintln!(
             "fray drive: {}",
             json!({"run_id":self.id,"upgrade":{"from":{"build":BUILD,"exe":own},"to":{"build":build,"exe":exe}}})
@@ -1803,20 +1821,75 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     {
         return Err(Error::invalid("drive needs a unique --as name; max-turns:1..1000; idle-timeout:0..86400; debounce-ms:0..5000; budget:2000..64000; child-timeout:1..86400"));
     }
-    client::start(home, false)?;
     // Set when this keepalive re-executed itself onto a restarted daemon's
-    // binary: it continues that run rather than beginning another.
+    // binary: it continues that run rather than beginning another. Only a
+    // handoff written for this name, keepalive session and board applies.
     let handoff: Option<Value> = options
         .keepalive
-        .then(|| std::env::var(HANDOFF_ENV).ok())
+        .then(|| HANDOFF.get().cloned().flatten())
         .flatten()
-        .and_then(|h| serde_json::from_str(&h).ok());
+        .and_then(|h| serde_json::from_str(&h).ok())
+        .filter(|h| {
+            let session = fray::session::current().ok().flatten();
+            let ours = handoff_for(h, actor, session.as_deref(), home);
+            if !ours {
+                eprintln!(
+                    "fray drive: {}",
+                    json!({"handoff_ignored":"written for another name, session or board"})
+                );
+            }
+            ours
+        });
+    // Just after a restart the daemon this drive came from may still be
+    // coming up: wait for it rather than exit.
+    let since = Instant::now();
+    loop {
+        match client::start(home, false) {
+            Ok(_) => break,
+            Err(_) if handoff.is_some() && since.elapsed() < client::RESTART_WINDOW => {
+                client::await_daemon(home, client::RESTART_WINDOW.saturating_sub(since.elapsed()));
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     let keep = options
         .keepalive
         .then(|| keep_for(home, actor))
         .transpose()?;
     send(home, actor, "join", json!({}), None, 10)?;
     on_joined();
+    // The handoff's run goes on only if the board says it is still that run
+    // (its lease was renewed just before the exec); otherwise it is ignored
+    // and a new run begins.
+    let mut stop_requested = false;
+    let handoff = match handoff {
+        Some(h) => {
+            let run_id = h["run_id"].as_str().unwrap_or("");
+            match send(
+                home,
+                actor,
+                "controller",
+                json!({"run_id":run_id,"state":"waiting","begin":false}),
+                None,
+                10,
+            ) {
+                Ok(v) => {
+                    stop_requested = v["stop_requested"] == true;
+                    Some(h)
+                }
+                Err(e) if matches!(e.code.as_str(), "controller_lost" | "invalid") => {
+                    eprintln!(
+                        "fray drive: {}",
+                        json!({"handoff_ignored":format!("run {run_id:?} is no longer this name's: {}", e.code)})
+                    );
+                    None
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        None => None,
+    };
     let mut detail = json!({"on_urgent":options.on_urgent,"turn":0,"child":null,"presented":[],"queued_urgent":[],
         // Which host the child is, so `fray team` can tell a driven
         // Codex from a driven Claude.
@@ -1842,6 +1915,7 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     let continued = handoff
         .as_ref()
         .and_then(|h| h["run_id"].as_str().map(str::to_owned));
+    let resumed = continued.is_some();
     let runner = Run {
         home,
         actor,
@@ -1850,7 +1924,7 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         detail: RefCell::new(detail),
         detail_ok: Cell::new(true),
         keep,
-        stop: Cell::new(false),
+        stop: Cell::new(stop_requested),
         output: RefCell::new(Vec::new()),
         upgraded_for: RefCell::new(
             handoff
@@ -1859,15 +1933,8 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         ),
         patient: Cell::new(options.keepalive),
     };
-    // The run's lease is fresh (renewed just before the exec), so it goes on
-    // under its own id; if it lapsed meanwhile, the run begins again.
-    let resumed = continued.is_some()
-        && match runner.state("waiting", false, None) {
-            Ok(()) => true,
-            Err(e) if e.code == "controller_lost" => false,
-            Err(e) => return Err(e),
-        };
     if resumed {
+        runner.state("waiting", false, None)?;
         eprintln!(
             "fray drive: {}",
             json!({"run_id":runner.id,"upgraded":{"build":BUILD,"exe":runner.detail.borrow()["exe"]}})
@@ -1900,6 +1967,26 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     }
     result?;
     cleanup
+}
+
+/// Take a keepalive's handoff out of this process's environment, keeping it
+/// for `run`. Called first in `main`, before any thread exists.
+pub fn take_handoff() {
+    let handoff = std::env::var(HANDOFF_ENV).ok();
+    if handoff.is_some() {
+        std::env::remove_var(HANDOFF_ENV);
+    }
+    let _ = HANDOFF.set(handoff);
+}
+
+/// Whether a handoff was written by this name's keepalive, under this
+/// keepalive session, on this board.
+fn handoff_for(handoff: &Value, actor: &str, session: Option<&str>, home: &Path) -> bool {
+    let home = fs::canonicalize(home).ok();
+    handoff["actor"].as_str() == Some(actor)
+        && session.is_some_and(|s| keepalive::is_session(Some(s)))
+        && handoff["session"].as_str() == session
+        && home.is_some_and(|home| handoff["home"].as_str() == home.to_str())
 }
 
 #[cfg(test)]
@@ -1943,6 +2030,33 @@ mod keepalive_tests {
             oversized: RefCell::new(Vec::new()),
             idle_since: Cell::new(None),
         }
+    }
+
+    #[test]
+    fn a_handoff_applies_only_to_its_own_name_session_and_board() {
+        let home = std::env::temp_dir();
+        let canonical = fs::canonicalize(&home).unwrap();
+        let h = json!({"actor":"alice","session":"keepalive:c1","home":canonical,"run_id":"r1"});
+        assert!(handoff_for(&h, "alice", Some("keepalive:c1"), &home));
+        assert!(!handoff_for(&h, "bob", Some("keepalive:c1"), &home));
+        assert!(!handoff_for(&h, "alice", Some("keepalive:c2"), &home));
+        assert!(!handoff_for(&h, "alice", None, &home));
+        assert!(!handoff_for(
+            &h,
+            "alice",
+            Some("keepalive:c1"),
+            Path::new("/")
+        ));
+        // Without the binding (as an older handoff would be), it never applies.
+        let bare = json!({"run_id":"r1"});
+        assert!(!handoff_for(&bare, "alice", Some("keepalive:c1"), &home));
+        let other_session = json!({"actor":"alice","session":"claude:c1","home":canonical});
+        assert!(!handoff_for(
+            &other_session,
+            "alice",
+            Some("claude:c1"),
+            &home
+        ));
     }
 
     #[test]

@@ -101,6 +101,11 @@ pub const TURN_MARKS: [&str; 3] = ["begin", "active", "end"];
 /// The only command the daemon runs, after its own executable. Nothing in a
 /// request reaches it: the name, home and session go in the environment.
 pub const DRIVE_ARGS: [&str; 2] = ["drive", "--keepalive"];
+/// The run a keepalive carries into its daemon's binary when it re-executes
+/// itself after a restart ("Across a daemon restart"). Only that drive's own
+/// exec sets it; the drive takes it out of its environment at once, and no
+/// daemon or drive Fray starts inherits it.
+pub const HANDOFF_ENV: &str = "FRAY_KEEPALIVE_HANDOFF";
 
 pub fn is_session(session: Option<&str>) -> bool {
     session.is_some_and(|s| s.starts_with(PREFIX))
@@ -293,6 +298,8 @@ pub fn spawn(home: &Path, agent: &str, session: &str, cwd: &Path, log: &Path) ->
         // speaks only as its keepalive session.
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
+        // Another drive's run is never this one's.
+        .env_remove(HANDOFF_ENV)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out.try_clone()?))
