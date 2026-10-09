@@ -1086,8 +1086,21 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
             return Err(with_notice(e, &notice));
         }
     };
-    if announcing {
-        if has(&after, "announce") {
+    // An old daemon could not announce the restart; its replacement can at
+    // least say it happened. An explicit --no-announce on a daemon that
+    // could have announced means no notices at all.
+    let unannounceable = !has(&ping, "announce");
+    if announcing || unannounceable {
+        let reason = if announcing {
+            reason.clone()
+        } else {
+            format!("{reason}; no advance notice was possible: the old daemon (build {from_build}) predated restart notices")
+        };
+        if opts.actor.is_empty() && opts.requested_by.is_none() {
+            warnings.push(
+                "the restarted notice was not posted: no --as or $USER to record who asked".into(),
+            );
+        } else if has(&after, "announce") {
             let args = json!({"action":"restarted","reason":reason,"from_build":from_build,"to_build":after["build"]});
             match announce(home, opts, args) {
                 Ok(id) => notice["restarted"] = json!(id),

@@ -252,6 +252,8 @@ fn an_idle_restart_verifies_the_build_and_posts_both_notices() {
         "{shown}"
     );
     assert!(shown.contains("before: build "), "{shown}");
+    // An explicit --no-announce where notices were possible posts none.
+    assert_eq!(home.notices().len(), 2);
 }
 
 #[test]
@@ -470,6 +472,19 @@ fn a_daemon_without_announce_needs_no_announce_and_old_daemons_are_restarted() {
     assert_eq!(out["before"]["build"], "oldbuild");
     assert_eq!(out["before"]["pid"], Value::Null);
     assert_eq!(out["announce"]["skipped"], "--no-announce");
+    // The replacement says it restarted, and why there was no notice before.
+    assert!(out["announce"]["restarted"].is_i64(), "{out}");
+    let notices = fake.home.notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0]
+            .0
+            .starts_with("Fray daemon restarted: upgrade to ")
+            && notices[0].0.contains(
+                "no advance notice was possible: the old daemon (build oldbuild) predated"
+            ),
+        "{notices:?}"
+    );
     assert!(
         out["warnings"][0]
             .as_str()
@@ -984,6 +999,13 @@ fn a_real_old_daemon_when_one_is_given() {
     assert!(fray::client::await_exit(pid as u32, Duration::from_secs(1)));
     assert_eq!(home.ping().unwrap()["build"], out["exe"]["build"]);
     assert_eq!(out["store_id"], home.ping().unwrap()["store_id"]);
+    assert!(out["announce"]["restarted"].is_i64(), "{out}");
+    let notices = home.notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].0.contains("no advance notice was possible"),
+        "{notices:?}"
+    );
     // And back onto the old binary: verified against its own build.
     let (code, out, err) = home.json(&["restart", "--no-announce", "--exe", &old]);
     assert_eq!(code, 0, "{out} {err}");

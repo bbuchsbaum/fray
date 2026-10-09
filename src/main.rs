@@ -3491,16 +3491,19 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             grace_ms,
             normal,
         } => {
-            let requested_by = if actor.is_empty() && !no_announce {
-                let user = std::env::var("USER").unwrap_or_default();
-                if user.is_empty() {
-                    return Err(Error::invalid(
-                        "fray restart needs --as NAME or $USER to record who asked for the notice",
-                    ));
-                }
-                Some(user)
-            } else {
+            // Who asked, for the notices: required unless none will be posted
+            // in advance (an old daemon's replacement still says it restarted).
+            let user = std::env::var("USER").unwrap_or_default();
+            let requested_by = if !actor.is_empty() {
                 None
+            } else if !user.is_empty() {
+                Some(user)
+            } else if no_announce {
+                None
+            } else {
+                return Err(Error::invalid(
+                    "fray restart needs --as NAME or $USER to record who asked for the notice",
+                ));
             };
             let options = fray::restart::Options {
                 force,
