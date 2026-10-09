@@ -248,9 +248,15 @@ enum Cmd {
     /// a build other than the one being started), one at a time, ignoring
     /// --home. Only running daemons are restarted; unreachable, incompatible
     /// and dead ones are listed as skipped. Busy and armed daemons are skipped
-    /// unless --force or --allow-armed is given. Exit 0 all restarted (or none
-    /// stale), 1 any failed, 4 some skipped and none failed; with --dry-run the
-    /// same codes say what a run would do.
+    /// unless --force or --allow-armed is given, as are daemons that cannot
+    /// post notices (without --no-announce) and homes another restart holds.
+    /// Each home is rechecked when reached: one whose daemon stopped or whose
+    /// directory is gone is skipped, never started or created, and one
+    /// already on the target build is skipped as current. Exit 0 all
+    /// restarted (or none stale), 1 any failed, 4 some skipped and none
+    /// failed; dead records and homes stopped, gone or current since the
+    /// listing do not count as skips. With --dry-run the same codes say what
+    /// a run would do.
     Restart {
         #[arg(long)]
         dry_run: bool,
