@@ -241,18 +241,6 @@ fn no_daemon_is_its_own_exit_status() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[test]
-fn without_dry_run_restart_is_refused_for_now() {
-    let root = scratch("x");
-    let out = Command::new(env!("CARGO_BIN_EXE_fray"))
-        .args(["--home", root.to_str().unwrap(), "restart"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not_implemented"));
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 /// A daemon that predates `occupancy`: it answers `ping` without that
 /// capability, with its connection counts, and `agents` with a fixed roster.
 /// Records every op it receives.

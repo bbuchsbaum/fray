@@ -1,16 +1,20 @@
-//! `fray restart` preflight (docs/plans/2026-10-08-daemon-lifecycle.md, L5):
-//! what a restart of one home's daemon would interrupt, and whether it may go
-//! ahead.
+//! `fray restart` (docs/plans/2026-10-08-daemon-lifecycle.md): the preflight
+//! (L5), what a restart of one home's daemon would interrupt and whether it
+//! may go ahead, and the restart itself (L9, [`run`]).
 //!
-//! Read-only. It sends only `ping` and then `occupancy` (or, on a daemon
-//! without that capability, `agents`); neither joins, binds a session nor
-//! records presence.
+//! The preflight is read-only. It sends only `ping` and then `occupancy` (or,
+//! on a daemon without that capability, `agents`); neither joins, binds a
+//! session nor records presence.
 //!
-//! # Two classes of interruption
+//! # Three classes
 //!
 //! - **Live**: something a restart cuts off now. An open long-lived
 //!   connection (a `wait`, `watch` or listener stream), a live listener, a
-//!   running or waiting drive, or a live keepalive process.
+//!   running or waiting drive, or a live keepalive process mid-turn.
+//! - **Survives**: a live keepalive drive (with a recorded pid) whose drive
+//!   is not running a turn, with its drive and stream. The replacement
+//!   adopts it and it moves onto the new binary between turns (L8), so it
+//!   never blocks a restart.
 //! - **Armed**: a `session_waits` row with no open connection behind it. An
 //!   agent's wait loop between two calls looks like this, and so does a
 //!   finite `fray wait` that already returned, for up to `WAIT_FRESH_MS`
@@ -80,6 +84,9 @@ impl Verdict {
 pub enum Class {
     Live,
     Armed,
+    /// Held open but carried across a restart: a keepalive drive between
+    /// turns re-attaches to the replacement (L8). Never blocks.
+    Survives,
 }
 
 /// One thing a restart would interrupt, named by actor and session.
@@ -125,6 +132,12 @@ impl Preflight {
             .filter(|i| i.class == Class::Armed)
     }
 
+    pub fn survives(&self) -> impl Iterator<Item = &Interruption> {
+        self.interruptions
+            .iter()
+            .filter(|i| i.class == Class::Survives)
+    }
+
     /// The stable `--json` form.
     pub fn to_json(&self) -> Value {
         let daemon = self.daemon.as_ref().map(|d| {
@@ -135,7 +148,7 @@ impl Preflight {
             .iter()
             .map(|i| {
                 json!({
-                    "class":match i.class {Class::Live => "live", Class::Armed => "armed"},
+                    "class":match i.class {Class::Live => "live", Class::Armed => "armed", Class::Survives => "survives"},
                     "kind":i.kind,
                     "actor":(!i.actor.is_empty()).then_some(&i.actor),
                     "session":i.session,
@@ -215,6 +228,10 @@ impl Preflight {
                 "armed only (no open connection; a call during the restart finds the daemon briefly gone):\n"
             };
             self.armed().for_each(|i| s += &line(i));
+        }
+        if self.survives().next().is_some() {
+            s += "survives the restart (re-attaches to the replacement between turns):\n";
+            self.survives().for_each(|i| s += &line(i));
         }
         let present: Vec<String> = self
             .present
@@ -311,21 +328,38 @@ fn read_occupancy(pre: &mut Preflight, r: &Value) {
             .filter(|s| !crate::keepalive::is_session(Some(s)))
             .collect()
     };
+    // A keepalive drive outlives a restart and re-attaches (L8); only a turn
+    // it is running now is cut off. A live keepalive with a recorded pid and
+    // no running turn survives, with its drive and stream. One still
+    // starting (no pid yet) cannot be re-adopted, so it stays live.
+    let controllers = items("controllers");
+    let surviving: Vec<String> = items("keepalives")
+        .iter()
+        .filter(|k| k["live"] == true && k["pid"].is_i64())
+        .map(|k| text(&k["agent"]))
+        .filter(|agent| {
+            !controllers
+                .iter()
+                .any(|c| c["agent"] == agent.as_str() && c["state"] == "running")
+        })
+        .collect();
+    let survives = |agent: &str| surviving.iter().any(|a| a == agent);
     for c in items("long_lived") {
         let actor = text(&c["actor"]);
+        let keepalive = c["keepalive"] == true;
         pre.interruptions.push(Interruption {
-            class: Class::Live,
+            class: if keepalive && survives(&actor) {
+                Class::Survives
+            } else {
+                Class::Live
+            },
             kind: "connection",
             session: session(&c["session"]),
             present_sessions: Vec::new(),
             detail: format!(
                 "open {} connection{}",
                 c["op"].as_str().unwrap_or("?"),
-                if c["keepalive"] == true {
-                    " (keepalive drive)"
-                } else {
-                    ""
-                }
+                if keepalive { " (keepalive drive)" } else { "" }
             ),
             actor,
         });
@@ -341,18 +375,24 @@ fn read_occupancy(pre: &mut Preflight, r: &Value) {
             actor,
         });
     }
-    for c in items("controllers") {
+    for c in &controllers {
         let actor = text(&c["agent"]);
+        let state = text(&c["state"]);
+        let between_turns = state != "running" && survives(&actor);
         pre.interruptions.push(Interruption {
-            class: Class::Live,
+            class: if between_turns {
+                Class::Survives
+            } else {
+                Class::Live
+            },
             kind: "drive",
             session: None,
             present_sessions: present_of(&actor),
-            detail: format!(
-                "live drive, {} (run {})",
-                text(&c["state"]),
-                text(&c["run_id"])
-            ),
+            detail: if between_turns {
+                format!("keepalive drive between turns (run {})", text(&c["run_id"]))
+            } else {
+                format!("live drive, {state} (run {})", text(&c["run_id"]))
+            },
             actor,
         });
     }
@@ -360,27 +400,38 @@ fn read_occupancy(pre: &mut Preflight, r: &Value) {
         .into_iter()
         .filter(|k| k["live"] == true)
     {
+        let actor = text(&k["agent"]);
+        let between_turns = survives(&actor);
         pre.interruptions.push(Interruption {
-            class: Class::Live,
+            class: if between_turns {
+                Class::Survives
+            } else {
+                Class::Live
+            },
             kind: "keepalive",
-            actor: text(&k["agent"]),
             session: session(&k["session"]),
             present_sessions: Vec::new(),
             detail: match k["pid"].as_i64() {
-                Some(pid) => format!("keepalive drive process (pid {pid})"),
+                Some(pid) if between_turns => {
+                    format!("keepalive drive process (pid {pid}), not mid-turn")
+                }
+                Some(pid) => format!("keepalive drive process (pid {pid}), mid-turn"),
                 None => "keepalive drive starting".into(),
             },
+            actor,
         });
     }
-    // A wait row whose own connection or keepalive is live is that same
+    // A wait row whose own connection or keepalive is open is that same
     // holder; only the rest are armed state with nothing open behind them.
+    // A surviving keepalive's own waits resume with it.
     for w in items("waits") {
         let key = (text(&w["agent"]), session(&w["session"]));
         let held = pre
             .interruptions
             .iter()
-            .any(|i| i.class == Class::Live && (&i.actor, &i.session) == (&key.0, &key.1));
-        if held {
+            .any(|i| i.class != Class::Armed && (&i.actor, &i.session) == (&key.0, &key.1));
+        let keepalive_wait = crate::keepalive::is_session(key.1.as_deref()) && survives(&key.0);
+        if held || keepalive_wait {
             continue;
         }
         pre.interruptions.push(Interruption {
@@ -484,4 +535,523 @@ fn read_agents(pre: &mut Preflight, ping: &Value, r: &Value) {
             }
         }
     }
+}
+
+/// `<home>/daemon.restarting`: a restart is in progress on this home. Written
+/// when a daemon accepts a restart (and by `fray restart` itself, for old
+/// daemons that do not write it); removed by the replacement once it has
+/// bound its socket. While it is fresh, a client whose connect finds no
+/// daemon treats that like a `restarting` refusal and waits for the
+/// replacement within its own budget, instead of failing in the gap.
+pub const MARKER: &str = "daemon.restarting";
+/// A marker older than this is ignored: its restart failed or was abandoned.
+pub const MARKER_FRESH_MS: i64 = 120_000;
+
+/// Writes the marker atomically. Advisory: callers report a failure and go on.
+pub fn write_marker(home: &Path, reason: &str) -> std::io::Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let path = home.join(MARKER);
+    let temp = home.join(format!(".{MARKER}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)?;
+        let body = json!({"reason":reason,"pid":std::process::id(),"written_ms":now_ms()});
+        file.write_all(format!("{body}\n").as_bytes())?;
+        std::fs::rename(&temp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// The reason of a fresh marker on `home`, if there is one.
+pub fn marker(home: &Path) -> Option<String> {
+    let body: Value = serde_json::from_slice(&std::fs::read(home.join(MARKER)).ok()?).ok()?;
+    let written = body["written_ms"].as_i64()?;
+    let age = now_ms() - written;
+    ((0..MARKER_FRESH_MS).contains(&age)).then(|| body["reason"].as_str().unwrap_or("").to_owned())
+}
+
+pub fn clear_marker(home: &Path) {
+    let _ = std::fs::remove_file(home.join(MARKER));
+}
+
+/// What `fray restart` (without `--dry-run`) may do.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// Proceed although the preflight is `busy` (or `armed`).
+    pub force: bool,
+    /// Proceed although the preflight is `armed`.
+    pub allow_armed: bool,
+    /// Restart a daemon without the `announce` capability, with no notice.
+    pub no_announce: bool,
+    /// The notice's reason. Default: `upgrade to <build>`.
+    pub reason: Option<String>,
+    /// The binary to start. Default: the one running this command.
+    pub exe: Option<PathBuf>,
+    /// How long the old daemon may drain in-flight requests (at most 10 s).
+    pub grace_ms: Option<u64>,
+    /// Start the replacement with `--normal`. Default: the old daemon's
+    /// durability from its registry record, else FULL.
+    pub normal: Option<bool>,
+    /// Who asked: the `--as` identity, else empty with `requested_by`.
+    pub actor: String,
+    pub requested_by: Option<String>,
+}
+
+/// How a restart that did not fail ended.
+pub enum Outcome {
+    /// The preflight refused (busy or armed); nothing was changed.
+    Refused(Preflight),
+    /// Restarted (or, with no daemon running, started). The `--json` form.
+    Done(Value),
+}
+
+impl Outcome {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Refused(pre) => pre.verdict.exit_code(),
+            Self::Done(_) => 0,
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        match self {
+            Self::Refused(pre) => json!({
+                "home":pre.home,
+                "action":"refused",
+                "verdict":pre.verdict.as_str(),
+                "exit_code":pre.verdict.exit_code(),
+                "hint":refusal_hint(pre.verdict),
+                "preflight":pre.to_json(),
+            }),
+            Self::Done(v) => v.clone(),
+        }
+    }
+
+    pub fn text(&self) -> String {
+        match self {
+            Self::Refused(pre) => format!("{}refused: {}\n", pre.text(), refusal_hint(pre.verdict)),
+            Self::Done(v) => done_text(v),
+        }
+    }
+}
+
+fn refusal_hint(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Busy => "the daemon is busy; nothing was changed. Rerun with --force to interrupt the holders above (waits and watches reconnect to the replacement)",
+        _ => "only armed waits; nothing was changed. Rerun with --allow-armed to accept a short gap for those agents",
+    }
+}
+
+fn done_text(v: &Value) -> String {
+    let side = |d: &Value| {
+        if d.is_null() {
+            "none".to_owned()
+        } else {
+            format!(
+                "build {} pid {}",
+                d["build"].as_str().unwrap_or("?"),
+                d["pid"].as_u64().map_or("?".into(), |p| p.to_string())
+            )
+        }
+    };
+    let mut s = format!(
+        "{} {}\n",
+        v["action"].as_str().unwrap_or("?"),
+        v["home"].as_str().unwrap_or("?")
+    );
+    if let Some(label) = v["degraded"].as_str() {
+        s += &format!("DEGRADED preflight: {label}\n");
+    }
+    s += &format!(
+        "binary: {} ({}, build {})\n",
+        v["exe"]["path"].as_str().unwrap_or("?"),
+        v["exe"]["source"].as_str().unwrap_or("?"),
+        v["exe"]["build"].as_str().unwrap_or("?")
+    );
+    s += &format!("before: {}\n", side(&v["before"]));
+    s += &format!("after:  {}\n", side(&v["after"]));
+    let card = |c: &Value| c.as_i64().map_or("none".to_owned(), |id| format!("#{id}"));
+    match v["announce"]["skipped"].as_str() {
+        Some(why) => s += &format!("announcement: none ({why})\n"),
+        None => {
+            s += &format!(
+                "announcement: restart {}, restarted {}\n",
+                card(&v["announce"]["restart"]),
+                card(&v["announce"]["restarted"])
+            )
+        }
+    }
+    for i in v["interrupted"].as_array().into_iter().flatten() {
+        s += &format!(
+            "interrupted: {} ({}): {}\n",
+            i["actor"].as_str().unwrap_or("(unnamed)"),
+            i["session"].as_str().unwrap_or("no session"),
+            i["detail"].as_str().unwrap_or("")
+        );
+    }
+    for i in v["survived"].as_array().into_iter().flatten() {
+        s += &format!(
+            "carried over: {}: {}\n",
+            i["actor"].as_str().unwrap_or("?"),
+            i["detail"].as_str().unwrap_or("")
+        );
+    }
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        s += &format!("warning: {}\n", w.as_str().unwrap_or(""));
+    }
+    s += &format!("duration: {}ms\n", v["duration_ms"]);
+    s
+}
+
+fn has(ping: &Value, capability: &str) -> bool {
+    ping["capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|c| c == capability))
+}
+
+/// The build a `fray` binary reports: `fray <version> (<build>)`.
+pub fn exe_build(exe: &Path) -> Result<String> {
+    let same = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .is_ok_and(|own| std::fs::canonicalize(exe).is_ok_and(|exe| exe == own));
+    if same {
+        return Ok(BUILD.to_owned());
+    }
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            Error::new(
+                "exe_build",
+                format!("cannot run {} --version: {e}", exe.display()),
+            )
+        })?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let build = text
+        .trim()
+        .rsplit_once('(')
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .filter(|b| !b.is_empty() && out.status.success());
+    build.map(str::to_owned).ok_or_else(|| {
+        Error::new(
+            "exe_build",
+            format!(
+                "{} --version did not report a build (`fray <version> (<build>)`): {:?}",
+                exe.display(),
+                text.trim()
+            ),
+        )
+    })
+}
+
+/// The store identity: from a ping when the daemon reports it, else read
+/// from the home's database without a daemon.
+fn store_id(home: &Path, ping: Option<&Value>) -> Option<String> {
+    if let Some(id) = ping.and_then(|p| p["store_id"].as_str()) {
+        return Some(id.to_owned());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        home.join("state.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
+    conn.query_row("SELECT value FROM meta WHERE key='store_id'", [], |r| {
+        r.get(0)
+    })
+    .ok()
+}
+
+fn brief(ping: &Value) -> Value {
+    json!({"pid":ping["pid"],"build":ping["build"],"version":ping["version"],"protocol_version":ping["protocol_version"]})
+}
+
+fn listing(items: Vec<&Interruption>) -> Vec<Value> {
+    items
+        .into_iter()
+        .map(|i| {
+            json!({"kind":i.kind,"actor":(!i.actor.is_empty()).then_some(&i.actor),
+                "session":i.session,"present_sessions":i.present_sessions,"detail":i.detail})
+        })
+        .collect()
+}
+
+/// Post a maintenance notice as `fray`; the card id.
+fn announce(home: &Path, opts: &Options, args: Value) -> Result<i64> {
+    let mut args = args;
+    if let Some(user) = &opts.requested_by {
+        args["requested_by"] = json!(user);
+    }
+    let mut req = Request::new("announce", &opts.actor, args);
+    req.key = Some(random_key()?);
+    let v = crate::client::rpc(home, &req, 10)?;
+    v["card"]["id"]
+        .as_i64()
+        .ok_or_else(|| Error::new("protocol", format!("announce returned no card: {v}")))
+}
+
+/// `fray restart`: preflight, announce, drain, start, verify (L9).
+///
+/// Refuses a `busy` daemon without `force` and an `armed` one without
+/// `allow_armed` (or `force`), changing nothing. An old daemon read in
+/// degraded mode proceeds with the label. With no daemon running, it only
+/// starts one. Any failure before the shutdown leaves the daemon running;
+/// a failed announcement never leads to a restart.
+pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
+    let started = std::time::Instant::now();
+    let home = &std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let (exe, exe_source) = match &opts.exe {
+        Some(exe) => (
+            std::fs::canonicalize(exe)
+                .map_err(|e| Error::invalid(format!("--exe {}: {e}", exe.display())))?,
+            "--exe",
+        ),
+        None => (std::env::current_exe()?, "current_exe"),
+    };
+    let build = exe_build(&exe)?;
+    let pre = preflight(home)?;
+    let blocked = match pre.verdict {
+        Verdict::Busy => !opts.force,
+        Verdict::Armed => !(opts.force || opts.allow_armed),
+        _ => false,
+    };
+    if blocked {
+        return Ok(Outcome::Refused(pre));
+    }
+    if pre.degraded {
+        eprintln!("fray restart: DEGRADED preflight: {DEGRADED}");
+    }
+    let log = home.join("daemon.log");
+    let mut warnings: Vec<String> = Vec::new();
+    let record = crate::registry::state_dir()
+        .ok()
+        .map(|dir| crate::registry::record_path(&dir, home))
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<crate::registry::Record>(&bytes).ok());
+    let mut out = json!({
+        "home":home,
+        "verdict":pre.verdict.as_str(),
+        "degraded":pre.degraded.then_some(DEGRADED),
+        "forced":opts.force && pre.verdict == Verdict::Busy,
+        "exe":{"path":exe,"source":exe_source,"build":build},
+        "log":log,
+    });
+    let Some(ping) = pre.daemon.clone() else {
+        // Nothing to stop or announce to: start one.
+        let normal = opts.normal.unwrap_or(false);
+        crate::client::start_exe(home, normal, &exe, std::time::Duration::from_secs(10), true)?;
+        let after = verify(home, &build, None, None, &log)?;
+        out["action"] = json!("started");
+        out["before"] = Value::Null;
+        out["after"] = brief(&after);
+        out["store_id"] = json!(store_id(home, Some(&after)));
+        out["announce"] =
+            json!({"restart":null,"restarted":null,"skipped":"no daemon was running"});
+        out["interrupted"] = json!([]);
+        out["survived"] = json!([]);
+        out["warnings"] = json!(warnings);
+        out["duration_ms"] = json!(started.elapsed().as_millis() as u64);
+        return Ok(Outcome::Done(out));
+    };
+    let from_build = ping["build"].as_str().unwrap_or("unknown").to_owned();
+    let reason = opts
+        .reason
+        .clone()
+        .unwrap_or_else(|| format!("upgrade to {build}"));
+    let before_store = store_id(home, Some(&ping));
+    // The old daemon's pid: its ping, else its registry record, else the
+    // process table. Without one, only the socket shows it has gone.
+    let (old_pid, pid_source) = if let Some(pid) = ping["pid"].as_u64() {
+        (Some(pid), "ping")
+    } else if let Some(r) = record.as_ref().filter(|r| r.build == from_build) {
+        (Some(u64::from(r.pid)), "registry")
+    } else {
+        match crate::daemons::serving_pids(home).as_slice() {
+            [pid] => (Some(u64::from(*pid)), "process_table"),
+            _ => (None, "none"),
+        }
+    };
+    let normal = opts.normal.unwrap_or_else(|| {
+        record
+            .as_ref()
+            .is_some_and(|r| Some(u64::from(r.pid)) == old_pid && r.durability == "normal")
+    });
+    // Announce first. Without a posted notice, nothing restarts.
+    let mut notice = json!({"restart":null,"restarted":null,"skipped":null});
+    let announcing = !opts.no_announce;
+    if opts.no_announce {
+        notice["skipped"] = json!("--no-announce");
+    } else if !has(&ping, "announce") {
+        return Err(Error::new(
+            "announce_unsupported",
+            format!("daemon build {from_build} cannot post a maintenance notice (no `announce` capability); nothing was changed. Rerun with --no-announce to restart it without one"),
+        )
+        .with_details(pre.to_json()));
+    } else {
+        let args =
+            json!({"action":"restart","reason":reason,"from_build":from_build,"to_build":build});
+        let id = announce(home, opts, args).map_err(|e| {
+            let message = format!(
+                "the restart notice could not be posted ({}: {}); the daemon was not restarted",
+                e.code, e.message
+            );
+            Error::new("announce_failed", message)
+                .with_details(json!({"cause":e,"preflight":pre.to_json()}))
+        })?;
+        notice["restart"] = json!(id);
+    }
+    // Drain: the old daemon tells long-lived clients to reconnect and lets
+    // in-flight requests finish; an old one without that just stops.
+    let graceful = has(&ping, "graceful_restart");
+    if let Err(e) = write_marker(home, &reason) {
+        warnings.push(format!("restart marker not written: {e}"));
+    }
+    let mut args = json!({});
+    if graceful {
+        args = json!({"restart":true,"reason":reason});
+        if let Some(grace) = opts.grace_ms {
+            args["grace_ms"] = json!(grace);
+        }
+    }
+    let stop_failed = |e: Error, what: &str| {
+        clear_marker(home);
+        let mut details = json!({"announce":notice});
+        details["cause"] = serde_json::to_value(&e).unwrap_or(Value::Null);
+        Error::new(&e.code, format!("{what}: {}", e.message)).with_details(details)
+    };
+    let reply = crate::client::rpc(home, &Request::new("shutdown", "", args), 10)
+        .map_err(|e| stop_failed(e, "shutdown was not accepted; nothing restarted"))?;
+    let old_pid = reply["pid"].as_u64().or(old_pid);
+    let grace = reply["grace_ms"].as_u64().unwrap_or(0);
+    let window = std::time::Duration::from_millis(grace + 5000);
+    let stopping = std::time::Instant::now();
+    let gone = gone(home, window)
+        && old_pid
+            .and_then(|p| u32::try_from(p).ok())
+            .is_none_or(|pid| {
+                crate::client::await_exit(pid, window.saturating_sub(stopping.elapsed()))
+            });
+    if !gone {
+        return Err(stop_failed(
+            Error::new(
+                "stop_incomplete",
+                match old_pid {
+                    Some(pid) => format!("process {pid} had not exited within {}ms (ps -p {pid}); start a replacement only once it has", window.as_millis()),
+                    None => format!("the daemon still answered after {}ms", window.as_millis()),
+                },
+            ),
+            "the old daemon did not stop; nothing started",
+        ));
+    }
+    let drained_ms = stopping.elapsed().as_millis() as u64;
+    if old_pid.is_none() {
+        warnings.push("the old daemon reported no pid and none was found; its exit was inferred from its socket, and the start retries until it releases the lock".into());
+    }
+    let start_window = std::time::Duration::from_secs(10);
+    if let Err(e) = crate::client::start_exe(home, normal, &exe, start_window, true) {
+        clear_marker(home);
+        return Err(Error::new(
+            "startup",
+            format!("the old daemon stopped but no replacement answered ({}); the home has no daemon. Inspect {}", e.message, log.display()),
+        )
+        .with_details(json!({"announce":notice,"exe":exe,"cause":e})));
+    }
+    // An exe of an older build does not clear the marker itself.
+    clear_marker(home);
+    let after = verify(home, &build, before_store.as_deref(), old_pid, &log)?;
+    if announcing {
+        if has(&after, "announce") {
+            let args = json!({"action":"restarted","reason":reason,"from_build":from_build,"to_build":after["build"]});
+            match announce(home, opts, args) {
+                Ok(id) => notice["restarted"] = json!(id),
+                Err(e) => warnings.push(format!(
+                    "the restarted notice could not be posted ({}: {})",
+                    e.code, e.message
+                )),
+            }
+        } else {
+            warnings.push("the new daemon cannot post the restarted notice (no `announce`)".into());
+        }
+    }
+    let interrupted: Vec<&Interruption> = pre
+        .interruptions
+        .iter()
+        .filter(|i| i.class != Class::Survives)
+        .collect();
+    out["action"] = json!("restarted");
+    out["before"] = json!({"pid":old_pid,"pid_source":pid_source,"build":from_build,"version":ping["version"],"protocol_version":ping["protocol_version"]});
+    out["after"] = brief(&after);
+    out["store_id"] = json!(before_store);
+    out["stop"] = json!({"mode":if graceful {"graceful"} else {"plain"},"grace_ms":grace,"drained_ms":drained_ms});
+    out["durability"] = json!(if normal { "normal" } else { "full" });
+    out["announce"] = notice;
+    out["interrupted"] = json!(listing(interrupted));
+    out["survived"] = json!(listing(pre.survives().collect()));
+    out["warnings"] = json!(warnings);
+    out["duration_ms"] = json!(started.elapsed().as_millis() as u64);
+    Ok(Outcome::Done(out))
+}
+
+/// Waits until nothing answers on the home's socket.
+fn gone(home: &Path, window: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        match crate::client::probe(home, &Request::new("ping", "", json!({})), 1) {
+            Err(e) if e.code == "unavailable" => return true,
+            _ if std::time::Instant::now() >= deadline => return false,
+            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+}
+
+/// The replacement answers with the expected build, serves the same store,
+/// and is not the old process. Otherwise a loud failure naming the log.
+fn verify(
+    home: &Path,
+    build: &str,
+    store: Option<&str>,
+    old_pid: Option<u64>,
+    log: &Path,
+) -> Result<Value> {
+    let after = crate::client::rpc(home, &Request::new("ping", "", json!({})), 5)?;
+    let mut problems = Vec::new();
+    if after["build"].as_str() != Some(build) {
+        problems.push(format!(
+            "it runs build {} but {build} was started",
+            after["build"].as_str().unwrap_or("unknown")
+        ));
+    }
+    let after_store = store_id(home, Some(&after));
+    if let Some(store) = store {
+        if after_store.as_deref() != Some(store) {
+            problems.push(format!(
+                "it serves store {} but the old daemon served {store}",
+                after_store.as_deref().unwrap_or("unknown")
+            ));
+        }
+    }
+    if old_pid.is_some() && after["pid"].as_u64() == old_pid {
+        problems.push("it is still the old process".into());
+    }
+    if problems.is_empty() {
+        return Ok(after);
+    }
+    Err(Error::new(
+        "restart_unverified",
+        format!(
+            "the daemon now answering on {} is not the expected replacement: {}. Inspect {}",
+            home.display(),
+            problems.join("; "),
+            log.display()
+        ),
+    )
+    .with_details(json!({"expected_build":build,"expected_store_id":store,"after":brief(&after),"after_store_id":after_store,"log":log})))
 }

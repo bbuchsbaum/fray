@@ -255,7 +255,13 @@ pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     loop {
         match rpc_mapped(home, &attempt, attempt_timeout) {
             Err(error) if !matches!(req.op.as_str(), "ping" | "shutdown") => {
-                let Some(reason) = restart_reason(&error) else {
+                // A connect that found no daemon while a restart marker is
+                // fresh is the gap between the old daemon and its replacement.
+                let Some(reason) = restart_reason(&error).or_else(|| {
+                    not_sent(&error)
+                        .then(|| crate::restart::marker(home))
+                        .flatten()
+                }) else {
                     return Err(error);
                 };
                 if !announced {
@@ -692,6 +698,25 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
     }
 }
 pub fn start(home: &Path, normal: bool) -> Result<Value> {
+    start_exe(
+        home,
+        normal,
+        &env::current_exe()?,
+        Duration::from_secs(5),
+        false,
+    )
+}
+/// Starts a daemon on `home` from the binary `exe`, waiting up to `window`
+/// for it to answer. With `respawn`, a daemon that exits before answering
+/// is started again until the window ends: during a restart, the old daemon
+/// may hold the lock a little longer than it took to stop answering.
+pub fn start_exe(
+    home: &Path,
+    normal: bool,
+    exe: &Path,
+    window: Duration,
+    respawn: bool,
+) -> Result<Value> {
     let home = initialize(home)?;
     let ping = Request::new("ping", "", json!({}));
     match rpc(&home, &ping, 1) {
@@ -707,22 +732,22 @@ pub fn start(home: &Path, normal: bool) -> Result<Value> {
         .append(true)
         .mode(0o600)
         .open(home.join("daemon.log"))?;
-    let mut command = Command::new("nohup");
-    command
-        .arg(env::current_exe()?)
-        .arg("--home")
-        .arg(&home)
-        .arg("serve");
-    if normal {
-        command.arg("--normal");
-    }
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .process_group(0)
-        .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let spawn = || -> Result<std::process::Child> {
+        let mut command = Command::new("nohup");
+        command.arg(exe).arg("--home").arg(&home).arg("serve");
+        if normal {
+            command.arg("--normal");
+        }
+        Ok(command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log.try_clone()?))
+            .process_group(0)
+            .spawn()?)
+    };
+    let mut child = spawn()?;
+    let deadline = Instant::now() + window;
+    let mut backoff = Duration::from_millis(100);
     loop {
         match rpc(&home, &ping, 1) {
             Ok(v) => {
@@ -743,7 +768,14 @@ pub fn start(home: &Path, normal: bool) -> Result<Value> {
             ));
         }
         // Competing starters are harmless: the daemon lock selects one winner.
-        let _ = child.try_wait();
+        if let Ok(Some(_)) = child.try_wait() {
+            if respawn {
+                thread::sleep(backoff.min(deadline.saturating_duration_since(Instant::now())));
+                backoff = (backoff * 2).min(Duration::from_millis(500));
+                child = spawn()?;
+                continue;
+            }
+        }
         thread::sleep(Duration::from_millis(25));
     }
 }

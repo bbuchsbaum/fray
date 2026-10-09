@@ -212,6 +212,8 @@ pub fn serve(home: &Path, normal: bool) -> Result<()> {
     fs::set_permissions(home.join("state.db"), fs::Permissions::from_mode(0o600))?;
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+    // This daemon answers now: clients need no longer wait out a restart.
+    crate::restart::clear_marker(&home);
     let registration = crate::registry::register(&home, normal);
     let shared = Arc::new(Shared {
         store: Mutex::new(store),
@@ -329,6 +331,42 @@ fn clone_for_client(stream: &UnixStream) -> Result<UnixStream> {
         )
     })
 }
+/// How often a connection between requests checks whether the daemon is
+/// stopping, and how long it may stay idle at all.
+const IDLE_POLL: Duration = Duration::from_millis(100);
+const IDLE_LIMIT: Duration = Duration::from_secs(30);
+/// Waits for the first bytes of the next request, or its end of stream:
+/// true. False once the daemon is stopping with nothing begun, so an idle
+/// connection never holds a drain open. Nothing is consumed while waiting.
+fn await_request(reader: &mut BufReader<UnixStream>, shared: &Shared) -> Result<bool> {
+    let deadline = Instant::now() + IDLE_LIMIT;
+    reader.get_ref().set_read_timeout(Some(IDLE_POLL))?;
+    let ready = loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            break false;
+        }
+        match reader.fill_buf() {
+            Ok(_) => break true,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::from(io::ErrorKind::TimedOut).into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(30)))?;
+    Ok(ready)
+}
 fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
@@ -344,6 +382,11 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
     // after the wait had replied. It begins the next frame.
     let mut carry = Vec::new();
     loop {
+        if carry.is_empty() && reader.buffer().is_empty() && !await_request(&mut reader, shared)? {
+            // Stopping, with no request begun on this connection: close it
+            // now rather than hold the drain for its whole grace.
+            return Ok(());
+        }
         let frame = if carry.is_empty() {
             read_frame(&mut reader, REQUEST_LIMIT)?
         } else {
@@ -511,6 +554,13 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
                     reply["grace_ms"] = json!(plan.grace.as_millis() as u64);
                     // Lets the requester confirm this process has exited.
                     reply["pid"] = json!(std::process::id());
+                    // Until a replacement binds, a client that cannot connect
+                    // waits for it (within its own budget) instead of failing.
+                    if let Some(home) = shared.socket.parent() {
+                        if let Err(e) = crate::restart::write_marker(home, reason) {
+                            eprintln!("restart marker not written: {e}");
+                        }
+                    }
                     eprintln!(
                         "restart requested ({reason}); draining for up to {}ms",
                         plan.grace.as_millis()

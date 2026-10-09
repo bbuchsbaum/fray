@@ -105,6 +105,24 @@ def alive(pid):
     return True
 
 
+class Detached:
+    """A daemon this test did not spawn, as far as Popen's poll and wait go."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def poll(self):
+        return None if alive(self.pid) else 0
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while alive(self.pid):
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired(str(self.pid), timeout)
+            time.sleep(0.02)
+        return 0
+
+
 class Keepalive(unittest.TestCase):
     def setUp(self):
         # Short paths: the socket lives under the repository's .fray.
@@ -861,6 +879,60 @@ class Keepalive(unittest.TestCase):
         self.assertEqual(status["state"], "keepalive")
         self.assertEqual(status["usage"]["input_tokens"], 10)
         self.assertEqual(len(self.calls()), 1, "the turn was not paid for twice")
+
+    def restart_cmd(self, *args):
+        # `fray restart` against this test's daemon, with its own registry.
+        result = subprocess.run(
+            [str(BINARY), "--home", self.home, "--json", "restart", *args],
+            env=dict(self.env, USER="tester", FRAY_STATE_DIR=str(self.root / "state")),
+            cwd=self.repo, text=True, capture_output=True, timeout=60,
+        )
+        return result.returncode, json.loads(result.stdout or "{}"), result.stderr
+
+    def test_fray_restart_carries_an_idle_keepalive_and_refuses_a_running_turn(self):
+        # L9 with L8: a keepalive drive between turns survives a restart, so it
+        # never blocks one; a turn it is running is live and does.
+        session = "claude:restart-cmd"
+        self.start("alice", session)
+        first = self.ask("alice", "Before fray restart")
+        self.await_reply(first, "alice")
+        pid = self.await_status(
+            "alice", lambda s: s["fork"] and self.pending("alice") == 0, "settled"
+        )["pid"]
+        self.mode("slow:3")
+        second = self.ask("alice", "During a running turn")
+        deadline = time.monotonic() + 10
+        while [second] not in [c["cards"] for c in self.calls()]:
+            self.assertLess(time.monotonic(), deadline, self.drive_log("alice"))
+            time.sleep(0.02)
+        code, refused, err = self.restart_cmd()
+        self.assertEqual(code, 3, f"{refused} {err}")
+        self.assertTrue(any(i["kind"] == "keepalive" and i["class"] == "live"
+                            for i in refused["preflight"]["interrupts"]), refused)
+        self.assertEqual(len(self.await_reply(second, "alice")), 1)
+        self.mode("answer")
+        self.await_status("alice", lambda s: self.pending("alice") == 0, "settled")
+        deadline = time.monotonic() + 10
+        while True:
+            code, report, err = self.restart_cmd("--dry-run")
+            if code == 0:
+                break
+            self.assertLess(time.monotonic(), deadline, f"{report} {err}")
+            time.sleep(0.1)
+        self.assertIn("survives", {i["class"] for i in report["interrupts"]}, report)
+        self.assertNotIn("live", {i["class"] for i in report["interrupts"]}, report)
+        code, done, err = self.restart_cmd("--reason", "keepalive check")
+        self.assertEqual(code, 0, f"{done} {err}")
+        self.assertEqual(done["verdict"], "idle", done)
+        self.assertEqual(done["interrupted"], [], done)
+        self.assertTrue(any(i["actor"] == "alice" for i in done["survived"]), done)
+        self.server.wait(timeout=15)
+        # The replacement is detached (started by `fray restart`).
+        self.server = Detached(done["after"]["pid"])
+        third = self.ask("alice", "After fray restart")
+        self.assertEqual(len(self.await_reply(third, "alice", timeout=20)), 1)
+        self.assertEqual(self.status("alice")["pid"], pid)
+        self.assertEqual([c["cards"] for c in self.calls()], [[first], [second], [third]])
 
     def test_a_sandboxed_daemon_refuses(self):
         self.shutdown()

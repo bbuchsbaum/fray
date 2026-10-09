@@ -324,6 +324,40 @@ fn scan(skip: &BTreeSet<PathBuf>, deadline: Instant) -> Result<Scan> {
     Ok(result)
 }
 
+/// This user's `fray ... --home <H> ... serve` processes whose home could be
+/// the canonical `home`, from the same `ps` listing as [`scan`] but without
+/// pinging anything. For `fray restart` on a daemon that reports no pid
+/// (0.2.1 and earlier) and has no registry record. A process whose home `ps`
+/// cannot show (`FRAY_HOME`, a relative `--home`) is not found.
+pub fn serving_pids(home: &Path) -> Vec<u32> {
+    let Ok(uid) = Command::new("id").arg("-u").output() else {
+        return vec![];
+    };
+    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
+    let Ok(out) = Command::new("ps")
+        .args(["-ww", "-x", "-U", &uid, "-o", "pid=,etime=,command="])
+        .output()
+    else {
+        return vec![];
+    };
+    let own = std::process::id();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(split_ps_line)
+        .filter(|(pid, _, _)| *pid != own)
+        .filter(|(_, _, command)| {
+            parse_serve(command, is_program).is_some_and(|serve| {
+                serve.homes.iter().any(|candidate| {
+                    let path = Path::new(candidate);
+                    path.is_absolute()
+                        && fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) == home
+                })
+            })
+        })
+        .map(|(pid, _, _)| pid)
+        .collect()
+}
+
 /// `<pid> <etime> <command>` from one `ps` row.
 fn split_ps_line(line: &str) -> Option<(u32, Option<i64>, &str)> {
     let line = line.trim_start();

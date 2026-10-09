@@ -233,13 +233,41 @@ enum Cmd {
     /// Who a daemon restart would interrupt: open waits, listeners, drives,
     /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
     Occupancy,
-    /// Restart this home's daemon. Only --dry-run is available yet: who a
-    /// restart would interrupt, read-only. Exit 0 idle, 3 busy, 5 only armed
-    /// waits (or, on an old daemon, recent activity), 6 an old daemon with
-    /// nothing live visible, 7 no daemon running.
+    /// Restart this home's daemon: preflight, announce, drain, start, verify.
+    /// Refuses a busy daemon (exit 3) unless --force, and one with only armed
+    /// waits (exit 5) unless --allow-armed. A keepalive drive between turns
+    /// survives and does not block. An old daemon (no `occupancy`) proceeds
+    /// with a degraded warning; with no daemon running, one is started.
+    /// Exit 0 restarted or started, 1 failed (the error names the step),
+    /// 3 busy, 5 armed. --dry-run only reads: exit 0 idle, 3 busy, 5 armed,
+    /// 6 an old daemon with nothing live visible, 7 no daemon running.
     Restart {
         #[arg(long)]
         dry_run: bool,
+        /// Restart even when busy, interrupting the named holders. Waits and
+        /// watches reconnect to the replacement.
+        #[arg(long)]
+        force: bool,
+        /// Restart even with armed waits (agents between two wait calls).
+        #[arg(long)]
+        allow_armed: bool,
+        /// Restart without posting maintenance notices. Required for a daemon
+        /// that cannot post them (no `announce` capability).
+        #[arg(long)]
+        no_announce: bool,
+        /// The notice's reason. Default: "upgrade to <build>".
+        #[arg(long)]
+        reason: Option<String>,
+        /// The binary to start. Default: this `fray`.
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        /// How long the old daemon may drain in-flight requests (at most 10000).
+        #[arg(long)]
+        grace_ms: Option<u64>,
+        /// Start the replacement with NORMAL durability. Default: the old
+        /// daemon's, from its registry record, else FULL.
+        #[arg(long)]
+        normal: bool,
     },
     /// Register this terminal identity and read a bounded current-state snapshot.
     Join {
@@ -338,7 +366,7 @@ enum Cmd {
     /// Post a daemon maintenance notice to everyone, authored by `fray`.
     /// Needs no join; records --as (or $USER) as the requester.
     Announce {
-        #[arg(long, value_parser = ["restart", "stop"])]
+        #[arg(long, value_parser = ["restart", "stop", "restarted"])]
         action: String,
         #[arg(long)]
         reason: String,
@@ -3436,13 +3464,49 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Cmd::Occupancy => ("occupancy", json!({})),
-        Cmd::Restart { dry_run: false } => {
-            return Err(Error::new(
-                "not_implemented",
-                "fray restart without --dry-run is not implemented yet; check with `fray restart --dry-run`, then use `fray stop --restart` and `fray start`",
-            ))
+        Cmd::Restart {
+            dry_run: false,
+            force,
+            allow_armed,
+            no_announce,
+            reason,
+            exe,
+            grace_ms,
+            normal,
+        } => {
+            let requested_by = if actor.is_empty() && !no_announce {
+                let user = std::env::var("USER").unwrap_or_default();
+                if user.is_empty() {
+                    return Err(Error::invalid(
+                        "fray restart needs --as NAME or $USER to record who asked for the notice",
+                    ));
+                }
+                Some(user)
+            } else {
+                None
+            };
+            let options = fray::restart::Options {
+                force,
+                allow_armed,
+                no_announce,
+                reason,
+                exe,
+                grace_ms,
+                normal: normal.then_some(true),
+                actor: actor.clone(),
+                requested_by,
+            };
+            let outcome = fray::restart::run(&home, &options)?;
+            if cli.json {
+                output(&outcome.to_json(), true)?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(outcome.text().as_bytes())?;
+                stdout.flush()?;
+            }
+            std::process::exit(outcome.exit_code());
         }
-        Cmd::Restart { dry_run: true } => {
+        Cmd::Restart { dry_run: true, .. } => {
             let preflight = fray::restart::preflight(&home)?;
             if cli.json {
                 output(&preflight.to_json(), true)?;
