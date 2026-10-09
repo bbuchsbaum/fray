@@ -1480,8 +1480,24 @@ impl Run<'_> {
             );
             return Ok(());
         }
+        // Without its binding the handoff could not be applied: stay here.
+        let (session, home) = match (fray::session::current(), fs::canonicalize(self.home)) {
+            (Ok(session), Ok(home)) => (session, home),
+            (session, home) => {
+                let why = session
+                    .err()
+                    .map(|e| e.to_string())
+                    .or_else(|| home.err().map(|e| e.to_string()))
+                    .unwrap_or_default();
+                eprintln!(
+                    "fray drive: {}",
+                    json!({"run_id":self.id,"upgrade_skipped":{"exe":exe,"reason":format!("handoff binding unavailable: {why}; staying on this binary")}})
+                );
+                return Ok(());
+            }
+        };
         let handoff = json!({"run_id":self.id,"actor":self.actor,
-            "session":fray::session::current()?,"home":fs::canonicalize(self.home)?,
+            "session":session,"home":home,
             "detail":self.detail.borrow().clone(),"keep":keep.handoff(),"upgraded_for":target});
         eprintln!(
             "fray drive: {}",
@@ -1933,8 +1949,15 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         ),
         patient: Cell::new(options.keepalive),
     };
+    // Its first state sends this image's detail. A lease that lapsed since
+    // the check above begins the run again, as any lapsed run would.
+    let resumed = resumed
+        && match runner.state("waiting", false, None) {
+            Ok(()) => true,
+            Err(e) if e.code == "controller_lost" => false,
+            Err(e) => return Err(e),
+        };
     if resumed {
-        runner.state("waiting", false, None)?;
         eprintln!(
             "fray drive: {}",
             json!({"run_id":runner.id,"upgraded":{"build":BUILD,"exe":runner.detail.borrow()["exe"]}})
