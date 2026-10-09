@@ -16,16 +16,15 @@
 //!
 //! Each result's `outcome` is one of `restarted`, `started` (its daemon had
 //! gone by the time it was reached), `skipped_busy`, `skipped_armed`,
-//! `skipped_state` or `failed`. A dry run reads each preflight instead and
-//! reports `would_restart`, `would_start` or `would_fail` (a daemon that
-//! cannot post the notice, without `--no-announce`) in place of the first
-//! three, and the same skips.
+//! `skipped_unannounced` (a daemon that predates restart notices, without
+//! `--no-announce`), `skipped_state` or `failed`. A dry run reads each
+//! preflight instead and reports `would_restart` or `would_start` in place
+//! of the first two, and the same skips.
 //!
 //! # Exit status
 //!
 //! 0 when every stale daemon was restarted (or would be), or none is stale;
-//! 1 when any failed (or would fail); otherwise 4, when at least one was
-//! skipped. A dead record (pruned by the listing) is listed but does not
+//! 1 when any failed; otherwise 4, when at least one was skipped. A dead record (pruned by the listing) is listed but does not
 //! count as a skip: there was no daemon to restart.
 //!
 //! # `--json`
@@ -33,7 +32,8 @@
 //! `{client_build, target_build, exe, dry_run, scan, results, counts,
 //! unconfirmed, exit_code}`. Each result is `{home, outcome, registered,
 //! state, build, pid}` plus, by outcome: `restart` (the single-home restart's
-//! JSON), `refusal` (its refusal JSON) with `holders` and `hint`, `reason`
+//! JSON), `refusal` (its refusal JSON) with `holders` and `hint`, `hint`
+//! (and in a real run the refusing `error`) for an unannounced skip, `reason`
 //! for a state skip, `error` for a failure, and `preflight` in a dry run.
 //! `counts` has every outcome above as a key.
 use crate::{
@@ -50,10 +50,12 @@ const OUTCOMES: [&str; 9] = [
     "would_start",
     "skipped_busy",
     "skipped_armed",
+    "skipped_unannounced",
     "skipped_state",
-    "would_fail",
     "failed",
 ];
+
+const UNANNOUNCED: &str = "This daemon predates restart notices; rerun with --no-announce \u{2014} the replacement will post a `restarted` notice.";
 
 /// Restart (or with `dry_run`, preflight) every stale daemon registered under
 /// `state_dir`, in home order. With `progress`, names each home on stderr
@@ -98,10 +100,10 @@ pub fn run(
                 Ok(pre) => {
                     let outcome = predict(&pre, opts);
                     result["outcome"] = json!(outcome);
-                    if outcome.starts_with("skipped") {
+                    if outcome == "skipped_unannounced" {
+                        result["hint"] = json!(UNANNOUNCED);
+                    } else if outcome.starts_with("skipped") {
                         refused(&mut result, &pre);
-                    } else if outcome == "would_fail" {
-                        result["error"] = json!(announce_unsupported(&pre));
                     }
                     result["preflight"] = pre.to_json();
                 }
@@ -124,6 +126,12 @@ pub fn run(
                     });
                     refused(&mut result, &pre);
                     result["refusal"] = Outcome::Refused(pre).to_json();
+                }
+                // Refused before anything changed: a skip, not a failure.
+                Err(e) if e.code == "announce_unsupported" => {
+                    result["outcome"] = json!("skipped_unannounced");
+                    result["hint"] = json!(UNANNOUNCED);
+                    result["error"] = json!(e);
                 }
                 Err(e) => {
                     result["outcome"] = json!("failed");
@@ -163,22 +171,10 @@ fn predict(pre: &Preflight, opts: &Options) -> &'static str {
                 .as_ref()
                 .is_some_and(|ping| restart::has(ping, "announce")) =>
         {
-            "would_fail"
+            "skipped_unannounced"
         }
         _ => "would_restart",
     }
-}
-
-fn announce_unsupported(pre: &Preflight) -> Error {
-    let build = pre
-        .daemon
-        .as_ref()
-        .and_then(|d| d["build"].as_str())
-        .unwrap_or("unknown");
-    Error::new(
-        "announce_unsupported",
-        format!("daemon build {build} cannot post a maintenance notice (no `announce` capability); rerun with --no-announce to restart it without one"),
-    )
 }
 
 /// The holders and the hint of a skipped busy or armed home.
@@ -222,7 +218,7 @@ fn state_reason(state: &str, d: &Value) -> String {
 pub fn exit_code(report: &Value) -> i32 {
     let results = report["results"].as_array().map_or(&[][..], Vec::as_slice);
     let any = |f: &dyn Fn(&Value) -> bool| results.iter().any(f);
-    if any(&|r| matches!(r["outcome"].as_str(), Some("failed" | "would_fail"))) {
+    if any(&|r| r["outcome"] == "failed") {
         1
     } else if any(&|r| {
         r["outcome"]
@@ -329,6 +325,7 @@ fn detail(r: &Value) -> String {
         }
         "skipped_busy" => format!("holders: {}. {}", holders(), clean(&r["hint"])),
         "skipped_armed" => format!("armed: {}. {}", holders(), clean(&r["hint"])),
+        "skipped_unannounced" => format!("build {}. {}", clean(&r["build"]), clean(&r["hint"])),
         "skipped_state" => clean(&r["reason"]),
         _ => format!(
             "{}: {}",
@@ -394,7 +391,7 @@ mod tests {
             1
         );
         assert_eq!(exit_code(&report(&[("would_restart", "running")])), 0);
-        assert_eq!(exit_code(&report(&[("would_fail", "running")])), 1);
+        assert_eq!(exit_code(&report(&[("skipped_unannounced", "running")])), 4);
     }
 
     #[test]

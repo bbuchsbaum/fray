@@ -16,8 +16,11 @@ use fray::{
 };
 use serde_json::{json, Value};
 use std::{
-    io::Write,
-    os::unix::{fs::PermissionsExt, net::UnixStream},
+    io::{BufRead, BufReader, Write},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
     path::{Path, PathBuf},
     process::{Command, Output},
     thread,
@@ -397,6 +400,97 @@ fn armed_daemons_are_skipped_unless_allowed_and_never_forced_implicitly() {
     assert_eq!(ping(&home).unwrap()["build"], BUILD);
 }
 
+/// A registered daemon that predates restart notices: it answers `ping`
+/// (current protocol, no `announce`, no pid) and `agents` with nobody, and
+/// records every op it is sent. It is never asked to shut down here.
+fn unannounced_daemon(state: &Path, home: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+    let record = serde_json::to_value(Record {
+        home: home.into(),
+        socket: home.join("bus.sock"),
+        pid: std::process::id(),
+        version: "0.2.1".into(),
+        build: "0ld0ld0ld0ld".into(),
+        protocol_version: fray::model::PROTOCOL_VERSION,
+        exe: "/old/fray".into(),
+        started_ms: fray::model::now_ms() - 90_000,
+        durability: "full".into(),
+    })
+    .unwrap();
+    let path = registry::record_path(state, home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, record.to_string()).unwrap();
+    let listener = UnixListener::bind(home.join("bus.sock")).unwrap();
+    let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = ops.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let seen = seen.clone();
+            thread::spawn(move || {
+                let mut writer = stream.try_clone().unwrap();
+                for line in BufReader::new(stream).lines() {
+                    let Ok(line) = line else { return };
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    let op = req["op"].as_str().unwrap_or("").to_owned();
+                    seen.lock().unwrap().push(op.clone());
+                    let frame = match op.as_str() {
+                        "ping" => {
+                            json!({"ok":true,"data":{"version":"0.2.1","build":"0ld0ld0ld0ld",
+                            "protocol_version":fray::model::PROTOCOL_VERSION,"capabilities":["sessions","agents_all"],
+                            "capacity":{"clients":1,"long_lived":0},"cursor":0,"time_ms":1}})
+                        }
+                        "agents" => json!({"ok":true,"data":{"items":[],"more":false}}),
+                        other => {
+                            json!({"ok":false,"error":{"code":"invalid","message":format!("unknown operation: {other}")}})
+                        }
+                    };
+                    if writeln!(writer, "{frame}").is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    ops
+}
+
+#[test]
+fn a_daemon_without_restart_notices_is_skipped_not_failed() {
+    let mut s = Scratch::new();
+    let stale = s.stale_bin();
+    let old = s.home("old");
+    let idle = s.home("idle");
+    let ops = unannounced_daemon(&s.state, &old);
+    s.start(&stale, &idle);
+    let (code, report) = s.all_stale(&["--dry-run"]);
+    assert_eq!(code, 4, "{report}");
+    let r = result(&report, &old);
+    assert_eq!(r["outcome"], "skipped_unannounced", "{r}");
+    assert!(r["hint"].as_str().unwrap().contains("--no-announce"), "{r}");
+    assert_eq!(result(&report, &idle)["outcome"], "would_restart");
+    assert_eq!(report["counts"]["skipped_unannounced"], 1);
+    // The batch goes on past it: the other home restarts, this one is untouched.
+    let (code, report) = s.all_stale(&[]);
+    assert_eq!(code, 4, "a skip, not a failure: {report}");
+    let r = result(&report, &old);
+    assert_eq!(r["outcome"], "skipped_unannounced", "{r}");
+    assert_eq!(r["error"]["code"], "announce_unsupported", "{r}");
+    assert!(r["hint"]
+        .as_str()
+        .unwrap()
+        .contains("the replacement will post a `restarted` notice"));
+    assert_eq!(result(&report, &idle)["outcome"], "restarted");
+    assert_eq!(report["counts"]["failed"], 0);
+    let sent = ops.lock().unwrap().clone();
+    assert!(
+        !sent.iter().any(|op| op == "shutdown" || op == "announce"),
+        "{sent:?}"
+    );
+    let (code, shown) = s.all_stale_text(&["--dry-run"]);
+    assert_eq!(code, 4);
+    assert!(shown.contains("skipped-unannounced"), "{shown}");
+    assert!(shown.contains("--no-announce"), "{shown}");
+}
+
 #[test]
 fn a_failed_restart_is_named_with_its_step_and_exits_1() {
     let mut s = Scratch::new();
@@ -493,9 +587,18 @@ fn real_old_daemons_when_one_is_given() {
         if announces {
             assert_eq!(r["outcome"], "would_restart", "{r}");
         } else {
-            assert_eq!(r["outcome"], "would_fail", "{r}");
+            assert_eq!(r["outcome"], "skipped_unannounced", "{r}");
+            assert!(r["hint"].as_str().unwrap().contains("--no-announce"), "{r}");
+            assert_eq!(code, 4, "{report}");
+        }
+    }
+    if !announces {
+        let (code, report) = s.all_stale(&["--scan"]);
+        assert_eq!(code, 4, "{report}");
+        for home in &homes {
+            let r = result(&report, home);
+            assert_eq!(r["outcome"], "skipped_unannounced", "{r}");
             assert_eq!(r["error"]["code"], "announce_unsupported", "{r}");
-            assert_eq!(code, 1, "{report}");
         }
     }
     let (code, report) = s.all_stale(&["--scan", "--no-announce"]);
