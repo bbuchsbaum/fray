@@ -227,7 +227,8 @@ enum Cmd {
         stale: bool,
         /// Also find unregistered daemons (started before the registry) from
         /// the process table. Transitional. FRAY_SCAN_ROOT=DIR limits it to
-        /// homes under DIR (for tests and rehearsals on scratch homes).
+        /// homes under DIR (for tests and rehearsals on scratch homes); it
+        /// does not filter registry entries, which FRAY_STATE_DIR selects.
         #[arg(long)]
         scan: bool,
     },

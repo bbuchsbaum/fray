@@ -626,9 +626,30 @@ fn scan_adds_unregistered_daemons_under_the_scan_root() {
     let other = outside.home("x");
     outside.start_in(&stale, &outside.root.join("elsewhere"), &other);
     let other_pid = ping(&other).unwrap()["pid"].clone();
+    // Nor one whose --home only looks lexically under it (`<root>/../`).
+    let dodge = outside.home("y");
+    let dotted = s
+        .root
+        .join("..")
+        .join(outside.root.file_name().unwrap())
+        .join("y");
+    let mut dodger = Command::new(&stale)
+        .env("FRAY_STATE_DIR", outside.root.join("elsewhere"))
+        .env_remove("FRAY_HOME")
+        .arg("--home")
+        .arg(&dotted)
+        .arg("serve")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    until("the dotted-home daemon", || ping(&dodge).is_some());
     let (code, report) = s.all_stale(&["--scan", "--dry-run"]);
+    let _ = dodger.kill();
+    let _ = dodger.wait();
     assert_eq!(code, 0, "{report}");
     assert!(!listed(&report, &other), "{report}");
+    assert!(!listed(&report, &dodge), "{report}");
     let r = result(&report, &home);
     assert_eq!(r["registered"], false, "{r}");
     assert_eq!(r["outcome"], "would_restart", "{r}");
