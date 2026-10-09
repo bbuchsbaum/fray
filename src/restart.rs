@@ -847,8 +847,9 @@ pub fn run(home: &Path, opts: &Options) -> Result<Outcome> {
     let Some(ping) = pre.daemon.clone() else {
         // Nothing to stop or announce to: start one.
         let normal = opts.normal.unwrap_or(false);
+        let store = store_id(home, None);
         crate::client::start_exe(home, normal, &exe, std::time::Duration::from_secs(10), true)?;
-        let after = verify(home, &build, None, None, &log)?;
+        let after = verify(home, &build, store.as_deref(), None, &log)?;
         out["action"] = json!("started");
         out["before"] = Value::Null;
         out["after"] = brief(&after);
