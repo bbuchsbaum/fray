@@ -107,6 +107,7 @@ fn connect(home: &Path, timeout: u64) -> Result<BufReader<UnixStream>> {
             "unavailable",
             format!("{e}; run fray start (home: {})", home.display()),
         )
+        .with_details(json!({"not_sent":true}))
     })?;
     stream.set_read_timeout(Some(Duration::from_secs(timeout.max(1))))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -121,6 +122,9 @@ fn write_request(stream: &mut UnixStream, req: &Request) -> Result<()> {
 }
 fn exchange(reader: &mut BufReader<UnixStream>, req: &Request) -> Result<Value> {
     write_request(reader.get_mut(), req)?;
+    receive(reader)
+}
+fn receive(reader: &mut BufReader<UnixStream>) -> Result<Value> {
     let line = read_frame(reader, RESPONSE_LIMIT)?.ok_or_else(|| {
         Error::new(
             "protocol",
@@ -168,13 +172,145 @@ fn warn_build_mismatch(home: &Path, daemon: &Value) {
         }
     }
 }
+/// How long a client waits for a restarting daemon to accept connections again.
+pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
+/// Whether a request failed before any of it reached a daemon (no daemon
+/// accepted the connection), so resending it cannot repeat it.
+pub fn not_sent(error: &Error) -> bool {
+    error
+        .details
+        .as_ref()
+        .is_some_and(|d| d["not_sent"] == true)
+}
+/// The reason a daemon gave when it refused or ended a request because it is
+/// restarting. Nothing that request carried was executed or acknowledged.
+pub(crate) fn restart_reason(error: &Error) -> Option<String> {
+    let details = error.details.as_ref()?;
+    (details["restarting"] == true).then(|| details["reason"].as_str().unwrap_or("").to_owned())
+}
+/// Waits until a daemon answers on this home again: the replacement. A
+/// stopping daemon may still accept a connection, but never answers one.
+/// False if none answers within the window.
+pub fn await_daemon(home: &Path, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    let mut delay = Duration::from_millis(50);
+    loop {
+        if rpc_mapped(home, &Request::new("ping", "", json!({})), 1).is_ok() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
+}
+/// Waits until the daemon process `pid` has exited, so its lock is released
+/// and a replacement can start. False if it is still running at the deadline.
+///
+/// This never touches the lock itself: probing with a try-lock could make a
+/// replacement that is starting at that moment lose the lock and give up.
+/// `bus.sock` is no proof either, since a restarting daemon removes it
+/// before draining. A process that is gone, or a zombie (it has exited and
+/// closed its descriptors, but nobody has reaped it yet), holds no lock.
+pub fn await_exit(pid: u32, window: Duration) -> bool {
+    let deadline = Instant::now() + window;
+    loop {
+        if process_exited(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+fn process_exited(pid: u32) -> bool {
+    // `ps` prints nothing for a pid that no longer exists, and `Z` for a zombie.
+    Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            let stat = String::from_utf8_lossy(&out.stdout);
+            let stat = stat.trim();
+            stat.is_empty() || stat.starts_with('Z')
+        })
+}
+/// The server's timeout for a `wait` that names none.
+const WAIT_DEFAULT_SECS: u64 = 300;
+/// A request a restarting daemon refused was never executed, so it is resent
+/// once the daemon is back, within the caller's own time budget (`timeout`
+/// seconds; for a wait, what is left of its timeout) and never longer than
+/// RESTART_WINDOW per pause. A wait resumes from the same cursor. One quiet
+/// line on stderr says why it paused.
 pub fn rpc(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
+    let started = Instant::now();
+    let wait = req.op == "wait";
+    let indefinite = wait && req.args.get("timeout") == Some(&Value::Null);
+    let wait_secs = req.args["timeout"].as_u64().unwrap_or(WAIT_DEFAULT_SECS);
+    // An indefinite wait has no budget of its own; the window still bounds it.
+    let budget = (!indefinite).then(|| Duration::from_secs(timeout.max(1)));
+    let mut attempt = req.clone();
+    let mut attempt_timeout = timeout;
+    let mut announced = false;
+    loop {
+        match rpc_mapped(home, &attempt, attempt_timeout) {
+            Err(error) if !matches!(req.op.as_str(), "ping" | "shutdown") => {
+                // A connect that found no daemon while a restart marker is
+                // fresh is the gap between the old daemon and its replacement.
+                let Some(reason) = restart_reason(&error).or_else(|| {
+                    not_sent(&error)
+                        .then(|| crate::restart::marker(home))
+                        .flatten()
+                }) else {
+                    return Err(error);
+                };
+                if !announced {
+                    eprintln!("fray: daemon restarting ({reason}); reconnecting");
+                    announced = true;
+                }
+                let left = budget.map(|b| b.saturating_sub(started.elapsed()));
+                let window = left.map_or(RESTART_WINDOW, |left| left.min(RESTART_WINDOW));
+                if window.is_zero() || !await_daemon(home, window) {
+                    return Err(error);
+                }
+                let elapsed = started.elapsed().as_secs();
+                if wait && !indefinite {
+                    let secs = wait_secs.saturating_sub(elapsed);
+                    attempt.args["timeout"] = json!(secs);
+                    attempt_timeout = secs
+                        .saturating_add(5)
+                        .min(timeout.saturating_sub(elapsed).max(1));
+                } else if !indefinite {
+                    attempt_timeout = timeout.saturating_sub(elapsed).max(1);
+                }
+            }
+            other => return other,
+        }
+    }
+}
+/// One request on one connection: no compatibility handshake, no build
+/// warning, no reconnect while a daemon restarts. For read-only inspection of
+/// daemons that may be old or wedged (`fray daemons`), where `rpc`'s recovery
+/// would stall or speak on stderr.
+pub fn probe(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
+    let mut reader = connect(home, timeout)?;
+    exchange(&mut reader, req)
+}
+fn rpc_mapped(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     rpc_inner(home, req, timeout).map_err(|error| {
         if req.op == "wait"
             && (matches!(error.code.as_str(), "io" | "busy")
                 || (error.code == "protocol" && error.message.starts_with("connection closed")))
         {
-            Error::new("unavailable", format!("wait transport failed: {error}"))
+            let details = error.details.clone();
+            let mapped = Error::new("unavailable", format!("wait transport failed: {error}"));
+            match details {
+                Some(details) => mapped.with_details(details),
+                None => mapped,
+            }
         } else {
             error
         }
@@ -188,7 +324,9 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     // All other requests are checked on the SAME connection, with no cached
     // compatibility decision that could survive a daemon replacement.
     if !matches!(req.op.as_str(), "ping" | "shutdown") {
-        let daemon = handshake(&mut reader, home)?;
+        // Only the read-only ping went out: a transport failure here (a
+        // daemon exiting from a drain) left nothing operational received.
+        let daemon = handshake(&mut reader, home).map_err(unsent)?;
         wire_request = session_request(req, &daemon)?;
         // Optional excerpt control: a daemon without full text needs no limit.
         if !daemon["capabilities"]
@@ -239,6 +377,7 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
             "send" | "annotate" if req.args.get("respond_within_ms").is_some() => {
                 Some(("ask_deadlines", "--respond-within"))
             }
+            "announce" => Some(("announce", "fray announce")),
             "escalate_tick" | "stuck_requests" => {
                 Some(("escalations", "escalation of stuck requests"))
             }
@@ -317,7 +456,22 @@ fn rpc_inner(home: &Path, req: &Request, timeout: u64) -> Result<Value> {
     } else {
         Some(Duration::from_secs(timeout.max(1)))
     })?;
-    exchange(&mut reader, &wire_request)
+    // A write the daemon refused (it closed the connection) delivered nothing.
+    write_request(reader.get_mut(), &wire_request).map_err(unsent)?;
+    receive(&mut reader)
+}
+/// Marks a transport failure as one before anything operational reached a
+/// daemon, so callers may resend it (and wait out a restart for it).
+fn unsent(error: Error) -> Error {
+    if !matches!(error.code.as_str(), "io" | "protocol") {
+        return error;
+    }
+    let mut details = match error.details.clone() {
+        Some(Value::Object(map)) => Value::Object(map),
+        _ => json!({}),
+    };
+    details["not_sent"] = json!(true);
+    error.with_details(details)
 }
 
 fn session_request(req: &Request, daemon: &Value) -> Result<Request> {
@@ -389,6 +543,8 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
     let mut expected_store: Option<String> = None;
     let mut retry_delay = 1;
     let mut disconnected = false;
+    // A restart's one notice line stands for the whole reconnect.
+    let mut restarted = false;
     loop {
         if let Some(end) = deadline {
             let remaining = end.saturating_duration_since(Instant::now());
@@ -446,8 +602,13 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                 }
                 expected_store = Some(id.to_owned());
                 if disconnected {
-                    eprintln!("fray attention: reconnected; unacknowledged receipts may repeat");
+                    if !restarted {
+                        eprintln!(
+                            "fray attention: reconnected; unacknowledged receipts may repeat"
+                        );
+                    }
                     disconnected = false;
+                    restarted = false;
                 }
                 retry_delay = 1;
                 match data["type"].as_str() {
@@ -519,14 +680,36 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
                         "io" | "disconnected" | "unavailable" | "listener_expired" | "busy"
                     ) =>
             {
+                let restart = restart_reason(&e);
                 if !disconnected {
                     if include_control {
-                        let frame = json!({"type":"disconnected","control_version":1,"agent":actor,"store_id":expected_store,"reason":e.code});
+                        let reason = if restart.is_some() {
+                            "restarting"
+                        } else {
+                            e.code.as_str()
+                        };
+                        let frame = json!({"type":"disconnected","control_version":1,"agent":actor,"store_id":expected_store,"reason":reason});
                         write_frame(&mut std::io::stdout().lock(), &frame)
                             .map_err(|e| Error::new("output_closed", e.message))?;
                     }
-                    eprintln!("fray attention: {e}; reconnecting with backoff");
+                    match &restart {
+                        Some(reason) => eprintln!(
+                            "fray attention: daemon restarting ({reason}); reconnecting, unacknowledged receipts may repeat"
+                        ),
+                        None => eprintln!("fray attention: {e}; reconnecting with backoff"),
+                    }
                     disconnected = true;
+                    restarted = restart.is_some();
+                }
+                if restart.is_some() {
+                    // The daemon said it is coming back: reconnect when it does.
+                    let mut window = RESTART_WINDOW;
+                    if let Some(end) = deadline {
+                        window = window.min(end.saturating_duration_since(Instant::now()));
+                    }
+                    await_daemon(home, window);
+                    retry_delay = 1;
+                    continue;
                 }
                 let mut delay = Duration::from_secs(retry_delay);
                 if let Some(end) = deadline {
@@ -540,6 +723,25 @@ pub fn watch_attention(home: &Path, actor: &str, mut args: Value, reconnect: boo
     }
 }
 pub fn start(home: &Path, normal: bool) -> Result<Value> {
+    start_exe(
+        home,
+        normal,
+        &env::current_exe()?,
+        Duration::from_secs(5),
+        false,
+    )
+}
+/// Starts a daemon on `home` from the binary `exe`, waiting up to `window`
+/// for it to answer. With `respawn`, a daemon that exits before answering
+/// is started again until the window ends: during a restart, the old daemon
+/// may hold the lock a little longer than it took to stop answering.
+pub fn start_exe(
+    home: &Path,
+    normal: bool,
+    exe: &Path,
+    window: Duration,
+    respawn: bool,
+) -> Result<Value> {
     let home = initialize(home)?;
     let ping = Request::new("ping", "", json!({}));
     match rpc(&home, &ping, 1) {
@@ -555,22 +757,29 @@ pub fn start(home: &Path, normal: bool) -> Result<Value> {
         .append(true)
         .mode(0o600)
         .open(home.join("daemon.log"))?;
-    let mut command = Command::new("nohup");
-    command
-        .arg(env::current_exe()?)
-        .arg("--home")
-        .arg(&home)
-        .arg("serve");
-    if normal {
-        command.arg("--normal");
-    }
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .process_group(0)
-        .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let spawn = || -> Result<std::process::Child> {
+        let mut command = Command::new("nohup");
+        command
+            .arg(exe)
+            .arg("--home")
+            .arg(&home)
+            .arg("serve")
+            // A daemon started by a keepalive drive must not pass that drive's
+            // run on to the drives it starts.
+            .env_remove(crate::keepalive::HANDOFF_ENV);
+        if normal {
+            command.arg("--normal");
+        }
+        Ok(command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log.try_clone()?))
+            .process_group(0)
+            .spawn()?)
+    };
+    let mut child = spawn()?;
+    let deadline = Instant::now() + window;
+    let mut backoff = Duration::from_millis(100);
     loop {
         match rpc(&home, &ping, 1) {
             Ok(v) => {
@@ -591,7 +800,14 @@ pub fn start(home: &Path, normal: bool) -> Result<Value> {
             ));
         }
         // Competing starters are harmless: the daemon lock selects one winner.
-        let _ = child.try_wait();
+        if let Ok(Some(_)) = child.try_wait() {
+            if respawn {
+                thread::sleep(backoff.min(deadline.saturating_duration_since(Instant::now())));
+                backoff = (backoff * 2).min(Duration::from_millis(500));
+                child = spawn()?;
+                continue;
+            }
+        }
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -604,6 +820,8 @@ pub fn watch(
 ) -> Result<()> {
     let mut cursor = after;
     let mut expected_store: Option<String> = None;
+    // Once a restart is announced, the reconnect attempts that follow are quiet.
+    let mut restarting = false;
     loop {
         let result = (|| -> Result<()> {
             let mut args = json!({});
@@ -623,6 +841,7 @@ pub fn watch(
             write_request(reader.get_mut(), &req)?;
             while let Some(line) = read_frame(&mut reader, RESPONSE_LIMIT)? {
                 let data = unpack(serde_json::from_str(&line)?)?;
+                restarting = false;
                 if let Some(id) = data["store_id"].as_str() {
                     if expected_store.as_ref().is_some_and(|old| old != id) {
                         return Err(Error::new(
@@ -650,7 +869,16 @@ pub fn watch(
                 if e.message.contains("Broken pipe") {
                     return Err(e);
                 }
-                eprintln!("fray watch: {e}; reconnecting at cursor {cursor:?}");
+                if let Some(reason) = restart_reason(&e) {
+                    eprintln!("fray watch: daemon restarting ({reason}); reconnecting at cursor {cursor:?}");
+                    // Quiet only while a replacement is expected; after the
+                    // window, report failures again.
+                    restarting = await_daemon(home, RESTART_WINDOW);
+                    continue;
+                }
+                if !restarting {
+                    eprintln!("fray watch: {e}; reconnecting at cursor {cursor:?}");
+                }
                 thread::sleep(Duration::from_secs(1));
             }
             other => return other,

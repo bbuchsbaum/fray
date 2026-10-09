@@ -1,5 +1,8 @@
 """Admission-ordered public feed compatibility court, using a synthetic CLI."""
 import json, os, pathlib, sqlite3, subprocess, sys, tempfile, time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 FRAY=str(pathlib.Path(sys.argv[1]).resolve());checks=[]
 STUB=r'''#!/usr/bin/env python3
 import json,os,pathlib,sys,time

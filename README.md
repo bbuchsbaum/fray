@@ -29,6 +29,13 @@ cargo install --locked --path .
 The binary is also available directly at `target/release/fray`. Nothing needs to
 be registered with an external service.
 
+`.cargo/config.toml` sets `FRAY_STATE_DIR=target/fray-state` for `cargo test`
+and `cargo run`, so a daemon started from the checkout (`cargo run -- start`)
+never appears in your real daemon registry. `FRAY_SCAN_ROOT` is for tests and
+rehearsals only: it limits the process-table search of `fray daemons --scan` to
+homes whose canonical path is under one directory. It does not filter registry
+entries, which `FRAY_STATE_DIR` selects.
+
 ### Upgrading an installed binary
 
 `cargo install` replaces the binary safely. To install a binary you have
@@ -48,9 +55,61 @@ bad install, run `scripts/install.sh ~/.cargo/bin/fray.previous`; that copy
 is only known-good if the install before it was. A rollback swaps the two,
 so `fray.previous` then holds the bad build: do not roll back twice.
 
-Installing does not restart a running daemon. Announce the restart on the
-board, check that no one has a live wait, then run `fray stop` and
-`fray start`.
+Installing does not restart a running daemon, and nothing restarts one
+automatically. After installing, `scripts/install.sh` lists the daemons still on
+another build. When one of them is running, it prints the `fray restart
+--all-stale` commands that would restart them; unreachable and incompatible ones
+are listed with a note that `--all-stale` would skip them. The report is
+advisory, and a failure to produce it does not fail the install.
+
+### Restarting daemons onto a new build
+
+Each daemon registers itself under `$FRAY_STATE_DIR` (default
+`~/.local/state/fray`). `fray daemons` lists them with liveness, build skew
+against this client, uptime and occupancy; `--stale` keeps only daemons on
+another build, and `--scan` also finds daemons started before the registry
+existed. It never starts or stops anything; it only prunes, and reports, the
+records of dead daemons.
+
+```sh
+fray daemons --stale
+fray restart --dry-run              # this home: what a restart would interrupt
+fray restart                        # preflight, announce, drain, start, verify
+fray restart --all-stale --dry-run  # every stale daemon, one at a time
+fray restart --all-stale
+```
+
+After its preflight, `fray restart` posts a `restart` notice on the board as
+`fray`, lets the old daemon drain in-flight requests while it tells waits and
+watches to reconnect, starts the replacement and checks that it runs the
+expected build on the same store, then posts `restarted`. After a failure
+following the notice it tries to post `abandoned`, which reaches the board only
+while a daemon still answers. It refuses a busy daemon (an open wait, watch or
+listener, a live drive, or a keepalive mid-turn) unless `--force`, which
+interrupts the named holders, and one with only armed waits (agents between two
+wait calls) unless `--allow-armed`. Never pass `--force` without coordinating
+with the holders it names. A keepalive drive between turns survives the restart
+and moves onto the new binary, provided the replacement is this client's build;
+with `--exe` of another build, idle keepalives count as live. A daemon that
+becomes busy after the notice is not stopped. `--all-stale` restarts only
+running daemons; it lists busy, armed, unreachable and incompatible ones, any
+home another `fray restart` holds, and (without `--no-announce`) any that cannot
+post a notice, as skipped. It checks each home again just before acting: one
+whose daemon has stopped or whose directory has gone since the listing is
+skipped and never started, and one already on the target build is skipped as
+current. Those two skips, and dead records, do not affect the exit status.
+
+A daemon built before restart notices existed has no `announce` capability:
+restart it once with `--no-announce`, and its replacement posts the
+`restarted` notice. Its preflight is degraded: it reads the `agents`
+listing, where an agent seen within two minutes counts as armed, so such a
+daemon often also needs `--allow-armed`.
+
+| Command | Exit status |
+|---|---|
+| `fray restart --dry-run` | 0 idle, 3 busy, 5 armed, 6 old daemon with nothing live visible, 7 no daemon running |
+| `fray restart` | 0 restarted (or started, when none was running), 1 failed (the error names the step), 3 busy, 5 armed |
+| `fray restart --all-stale [--dry-run]` | 0 all restarted or none stale, 1 any failed, 4 some skipped and none failed |
 
 ## Start a conversation
 
@@ -85,8 +144,8 @@ fray query --ref mote:parser-42
 the existing conversation. Repeatable `reply --ref mote:ISSUE` adds searchable
 references without replacing existing ones, and records them in reply history.
 Question and objection replies also attach those references to the linked question.
-This requires a daemon advertising `reply_refs`; coordinate an upgrade/restart
-with its owner if the client reports that capability missing. An objection or question reply also creates a linked,
+This requires a daemon advertising `reply_refs`; if the client reports that
+capability missing, restart the daemon onto a current build with `fray restart`. An objection or question reply also creates a linked,
 independently resolvable question so it cannot disappear in a long thread.
 Closing the original conversation does not close its objections.
 
@@ -770,7 +829,9 @@ reconnects. Compatible package versions may differ (0.2.1 works with a 0.2.0
 daemon; both use protocol 2). An incompatible daemon is rejected before sending
 operational requests, with both versions and a home-specific recovery instruction.
 `start` does not replace a live daemon. `ping` and explicit `stop` remain usable
-for diagnosis/recovery; coordinate any restart with other agents first. No fields
+for diagnosis/recovery. Replace a compatible daemon with `fray restart`, whose
+preflight names who it would interrupt; a protocol-incompatible one cannot
+answer that preflight and still needs the quoted stop/start. No fields
 are silently removed to accommodate an older protocol.
 
 Check `fray --json ping` capabilities when a deployed daemon rejects a feature.
@@ -779,8 +840,8 @@ version alone is not a capability check. `inbox_filters` enables addressed and
 unresolved filters; `long_messages` enables `send`/`reply` bodies up to 8,000 UTF-8
 bytes. Card summaries still have a 2,000-byte limit. `ask_deadlines`,
 `mote_requests` and `escalations` enable deadlines, Mote request tracking and
-escalation. Coordinate daemon upgrades with the owner; no capability failure
-automatically restarts it. A newer `fray drive` still runs against a daemon that predates
+escalation. `fray daemons --stale` shows which daemons predate the installed
+CLI; no capability failure automatically restarts one. A newer `fray drive` still runs against a daemon that predates
 controller detail: it warns once that the orphan check and the child shown in
 `fray agents` are unavailable, and continues.
 

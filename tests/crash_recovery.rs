@@ -308,7 +308,9 @@ fn interrupted_daemon_and_client_requests_reconcile_as_one_complete_mutation() {
     watcher.send("watch", "bob", json!({"after":after}), None);
     assert_eq!(watcher.get("watch")["type"], "ready");
     let mut waiter = Peer::connect(&daemon);
-    waiter.send("wait", "bob", json!({"timeout":2}), None);
+    // Wait past the pending cards: a wait that reached the daemon before the
+    // next send would otherwise return them at once without that send.
+    waiter.send("wait", "bob", json!({"after":after,"timeout":2}), None);
     let next = alice.call(
         "send",
         "alice",

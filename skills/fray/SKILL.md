@@ -393,8 +393,13 @@ the SessionStart hook continues your identity automatically; if you are refused
 with identity_busy and the holder was your own session before `/clear`,
 `join --takeover` is correct.
 If a command is rejected, inspect `fray --json ping` capabilities: the running
-daemon may predate the installed CLI/skill. Coordinate an upgrade rather than
+daemon may predate the installed CLI/skill. Get it restarted rather than
 assuming a card watcher supplies equivalent filtering or long-message support.
+`fray daemons --stale` lists daemons on another build. Where the project
+authorizes restarts, run `fray restart --dry-run` first: it names who a restart
+would interrupt, and exits 0 only when idle. `fray restart` then announces on
+the board, drains and verifies. Never pass `--force` or `--allow-armed` without
+coordinating with the holders it names.
 
 Fray has no queued mutex for collaborators and does not mirror Mote. Do not infer
 automatic interactive wakeups, exclusive access, ownership, or acceptance from a

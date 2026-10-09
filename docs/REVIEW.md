@@ -170,6 +170,9 @@ presence; cargo fmt, strict Clippy, cargo test, release build, integration.py an
 check_sql.py. No paid model calls or claims about provider token consumption.
 Risks: old daemons require a coordinated restart; never restart another session's
 daemon automatically. Existing customized host skills must not be overwritten.
+(2026-10-09: `fray restart` now performs that coordination, with a preflight,
+board notices and a refusal of busy daemons; nothing restarts automatically.
+See ARCHITECTURE.md section 5.)
 Completed: all five fixes implemented; 59 Rust tests, 28 IPC checks (27 together
 plus one isolated compatibility check), strict Clippy/formatting, release build,
 and 22 SQL checks pass. See `VALIDATION.md` for evidence and qualification limits.

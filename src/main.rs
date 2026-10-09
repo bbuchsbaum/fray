@@ -206,8 +206,92 @@ enum Cmd {
         #[arg(long)]
         normal: bool,
     },
-    Stop,
+    /// Stop the daemon. With --restart, clients are told to reconnect, in-flight
+    /// requests may finish, and this returns once the daemon has exited.
+    Stop {
+        #[arg(long)]
+        restart: bool,
+        #[arg(long, requires = "restart")]
+        reason: Option<String>,
+        /// How long in-flight requests may take to finish (at most 10000).
+        #[arg(long, requires = "restart")]
+        grace_ms: Option<u64>,
+    },
     Ping,
+    /// List this user's registered daemons: liveness, build skew against this
+    /// client, uptime and occupancy. Read-only, except that records of dead
+    /// daemons are pruned and reported.
+    Daemons {
+        /// Only daemons whose build differs from this client's.
+        #[arg(long)]
+        stale: bool,
+        /// Also find unregistered daemons (started before the registry) from
+        /// the process table. Transitional. FRAY_SCAN_ROOT=DIR limits it to
+        /// homes under DIR (for tests and rehearsals on scratch homes); it
+        /// does not filter registry entries, which FRAY_STATE_DIR selects.
+        #[arg(long)]
+        scan: bool,
+    },
+    /// Who a daemon restart would interrupt: open waits, listeners, drives,
+    /// keepalives and armed waits, with an `idle` or `busy` verdict. Read-only.
+    Occupancy,
+    /// Restart this home's daemon: preflight, announce, drain, start, verify.
+    /// Refuses a busy daemon (exit 3) unless --force, and one with only armed
+    /// waits (exit 5) unless --allow-armed. A keepalive drive between turns
+    /// survives and does not block. An old daemon (no `occupancy`) proceeds
+    /// with a degraded warning; with no daemon running, one is started.
+    /// Exit 0 restarted or started, 1 failed (the error names the step),
+    /// 3 busy, 5 armed. --dry-run only reads: exit 0 idle, 3 busy, 5 armed,
+    /// 6 an old daemon with nothing live visible, 7 no daemon running.
+    ///
+    /// --all-stale restarts every daemon `fray daemons --stale` lists (stale:
+    /// a build other than the one being started), one at a time, ignoring
+    /// --home. Only running daemons are restarted; unreachable, incompatible
+    /// and dead ones are listed as skipped. Busy and armed daemons are skipped
+    /// unless --force or --allow-armed is given, as are daemons that cannot
+    /// post notices (without --no-announce) and homes another restart holds.
+    /// Each home is rechecked when reached: one whose daemon stopped or whose
+    /// directory is gone is skipped, never started or created, and one
+    /// already on the target build is skipped as current. Exit 0 all
+    /// restarted (or none stale), 1 any failed, 4 some skipped and none
+    /// failed; dead records and homes stopped, gone or current since the
+    /// listing do not count as skips. With --dry-run the same codes say what
+    /// a run would do.
+    Restart {
+        #[arg(long)]
+        dry_run: bool,
+        /// Restart every stale daemon in the registry instead of this home's.
+        #[arg(long)]
+        all_stale: bool,
+        /// With --all-stale, also restart unregistered daemons found in the
+        /// process table and confirmed by a ping (as `fray daemons --scan`).
+        #[arg(long, requires = "all_stale")]
+        scan: bool,
+        /// Restart even when busy, interrupting the named holders. Waits and
+        /// watches reconnect to the replacement.
+        #[arg(long)]
+        force: bool,
+        /// Restart even with armed waits (agents between two wait calls).
+        #[arg(long)]
+        allow_armed: bool,
+        /// No advance notice. Required for a daemon without `announce`; its
+        /// replacement still posts `restarted`.
+        #[arg(long)]
+        no_announce: bool,
+        /// The notice's reason. Default: "upgrade to <build>".
+        #[arg(long)]
+        reason: Option<String>,
+        /// The binary to start. Default: this `fray`.
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        /// How long the old daemon may drain in-flight requests (at most 10000).
+        #[arg(long)]
+        grace_ms: Option<u64>,
+        /// Start the replacement with NORMAL durability. Default: the old
+        /// daemon's, from its registry record, else FULL.
+        #[arg(long)]
+        normal: bool,
+    },
     /// Register this terminal identity and read a bounded current-state snapshot.
     Join {
         #[arg(long, value_delimiter = ',')]
@@ -301,6 +385,18 @@ enum Cmd {
         after: i64,
         #[arg(long, default_value_t = 20)]
         limit: i64,
+    },
+    /// Post a daemon maintenance notice to everyone, authored by `fray`.
+    /// Needs no join; records --as (or $USER) as the requester.
+    Announce {
+        #[arg(long, value_parser = ["restart", "stop", "restarted", "abandoned"])]
+        action: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        from_build: Option<String>,
+        #[arg(long)]
+        to_build: Option<String>,
     },
     /// Add a public current-state card. Use topic '*' for a project-wide broadcast.
     Post {
@@ -2828,6 +2924,7 @@ fn send(
     let mutation = matches!(
         op,
         "post"
+            | "announce"
             | "review_request"
             | "review_subject"
             | "send"
@@ -2884,6 +2981,9 @@ fn join_args(role: Option<String>, topics: Option<Vec<String>>) -> Value {
     v
 }
 fn main() {
+    // Before any thread exists: a keepalive's handoff leaves the environment
+    // at once, so nothing this process starts can inherit it.
+    driver::take_handoff();
     let cli = Cli::parse();
     let json = cli.json;
     let brief_budget = match &cli.command {
@@ -3360,8 +3460,140 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             server::serve(&home, normal)?;
             return Ok(None);
         }
-        Cmd::Stop => ("shutdown", json!({})),
+        Cmd::Stop { restart: false, .. } => ("shutdown", json!({})),
+        Cmd::Stop {
+            restart: true,
+            reason,
+            grace_ms,
+        } => {
+            let mut args = json!({"restart":true});
+            if let Some(reason) = reason {
+                args["reason"] = json!(reason);
+            }
+            if let Some(grace) = grace_ms {
+                args["grace_ms"] = json!(grace);
+            }
+            let mut value = send(&home, &actor, "shutdown", args, None, 10)?;
+            let grace = value["grace_ms"].as_u64().unwrap_or(2000);
+            let window = Duration::from_millis(grace + 2000);
+            // The replacement can start only once this daemon has exited and
+            // released the lock; say so if it has not, rather than succeed.
+            let pid = value["pid"].as_u64().and_then(|p| u32::try_from(p).ok());
+            if !pid.is_some_and(|pid| client::await_exit(pid, window)) {
+                return Err(Error::new(
+                    "stop_incomplete",
+                    match pid {
+                        Some(pid) => format!("the daemon accepted the restart, but process {pid} had not exited within {}ms; start a replacement only once it has (ps -p {pid})", window.as_millis()),
+                        None => "the daemon accepted the restart but did not report its pid, so its exit cannot be confirmed; start a replacement only once it has exited".into(),
+                    },
+                )
+                .with_details(value));
+            }
+            value["exited"] = json!(true);
+            return Ok(Some(value));
+        }
         Cmd::Ping => ("ping", json!({})),
+        Cmd::Daemons { stale, scan } => {
+            let report = fray::daemons::report(stale, scan)?;
+            if cli.json {
+                return Ok(Some(report));
+            }
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(fray::daemons::render(&report).as_bytes())?;
+            stdout.flush()?;
+            return Ok(None);
+        }
+        Cmd::Occupancy => ("occupancy", json!({})),
+        Cmd::Restart {
+            all_stale: true,
+            dry_run,
+            scan,
+            force,
+            allow_armed,
+            no_announce,
+            reason,
+            exe,
+            grace_ms,
+            normal,
+        } => {
+            let requested_by = if dry_run {
+                None
+            } else {
+                restart_requested_by(&actor, no_announce)?
+            };
+            let options = fray::restart::Options {
+                force,
+                allow_armed,
+                no_announce,
+                reason,
+                exe,
+                grace_ms,
+                normal: normal.then_some(true),
+                actor: actor.clone(),
+                requested_by,
+                only_if_stale: true,
+            };
+            let report = fray::restart_all::run(
+                &fray::registry::state_dir()?,
+                scan,
+                dry_run,
+                &options,
+                !cli.json,
+            )?;
+            if cli.json {
+                output(&report, true)?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(fray::restart_all::render(&report).as_bytes())?;
+                stdout.flush()?;
+            }
+            std::process::exit(fray::restart_all::exit_code(&report));
+        }
+        Cmd::Restart {
+            dry_run: false,
+            force,
+            allow_armed,
+            no_announce,
+            reason,
+            exe,
+            grace_ms,
+            normal,
+            ..
+        } => {
+            let requested_by = restart_requested_by(&actor, no_announce)?;
+            let options = fray::restart::Options {
+                force,
+                allow_armed,
+                no_announce,
+                reason,
+                exe,
+                grace_ms,
+                normal: normal.then_some(true),
+                actor: actor.clone(),
+                requested_by,
+                only_if_stale: false,
+            };
+            let outcome = fray::restart::run(&home, &options)?;
+            if cli.json {
+                output(&outcome.to_json(), true)?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(outcome.text().as_bytes())?;
+                stdout.flush()?;
+            }
+            std::process::exit(outcome.exit_code());
+        }
+        Cmd::Restart { dry_run: true, .. } => {
+            let preflight = fray::restart::preflight(&home)?;
+            if cli.json {
+                output(&preflight.to_json(), true)?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(preflight.text().as_bytes())?;
+                stdout.flush()?;
+            }
+            std::process::exit(preflight.verdict.exit_code());
+        }
         Cmd::Join {
             topics,
             role,
@@ -3531,6 +3763,29 @@ fn run(cli: Cli) -> Result<Option<Value>> {
                 return Ok(None);
             }
             ("show", args)
+        }
+        Cmd::Announce {
+            action,
+            reason,
+            from_build,
+            to_build,
+        } => {
+            let mut a = json!({"action":action,"reason":reason});
+            if actor.is_empty() {
+                let user = std::env::var("USER").unwrap_or_default();
+                if user.is_empty() {
+                    return Err(Error::invalid(
+                        "fray announce needs --as NAME or $USER to record who asked",
+                    ));
+                }
+                a["requested_by"] = json!(user);
+            }
+            for (k, v) in [("from_build", from_build), ("to_build", to_build)] {
+                if let Some(v) = v {
+                    a[k] = json!(v);
+                }
+            }
+            ("announce", a)
         }
         Cmd::Post {
             title,
@@ -3979,6 +4234,12 @@ fn run(cli: Cli) -> Result<Option<Value>> {
             }
             // Owner operations exist only behind `fray owner` (a person at an
             // interactive terminal); the raw RPC command must not bypass that.
+            if fray::store::system_lookalike(&r.actor) {
+                return Err(Error::new(
+                    "reserved_system",
+                    "`fray` is reserved for notices the daemon itself authors",
+                ));
+            }
             if r.op.starts_with("owner_") || r.actor == fray::store::OWNER {
                 return Err(Error::new(
                     "reserved_owner",
@@ -4533,6 +4794,24 @@ fn human(v: &Value, out: &mut String) {
         out.push('\n');
     }
 }
+/// Who asked for a restart's notices, when no `--as` identity posts them:
+/// required unless none will be posted in advance (an old daemon's
+/// replacement still says it restarted).
+fn restart_requested_by(actor: &str, no_announce: bool) -> Result<Option<String>> {
+    let user = std::env::var("USER").unwrap_or_default();
+    if !actor.is_empty() {
+        Ok(None)
+    } else if !user.is_empty() {
+        Ok(Some(user))
+    } else if no_announce {
+        Ok(None)
+    } else {
+        Err(Error::invalid(
+            "fray restart needs --as NAME or $USER to record who asked for the notice",
+        ))
+    }
+}
+
 fn output(v: &Value, as_json: bool) -> Result<()> {
     if as_json {
         server::write_frame(&mut io::stdout().lock(), v)

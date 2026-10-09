@@ -29,6 +29,9 @@ import sys
 import tempfile
 import threading
 import time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 parser = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter

@@ -88,9 +88,9 @@ pub fn start_options(conn: &Connection, _now: i64) -> Result<StartOptions> {
     Ok(StartOptions { model, budget })
 }
 /// How long a started keepalive counts as starting before its drive begins.
-const STARTING_MS: i64 = 20_000;
+pub(crate) const STARTING_MS: i64 = 20_000;
 /// A controller not refreshed for this long is not live (as for drives).
-const CONTROLLER_TTL_MS: i64 = 120_000;
+pub(crate) const CONTROLLER_TTL_MS: i64 = 120_000;
 const DAY_MS: i64 = 86_400_000;
 /// A busy mark with no hook activity for this long is stale: an interrupt
 /// that no hook event reported.
@@ -101,6 +101,11 @@ pub const TURN_MARKS: [&str; 3] = ["begin", "active", "end"];
 /// The only command the daemon runs, after its own executable. Nothing in a
 /// request reaches it: the name, home and session go in the environment.
 pub const DRIVE_ARGS: [&str; 2] = ["drive", "--keepalive"];
+/// The run a keepalive carries into its daemon's binary when it re-executes
+/// itself after a restart ("Across a daemon restart"). Only that drive's own
+/// exec sets it; the drive takes it out of its environment at once, and no
+/// daemon or drive Fray starts inherits it.
+pub const HANDOFF_ENV: &str = "FRAY_KEEPALIVE_HANDOFF";
 
 pub fn is_session(session: Option<&str>) -> bool {
     session.is_some_and(|s| s.starts_with(PREFIX))
@@ -243,6 +248,34 @@ pub fn pid_alive(pid: i64) -> bool {
             .is_ok_and(|s| s.success())
 }
 
+/// How often a daemon checks that a drive it adopted still runs.
+const ADOPTED_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drives an earlier daemon started that still run: they outlive a restart
+/// (docs/design/keepalive.md, "Across a daemon restart"), and the new daemon
+/// knows them only by their recorded pid.
+pub fn adoptable(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut s = conn.prepare("SELECT agent,pid FROM keepalives WHERE pid IS NOT NULL")?;
+    let rows = s
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, pid)| pid_alive(*pid))
+        .collect())
+}
+
+/// Watch an adopted drive and log its exit, as the starting daemon's reaper
+/// would. It is not this daemon's child, so launchd or init reaps it.
+pub fn watch(agent: String, pid: i64) {
+    std::thread::spawn(move || {
+        while pid_alive(pid) {
+            std::thread::sleep(ADOPTED_POLL);
+        }
+        eprintln!("keepalive drive for {agent:?} (pid {pid}) exited");
+    });
+}
+
 /// Start the keepalive's drive, detached: its own process group, stdin
 /// closed, output appended to its log, and an explicit `FRAY_SESSION`. The
 /// command is fixed; only the environment names whom it serves.
@@ -265,6 +298,8 @@ pub fn spawn(home: &Path, agent: &str, session: &str, cwd: &Path, log: &Path) ->
         // speaks only as its keepalive session.
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
+        // Another drive's run is never this one's.
+        .env_remove(HANDOFF_ENV)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out.try_clone()?))
@@ -404,6 +439,8 @@ pub fn status(conn: &Connection, agent: &str, now: i64) -> Result<Value> {
         "host":k.host,"companion":k.companion,"session":k.session,"cwd":k.cwd,"log":k.log,"model":model,
         "pid":k.pid,"started_ms":k.started,"stop_requested":k.stop,
         "fork":keep["fork"],"turns":detail["turn"],"paused":keep["paused"],
+        // The build and binary the drive runs, as it reports them.
+        "drive":{"build":detail["build"],"exe":detail["exe"]},
         "deferred":if live && busy {json!("terminal busy")} else {Value::Null},"terminal":terminal,
         "summary":keep["summary"],"failures":keep["failures"],"oversized":keep["oversized"],
         "reason":if live {None} else {ours.and_then(|c| c.2.clone())},

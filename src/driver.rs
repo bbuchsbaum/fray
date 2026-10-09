@@ -29,6 +29,12 @@ use std::{
 };
 
 const HEARTBEAT_SECS: u64 = 30;
+use keepalive::HANDOFF_ENV;
+/// The handoff this process was started with, taken out of its environment.
+static HANDOFF: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+/// Times a keepalive resends a request no daemon accepted, each after a
+/// replacement answered.
+const UNSENT_RETRIES: usize = 3;
 /// How often a running turn checks for newly queued urgent attention.
 const URGENT_POLL: Duration = Duration::from_secs(2);
 /// Time the owned group gets to exit after TERM before it is killed.
@@ -479,6 +485,31 @@ struct Keep {
     /// A turn cannot read them, so they are left for the terminal, the owner
     /// or escalation, until new activity changes their version.
     oversized: RefCell<Vec<(i64, i64)>>,
+    /// When the idle period in progress began (wall-clock ms): carried
+    /// across a re-execution, so restarts never extend the idle bound.
+    idle_since: Cell<Option<i64>>,
+}
+impl Keep {
+    /// What a turn boundary knows that the daemon's record does not: carried
+    /// across a re-execution so no fork, usage total or set-aside is lost.
+    fn handoff(&self) -> Value {
+        json!({"fork":self.fork.borrow().clone(),"failures":self.failures.get(),
+            "reported":self.reported.borrow().clone(),"parent_total":*self.parent_total.borrow(),
+            "fork_prompt":self.fork_prompt.borrow().clone(),"oversized":self.oversized.borrow().clone(),
+            "idle_since":self.idle_since.get()})
+    }
+    fn resume(&self, v: &Value) {
+        *self.fork.borrow_mut() = v["fork"].as_str().map(str::to_owned);
+        self.failures
+            .set(u32::try_from(v["failures"].as_u64().unwrap_or(0)).unwrap_or(0));
+        *self.reported.borrow_mut() = serde_json::from_value(v["reported"].clone()).unwrap_or(None);
+        *self.parent_total.borrow_mut() = v["parent_total"].as_i64();
+        *self.fork_prompt.borrow_mut() =
+            serde_json::from_value(v["fork_prompt"].clone()).unwrap_or(None);
+        *self.oversized.borrow_mut() =
+            serde_json::from_value(v["oversized"].clone()).unwrap_or_default();
+        self.idle_since.set(v["idle_since"].as_i64());
+    }
 }
 
 /// Read only a Codex transcript's cumulative input count. Its content never
@@ -684,10 +715,30 @@ struct Run<'a> {
     stop: Cell<bool>,
     /// The last turn's captured stdout (keepalive turns only).
     output: RefCell<Vec<u8>>,
+    /// The daemon build and binary this run last re-executed for, so a
+    /// failed or ineffective upgrade is not repeated.
+    upgraded_for: RefCell<Option<String>>,
+    /// Resend a request no daemon accepted once a replacement answers: a
+    /// keepalive outlives a daemon restart, and a reply or acknowledgment
+    /// lost in the gap would cost a second paid turn.
+    patient: Cell<bool>,
 }
 impl Run<'_> {
     fn call(&self, op: &str, args: Value, timeout: u64) -> Result<Value> {
-        send(self.home, self.actor, op, args, None, timeout)
+        let mut attempts = 0;
+        loop {
+            match send(self.home, self.actor, op, args.clone(), None, timeout) {
+                Err(e)
+                    if self.patient.get()
+                        && client::not_sent(&e)
+                        && attempts < UNSENT_RETRIES
+                        && client::await_daemon(self.home, client::RESTART_WINDOW) =>
+                {
+                    attempts += 1;
+                }
+                other => return other,
+            }
+        }
     }
     fn state(&self, state: &str, begin: bool, reason: Option<&str>) -> Result<()> {
         let mut args = json!({"run_id":self.id,"state":state,"begin":begin});
@@ -754,11 +805,33 @@ impl Run<'_> {
         }
         Ok(page)
     }
+    /// When the idle period in progress must end: `idle_timeout` after it
+    /// began, which for a keepalive may be before a re-execution.
+    fn idle_deadline(&self) -> Instant {
+        let bound = Duration::from_secs(self.options.idle_timeout);
+        let Some(keep) = &self.keep else {
+            return Instant::now() + bound;
+        };
+        let now = now_ms() as i64;
+        let since = keep.idle_since.get().unwrap_or(now);
+        keep.idle_since.set(Some(since));
+        let elapsed = Duration::from_millis(u64::try_from(now - since).unwrap_or(0));
+        Instant::now() + bound.saturating_sub(elapsed)
+    }
+    /// The idle period ended: the next one starts afresh.
+    fn idle_ended(&self) {
+        if let Some(keep) = &self.keep {
+            keep.idle_since.set(None);
+        }
+    }
     /// Wait for selected attention after `after` (0: any pending).
     fn wait(&self, after: i64) -> Result<bool> {
-        let deadline = Instant::now() + Duration::from_secs(self.options.idle_timeout);
+        let deadline = self.idle_deadline();
         loop {
             self.state("waiting", false, None)?;
+            if self.keep.is_some() {
+                self.keepalive_status()?;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() || self.stop.get() {
                 return Ok(false);
@@ -959,6 +1032,7 @@ impl Run<'_> {
                 "CODEX_THREAD_ID",
                 "CODEX_SANDBOX",
                 "CODEX_SANDBOX_NETWORK_DISABLED",
+                HANDOFF_ENV,
             ] {
                 command_line.env_remove(var);
             }
@@ -1108,7 +1182,8 @@ impl Run<'_> {
         result
     }
     fn drive(&self) -> Result<&'static str> {
-        let mut turn = 0;
+        // A run continued across a re-execution keeps counting its turns.
+        let mut turn = self.detail.borrow()["turn"].as_u64().unwrap_or(0) as usize;
         loop {
             self.state("waiting", false, None)?;
             if let Some(keep) = &self.keep {
@@ -1119,12 +1194,14 @@ impl Run<'_> {
                     if let Some(reason) = self.pause()? {
                         return Ok(reason);
                     }
+                    self.idle_ended();
                     continue;
                 }
                 if !self.terminal_ready(keep)? {
                     if let Some(reason) = self.defer_terminal(keep)? {
                         return Ok(reason);
                     }
+                    self.idle_ended();
                     continue;
                 }
             }
@@ -1142,6 +1219,7 @@ impl Run<'_> {
                 if !self.wait(after)? {
                     return Ok(if self.stop.get() { "stopped" } else { "idle" });
                 }
+                self.idle_ended();
                 thread::sleep(Duration::from_millis(self.options.debounce_ms));
                 page = self.inbox()?;
                 if page["total"] == 0 {
@@ -1298,18 +1376,12 @@ impl Run<'_> {
     /// The day's input tokens are under the keepalive's budget. Also hears
     /// a stop request.
     fn within_budget(&self) -> Result<bool> {
-        let status = self.call("keepalive_status", json!({}), 10)?;
-        if status["stop_requested"] == true {
-            self.stop.set(true);
-        }
+        let status = self.keepalive_status()?;
         self.detail.borrow_mut()["keepalive"]["usage"] = status["usage"].clone();
         Ok(status["usage"]["over_budget"] != true)
     }
     fn terminal_ready(&self, keep: &Keep) -> Result<bool> {
-        let status = self.call("keepalive_status", json!({}), 10)?;
-        if status["stop_requested"] == true {
-            self.stop.set(true);
-        }
+        let status = self.keepalive_status()?;
         if status["terminal"]["busy"] == true {
             self.detail.borrow_mut()["keepalive"]["deferred"] = json!("terminal busy");
             return Ok(false);
@@ -1342,18 +1414,119 @@ impl Run<'_> {
         Ok(true)
     }
 
+    /// The keepalive's record. Every caller is at a turn boundary (no packet
+    /// claimed, no turn running), so this is also where a stop request is
+    /// heard and where the drive moves onto a restarted daemon's binary.
+    fn keepalive_status(&self) -> Result<Value> {
+        let status = self.call("keepalive_status", json!({}), 10)?;
+        if status["stop_requested"] == true {
+            self.stop.set(true);
+        }
+        self.upgrade(&status)?;
+        Ok(status)
+    }
+    /// When the daemon runs another build or binary than this drive (it was
+    /// restarted on a new one), replace this process with the daemon's binary:
+    /// same pid, process group and log, continuing this run and its state.
+    /// Only between turns, so no turn is cut short or paid for twice, and
+    /// pending attention stays on the board for the new image's first inbox.
+    /// Returns if there is nothing to do or the exec failed.
+    fn upgrade(&self, status: &Value) -> Result<()> {
+        let (Some(keep), Some(build), Some(exe)) = (
+            &self.keep,
+            status["daemon_build"].as_str(),
+            status["daemon_exe"].as_str(),
+        ) else {
+            // A daemon that does not say has nothing to move onto.
+            return Ok(());
+        };
+        let own = std::env::current_exe().ok();
+        let same = |a: &Path, b: &Path| {
+            a == b
+                || fs::canonicalize(a)
+                    .ok()
+                    .zip(fs::canonicalize(b).ok())
+                    .is_some_and(|(a, b)| a == b)
+        };
+        if build == BUILD && own.as_deref().is_some_and(|own| same(own, Path::new(exe))) {
+            return Ok(());
+        }
+        let target = format!("{build} {exe}");
+        if self.upgraded_for.borrow().as_deref() == Some(target.as_str()) {
+            return Ok(());
+        }
+        *self.upgraded_for.borrow_mut() = Some(target.clone());
+        // A fresh lease, so the new image continues this run within its TTL.
+        self.state("waiting", false, None)?;
+        if self.stop.get() {
+            // Stopping: it exits at the boundary instead.
+            return Ok(());
+        }
+        // Only a binary that reports the daemon's build can take the handoff
+        // (an older one would begin a second run beside this one).
+        let reports = Command::new(exe)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|out| {
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout).contains(&format!("({build})"))
+            });
+        if !reports {
+            eprintln!(
+                "fray drive: {}",
+                json!({"run_id":self.id,"upgrade_skipped":{"exe":exe,"reason":format!("{exe} --version does not report the daemon's build {build}; staying on this binary")}})
+            );
+            return Ok(());
+        }
+        // Without its binding the handoff could not be applied: stay here.
+        let (session, home) = match (fray::session::current(), fs::canonicalize(self.home)) {
+            (Ok(session), Ok(home)) => (session, home),
+            (session, home) => {
+                let why = session
+                    .err()
+                    .map(|e| e.to_string())
+                    .or_else(|| home.err().map(|e| e.to_string()))
+                    .unwrap_or_default();
+                eprintln!(
+                    "fray drive: {}",
+                    json!({"run_id":self.id,"upgrade_skipped":{"exe":exe,"reason":format!("handoff binding unavailable: {why}; staying on this binary")}})
+                );
+                return Ok(());
+            }
+        };
+        let handoff = json!({"run_id":self.id,"actor":self.actor,
+            "session":session,"home":home,
+            "detail":self.detail.borrow().clone(),"keep":keep.handoff(),"upgraded_for":target});
+        eprintln!(
+            "fray drive: {}",
+            json!({"run_id":self.id,"upgrade":{"from":{"build":BUILD,"exe":own},"to":{"build":build,"exe":exe}}})
+        );
+        let _ = io::stdout().flush();
+        let error = Command::new(exe)
+            .args(keepalive::DRIVE_ARGS)
+            .env(HANDOFF_ENV, handoff.to_string())
+            .exec();
+        eprintln!(
+            "fray drive: {}",
+            json!({"run_id":self.id,"upgrade_failed":error.to_string()})
+        );
+        Ok(())
+    }
+
     /// Existing unread attention cannot end a busy-terminal deferral. Recheck
     /// the terminal and stop request once a second; refresh bookkeeping only
     /// at the normal heartbeat interval, without spinning on the same packet.
     fn defer_terminal(&self, keep: &Keep) -> Result<Option<&'static str>> {
         self.state("waiting", false, None)?;
-        let started = Instant::now();
+        let deadline = self.idle_deadline();
         let mut refreshed = Instant::now();
         loop {
             if self.stop.get() {
                 return Ok(Some("stopped"));
             }
-            if started.elapsed() >= Duration::from_secs(self.options.idle_timeout) {
+            if Instant::now() >= deadline {
                 return Ok(Some("idle"));
             }
             thread::sleep(Duration::from_secs(1));
@@ -1379,13 +1552,13 @@ impl Run<'_> {
             json!({"run_id":self.id,"keepalive":"paused","reason":"budget","usage":self.detail.borrow()["keepalive"]["usage"]})
         );
         self.state("waiting", false, None)?;
-        let since = Instant::now();
+        let deadline = self.idle_deadline();
         let mut refreshed = Instant::now();
         loop {
             if self.stop.get() {
                 return Ok(Some("stopped"));
             }
-            if since.elapsed() >= Duration::from_secs(self.options.idle_timeout) {
+            if Instant::now() >= deadline {
                 return Ok(Some("idle"));
             }
             thread::sleep(Duration::from_secs(1));
@@ -1639,6 +1812,7 @@ fn keep_for(home: &Path, actor: &str) -> Result<(Keep, Value)> {
             )),
             fork_prompt: RefCell::new(None),
             oversized: RefCell::new(Vec::new()),
+            idle_since: Cell::new(None),
         },
         status,
     ))
@@ -1663,13 +1837,75 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     {
         return Err(Error::invalid("drive needs a unique --as name; max-turns:1..1000; idle-timeout:0..86400; debounce-ms:0..5000; budget:2000..64000; child-timeout:1..86400"));
     }
-    client::start(home, false)?;
+    // Set when this keepalive re-executed itself onto a restarted daemon's
+    // binary: it continues that run rather than beginning another. Only a
+    // handoff written for this name, keepalive session and board applies.
+    let handoff: Option<Value> = options
+        .keepalive
+        .then(|| HANDOFF.get().cloned().flatten())
+        .flatten()
+        .and_then(|h| serde_json::from_str(&h).ok())
+        .filter(|h| {
+            let session = fray::session::current().ok().flatten();
+            let ours = handoff_for(h, actor, session.as_deref(), home);
+            if !ours {
+                eprintln!(
+                    "fray drive: {}",
+                    json!({"handoff_ignored":"written for another name, session or board"})
+                );
+            }
+            ours
+        });
+    // Just after a restart the daemon this drive came from may still be
+    // coming up: wait for it rather than exit.
+    let since = Instant::now();
+    loop {
+        match client::start(home, false) {
+            Ok(_) => break,
+            Err(_) if handoff.is_some() && since.elapsed() < client::RESTART_WINDOW => {
+                client::await_daemon(home, client::RESTART_WINDOW.saturating_sub(since.elapsed()));
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     let keep = options
         .keepalive
         .then(|| keep_for(home, actor))
         .transpose()?;
     send(home, actor, "join", json!({}), None, 10)?;
     on_joined();
+    // The handoff's run goes on only if the board says it is still that run
+    // (its lease was renewed just before the exec); otherwise it is ignored
+    // and a new run begins.
+    let mut stop_requested = false;
+    let handoff = match handoff {
+        Some(h) => {
+            let run_id = h["run_id"].as_str().unwrap_or("");
+            match send(
+                home,
+                actor,
+                "controller",
+                json!({"run_id":run_id,"state":"waiting","begin":false}),
+                None,
+                10,
+            ) {
+                Ok(v) => {
+                    stop_requested = v["stop_requested"] == true;
+                    Some(h)
+                }
+                Err(e) if matches!(e.code.as_str(), "controller_lost" | "invalid") => {
+                    eprintln!(
+                        "fray drive: {}",
+                        json!({"handoff_ignored":format!("run {run_id:?} is no longer this name's: {}", e.code)})
+                    );
+                    None
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        None => None,
+    };
     let mut detail = json!({"on_urgent":options.on_urgent,"turn":0,"child":null,"presented":[],"queued_urgent":[],
         // Which host the child is, so `fray team` can tell a driven
         // Codex from a driven Claude.
@@ -1680,22 +1916,59 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         // serves (`companion`), the fork, and why it is not answering.
         detail["keepalive"] = json!({"session":status["session"],"companion":status["companion"],
             "base":keep.base.borrow().clone(),"fork":null,"paused":null,"deferred":null,"summary":null,"failures":0,"usage":status["usage"]});
+        if let Some(handoff) = &handoff {
+            keep.resume(&handoff["keep"]);
+            if handoff["detail"].is_object() {
+                detail = handoff["detail"].clone();
+                detail["keepalive"]["usage"] = status["usage"].clone();
+            }
+        }
         keep
     });
+    // Which build and binary this run is, for `fray keepalive --status`.
+    detail["build"] = json!(BUILD);
+    detail["exe"] = json!(std::env::current_exe().ok());
+    let continued = handoff
+        .as_ref()
+        .and_then(|h| h["run_id"].as_str().map(str::to_owned));
+    let resumed = continued.is_some();
     let runner = Run {
         home,
         actor,
-        id: random_key()?,
+        id: continued.clone().map_or_else(random_key, Ok)?,
         options,
         detail: RefCell::new(detail),
         detail_ok: Cell::new(true),
         keep,
-        stop: Cell::new(false),
+        stop: Cell::new(stop_requested),
         output: RefCell::new(Vec::new()),
+        upgraded_for: RefCell::new(
+            handoff
+                .as_ref()
+                .and_then(|h| h["upgraded_for"].as_str().map(str::to_owned)),
+        ),
+        patient: Cell::new(options.keepalive),
     };
-    runner.check_orphans()?;
-    runner.state("waiting", true, None)?;
+    // Its first state sends this image's detail. A lease that lapsed since
+    // the check above begins the run again, as any lapsed run would.
+    let resumed = resumed
+        && match runner.state("waiting", false, None) {
+            Ok(()) => true,
+            Err(e) if e.code == "controller_lost" => false,
+            Err(e) => return Err(e),
+        };
+    if resumed {
+        eprintln!(
+            "fray drive: {}",
+            json!({"run_id":runner.id,"upgraded":{"build":BUILD,"exe":runner.detail.borrow()["exe"]}})
+        );
+    } else {
+        runner.check_orphans()?;
+        runner.state("waiting", true, None)?;
+    }
     let result = runner.drive();
+    // The daemon is gone or ending: report and exit without waiting for one.
+    runner.patient.set(false);
     let reason = result.as_ref().copied().unwrap_or_else(|e| e.code.as_str());
     // No next managed turn follows a finished run.
     if let Some(queued) = runner.detail.borrow_mut()["queued_urgent"].as_array_mut() {
@@ -1717,6 +1990,26 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     }
     result?;
     cleanup
+}
+
+/// Take a keepalive's handoff out of this process's environment, keeping it
+/// for `run`. Called first in `main`, before any thread exists.
+pub fn take_handoff() {
+    let handoff = std::env::var(HANDOFF_ENV).ok();
+    if handoff.is_some() {
+        std::env::remove_var(HANDOFF_ENV);
+    }
+    let _ = HANDOFF.set(handoff);
+}
+
+/// Whether a handoff was written by this name's keepalive, under this
+/// keepalive session, on this board.
+fn handoff_for(handoff: &Value, actor: &str, session: Option<&str>, home: &Path) -> bool {
+    let home = fs::canonicalize(home).ok();
+    handoff["actor"].as_str() == Some(actor)
+        && session.is_some_and(|s| keepalive::is_session(Some(s)))
+        && handoff["session"].as_str() == session
+        && home.is_some_and(|home| handoff["home"].as_str() == home.to_str())
 }
 
 #[cfg(test)]
@@ -1742,6 +2035,78 @@ mod keepalive_tests {
             PathBuf::from("/h/k/a.schema.json"),
             PathBuf::from("/h/k/a.last.json"),
         )
+    }
+
+    fn keep() -> Keep {
+        let (schema, last) = paths();
+        Keep {
+            host: Host::Codex,
+            model: "model".into(),
+            base: RefCell::new("base-1".into()),
+            fork: RefCell::new(None),
+            schema,
+            last,
+            failures: Cell::new(0),
+            reported: RefCell::new(None),
+            parent_total: RefCell::new(Some(7)),
+            fork_prompt: RefCell::new(None),
+            oversized: RefCell::new(Vec::new()),
+            idle_since: Cell::new(None),
+        }
+    }
+
+    #[test]
+    fn a_handoff_applies_only_to_its_own_name_session_and_board() {
+        let home = std::env::temp_dir();
+        let canonical = fs::canonicalize(&home).unwrap();
+        let h = json!({"actor":"alice","session":"keepalive:c1","home":canonical,"run_id":"r1"});
+        assert!(handoff_for(&h, "alice", Some("keepalive:c1"), &home));
+        assert!(!handoff_for(&h, "bob", Some("keepalive:c1"), &home));
+        assert!(!handoff_for(&h, "alice", Some("keepalive:c2"), &home));
+        assert!(!handoff_for(&h, "alice", None, &home));
+        assert!(!handoff_for(
+            &h,
+            "alice",
+            Some("keepalive:c1"),
+            Path::new("/")
+        ));
+        // Without the binding (as an older handoff would be), it never applies.
+        let bare = json!({"run_id":"r1"});
+        assert!(!handoff_for(&bare, "alice", Some("keepalive:c1"), &home));
+        let other_session = json!({"actor":"alice","session":"claude:c1","home":canonical});
+        assert!(!handoff_for(
+            &other_session,
+            "alice",
+            Some("claude:c1"),
+            &home
+        ));
+    }
+
+    #[test]
+    fn a_reexecuted_keepalive_keeps_its_fork_usage_total_and_set_asides() {
+        let before = keep();
+        *before.fork.borrow_mut() = Some("fork-2".into());
+        before.failures.set(2);
+        *before.reported.borrow_mut() = Some(("fork-2".into(), 5100));
+        *before.parent_total.borrow_mut() = None;
+        *before.fork_prompt.borrow_mut() = Some(("codex:base-1".into(), 3));
+        *before.oversized.borrow_mut() = vec![(12, 40), (13, 41)];
+        before.idle_since.set(Some(1_791_000_000_000));
+        // Through the environment, as text.
+        let carried: Value = serde_json::from_str(&before.handoff().to_string()).unwrap();
+        let after = keep();
+        after.resume(&carried);
+        assert_eq!(*after.fork.borrow(), Some("fork-2".into()));
+        assert_eq!(after.failures.get(), 2);
+        assert_eq!(*after.reported.borrow(), Some(("fork-2".into(), 5100)));
+        assert_eq!(*after.parent_total.borrow(), None);
+        assert_eq!(
+            *after.fork_prompt.borrow(),
+            Some(("codex:base-1".into(), 3))
+        );
+        assert_eq!(*after.oversized.borrow(), vec![(12, 40), (13, 41)]);
+        // The idle bound keeps counting from before the re-execution.
+        assert_eq!(after.idle_since.get(), Some(1_791_000_000_000));
     }
 
     #[test]

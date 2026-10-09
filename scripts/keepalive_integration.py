@@ -105,6 +105,24 @@ def alive(pid):
     return True
 
 
+class Detached:
+    """A daemon this test did not spawn, as far as Popen's poll and wait go."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def poll(self):
+        return None if alive(self.pid) else 0
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while alive(self.pid):
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired(str(self.pid), timeout)
+            time.sleep(0.02)
+        return 0
+
+
 class Keepalive(unittest.TestCase):
     def setUp(self):
         # Short paths: the socket lives under the repository's .fray.
@@ -144,10 +162,10 @@ class Keepalive(unittest.TestCase):
         self.launch()
         self.fray("join", actor="bob", session="test:bob")
 
-    def launch(self, **extra):
+    def launch(self, binary=None, **extra):
         # As if started from inside hosts: a turn must not inherit either.
         self.server = subprocess.Popen(
-            [str(BINARY), "--home", self.home, "serve"],
+            [str(binary or BINARY), "--home", self.home, "serve"],
             env=dict(self.env, CLAUDECODE="1", CODEX_SANDBOX="seatbelt", **extra),
             stdout=self.log,
             stderr=self.log,
@@ -745,6 +763,230 @@ class Keepalive(unittest.TestCase):
         self.await_status(
             "hal", lambda s: s["state"] == "stopped", "stopped", timeout=5
         )
+
+    def restart(self, binary):
+        reply = self.rpc("shutdown", args={"restart": True, "reason": "upgrade"})
+        self.assertTrue(reply["ok"], reply)
+        self.server.wait(timeout=15)
+        self.launch(binary=binary)
+
+    def drives(self):
+        # This test's drives only: their binaries live under its own root.
+        ps = subprocess.run(["ps", "-Ao", "pid=,command="], text=True,
+                            capture_output=True, check=True).stdout
+        return [int(line.split()[0]) for line in ps.splitlines()
+                if "drive --keepalive" in line and self.root.name in line]
+
+    def test_a_restart_keeps_one_drive_and_moves_it_onto_the_new_binary(self):
+        # Two copies of one build stand for two builds: a drive moves onto
+        # the daemon's binary when its build or its path differs.
+        old, new = self.root / "old" / "fray", self.root / "new" / "fray"
+        for path in (old, new):
+            path.parent.mkdir()
+            shutil.copy2(BINARY, path)
+        same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
+        self.shutdown()
+        self.launch(binary=old)
+        session = "claude:restart-1"
+        self.start("alice", session)
+        first = self.ask("alice", "Before any restart")
+        self.await_reply(first, "alice")
+        before = self.await_status(
+            "alice", lambda s: s["fork"] and self.pending("alice") == 0, "settled"
+        )
+        pid, fork = before["pid"], before["fork"]
+        # The daemon names its drive's liveness (it used to report null).
+        self.assertIs(before["pid_alive"], True)
+        self.assertTrue(same(before["drive"]["exe"], old), before["drive"])
+        self.assertEqual(before["drive"]["build"], before["daemon_build"])
+
+        # A restart that brings the same binary back (as when a new one fails
+        # to start and the old one is started again): the drive stays as it is.
+        self.restart(old)
+        self.assertIn(f"(pid {pid}) adopted", (self.root / "server.log").read_text())
+        second = self.ask("alice", "After the same daemon came back")
+        self.assertEqual(len(self.await_reply(second, "alice")), 1)
+        self.assertEqual(self.status("alice")["pid"], pid)
+        self.assertNotIn('"upgrade"', self.drive_log("alice"))
+
+        # A restart onto a new binary in the middle of a turn: the turn
+        # finishes and is applied once, then the drive becomes the new binary
+        # in place (same pid) and resumes its fork.
+        self.mode("slow:3")
+        third = self.ask("alice", "Asked as the daemon restarts")
+        deadline = time.monotonic() + 10
+        while [third] not in [c["cards"] for c in self.calls()]:
+            self.assertLess(time.monotonic(), deadline, self.drive_log("alice"))
+            time.sleep(0.02)
+        # The host turn is under way in the old binary.
+        self.restart(new)
+        self.assertEqual(len(self.await_reply(third, "alice", timeout=20)), 1)
+        after = self.await_status(
+            "alice",
+            lambda s: s["state"] == "keepalive" and s["drive"]["exe"]
+            and same(s["drive"]["exe"], new),
+            "moved onto the new binary", timeout=15,
+        )
+        self.assertEqual(after["pid"], pid)
+        self.assertIs(after["pid_alive"], True)
+        self.assertEqual(self.drives(), [pid])
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True,
+                                 capture_output=True).stdout
+        self.assertIn(f"{self.root.name}/new/fray drive --keepalive", command)
+        self.mode("answer")
+        fourth = self.ask("alice", "After the upgrade")
+        self.assertEqual(len(self.await_reply(fourth, "alice")), 1)
+        calls = self.calls()
+        # One host turn per ask: none repeated, none lost.
+        self.assertEqual([c["cards"] for c in calls], [[first], [second], [third], [fourth]])
+        # The upgraded drive resumed the fork it had, rather than forking again.
+        self.assertNotIn("--fork-session", calls[3]["argv"])
+        self.assertEqual(calls[3]["argv"][calls[3]["argv"].index("--resume") + 1], fork)
+        settled = self.await_status("alice", lambda s: self.pending("alice") == 0, "settled")
+        self.assertEqual(settled["usage"]["input_tokens"], 40)
+        self.assertEqual(settled["turns"], 4)
+        log = self.drive_log("alice")
+        self.assertEqual(log.count('"upgrade":'), 1, log)
+        self.assertEqual(log.count('"upgraded":'), 1, log)
+
+        # A plain stop still ends the drive.
+        self.shutdown()
+        deadline = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid))
+
+    def test_a_turn_that_ends_between_daemons_is_applied_once_the_replacement_answers(self):
+        session = "claude:restart-gap"
+        self.start("alice", session)
+        self.mode("slow:1")
+        card = self.ask("alice", "Answered while no daemon runs")
+        deadline = time.monotonic() + 10
+        while [card] not in [c["cards"] for c in self.calls()]:
+            self.assertLess(time.monotonic(), deadline, self.drive_log("alice"))
+            time.sleep(0.02)
+        reply = self.rpc("shutdown", args={"restart": True, "reason": "gap"})
+        self.assertTrue(reply["ok"], reply)
+        self.server.wait(timeout=15)
+        # The turn ends, and its reply and acknowledgment are due, while no
+        # daemon accepts connections; they wait for the replacement.
+        time.sleep(2.5)
+        self.launch()
+        self.assertEqual(len(self.await_reply(card, "alice", timeout=20)), 1)
+        status = self.await_status(
+            "alice", lambda s: self.pending("alice") == 0, "acknowledged", timeout=10
+        )
+        self.assertEqual(status["state"], "keepalive")
+        self.assertEqual(status["usage"]["input_tokens"], 10)
+        self.assertEqual(len(self.calls()), 1, "the turn was not paid for twice")
+
+    def restart_cmd(self, *args):
+        # `fray restart` against this test's daemon, with its own registry.
+        result = subprocess.run(
+            [str(BINARY), "--home", self.home, "--json", "restart", *args],
+            env=dict(self.env, USER="tester", FRAY_STATE_DIR=str(self.root / "state")),
+            cwd=self.repo, text=True, capture_output=True, timeout=60,
+        )
+        return result.returncode, json.loads(result.stdout or "{}"), result.stderr
+
+    def test_fray_restart_carries_an_idle_keepalive_and_refuses_a_running_turn(self):
+        # L9 with L8: a keepalive drive between turns survives a restart, so it
+        # never blocks one; a turn it is running is live and does.
+        session = "claude:restart-cmd"
+        self.start("alice", session)
+        first = self.ask("alice", "Before fray restart")
+        self.await_reply(first, "alice")
+        pid = self.await_status(
+            "alice", lambda s: s["fork"] and self.pending("alice") == 0, "settled"
+        )["pid"]
+        self.mode("slow:3")
+        second = self.ask("alice", "During a running turn")
+        deadline = time.monotonic() + 10
+        while [second] not in [c["cards"] for c in self.calls()]:
+            self.assertLess(time.monotonic(), deadline, self.drive_log("alice"))
+            time.sleep(0.02)
+        code, refused, err = self.restart_cmd()
+        self.assertEqual(code, 3, f"{refused} {err}")
+        self.assertTrue(any(i["kind"] == "keepalive" and i["class"] == "live"
+                            for i in refused["preflight"]["interrupts"]), refused)
+        self.assertEqual(len(self.await_reply(second, "alice")), 1)
+        self.mode("answer")
+        self.await_status("alice", lambda s: self.pending("alice") == 0, "settled")
+        deadline = time.monotonic() + 10
+        while True:
+            code, report, err = self.restart_cmd("--dry-run")
+            if code == 0:
+                break
+            self.assertLess(time.monotonic(), deadline, f"{report} {err}")
+            time.sleep(0.1)
+        self.assertIn("survives", {i["class"] for i in report["interrupts"]}, report)
+        self.assertNotIn("live", {i["class"] for i in report["interrupts"]}, report)
+        code, done, err = self.restart_cmd("--reason", "keepalive check")
+        self.assertEqual(code, 0, f"{done} {err}")
+        self.assertEqual(done["verdict"], "idle", done)
+        self.assertEqual(done["interrupted"], [], done)
+        self.assertTrue(any(i["actor"] == "alice" for i in done["survived"]), done)
+        self.server.wait(timeout=15)
+        # The replacement is detached (started by `fray restart`).
+        self.server = Detached(done["after"]["pid"])
+        third = self.ask("alice", "After fray restart")
+        self.assertEqual(len(self.await_reply(third, "alice", timeout=20)), 1)
+        self.assertEqual(self.status("alice")["pid"], pid)
+        self.assertEqual([c["cards"] for c in self.calls()], [[first], [second], [third]])
+
+    def environment(self, pid):
+        out = subprocess.run(["ps", "eww", "-o", "command=", "-p", str(pid)], text=True,
+                             capture_output=True).stdout
+        self.assertTrue(out.strip(), f"no process {pid}")
+        return out
+
+    def test_a_handoff_never_reaches_another_daemon_or_drive(self):
+        foreign = json.dumps({"run_id": "r-other", "actor": "mallory",
+                              "session": "keepalive:other", "home": "/elsewhere",
+                              "keep": {"fork": "someone-elses-fork"}})
+        # A daemon given a handoff in its environment (as by a leak): the
+        # drives it starts do not inherit it, and work as usual.
+        self.shutdown()
+        self.launch(FRAY_KEEPALIVE_HANDOFF=foreign)
+        self.assertIn("FRAY_KEEPALIVE_HANDOFF", self.environment(self.server.pid))
+        self.start("alice", "claude:leak-1")
+        pid = self.status("alice")["pid"]
+        self.assertNotIn("FRAY_KEEPALIVE_HANDOFF", self.environment(pid))
+        card = self.ask("alice", "Whose fork is this?")
+        self.await_reply(card, "alice")
+        call = self.calls()[0]
+        self.assertIn("--fork-session", call["argv"])
+        self.assertNotIn("someone-elses-fork", call["argv"])
+        self.assertNotIn("handoff_ignored", self.drive_log("alice"))
+
+        # A drive started with a handoff that is not its own, and no daemon
+        # running: the daemon it starts does not inherit the handoff, and the
+        # drive ignores it.
+        self.shutdown()
+        result = subprocess.run(
+            [str(BINARY), "--home", self.home, "--as", "ghost", "drive", "--keepalive"],
+            env=dict(self.env, FRAY_SESSION="keepalive:ghost", FRAY_KEEPALIVE_HANDOFF=foreign),
+            cwd=self.repo, text=True, capture_output=True, timeout=30,
+        )
+        ps = subprocess.run(["ps", "-Ao", "pid=,command="], text=True,
+                            capture_output=True, check=True).stdout
+        daemons = [int(line.split()[0]) for line in ps.splitlines()
+                   if self.root.name in line and line.rstrip().endswith(" serve")]
+        try:
+            self.assertIn("handoff_ignored", result.stderr)
+            self.assertEqual(len(daemons), 1, ps)
+            self.assertNotIn("FRAY_KEEPALIVE_HANDOFF", self.environment(daemons[0]))
+        finally:
+            try:
+                self.rpc("shutdown")
+            except OSError:
+                pass
+            for daemon in daemons:
+                deadline = time.monotonic() + 5
+                while alive(daemon) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if alive(daemon):
+                    os.kill(daemon, signal.SIGKILL)
 
     def test_a_sandboxed_daemon_refuses(self):
         self.shutdown()

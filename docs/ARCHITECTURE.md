@@ -310,9 +310,45 @@ and an explicitly quoted home-specific stop/start command for an older daemon;
 a newer daemon instead requires a compatible client. Ping and explicit shutdown
 bypass this check for recovery. Start validates even an already-running daemon,
 and does not interpret a malformed/failed ping as permission to launch a replacement.
-Coordinate an old daemon's stop/start with its owner; installing a new CLI does not
-replace the running daemon or restart it automatically. Raw socket integrations
-must perform their own handshake; the JSON request envelope has not changed.
+Installing a new CLI does not replace the running daemon, and nothing restarts
+one automatically. Raw socket integrations must perform their own handshake; the
+JSON request envelope has not changed.
+
+Each daemon writes an advisory registry record after binding its socket
+(`$FRAY_STATE_DIR/daemons/<sha256(canonical home)>.json`, default state directory
+`~/.local/state/fray`) and removes it on a clean exit. The record only speeds
+discovery: `fray daemons` confirms every home with a ping, compares its build with
+the client's, and prunes the records of dead daemons; the daemon lock remains the
+authority over a home. `--scan` also finds daemons started before the registry
+from the process table.
+
+A restart shutdown (`shutdown {restart:true}`, `fray stop --restart`) is graceful:
+long-lived handlers send a `restarting` frame, new requests are refused with
+`restarting`, and in-flight requests may drain within a grace of at most 10
+seconds; none of this acknowledges anything. The client resends a refused request, and a wait resumes
+from its cursor, once a daemon answers again, within its own timeout and at most
+30 seconds per pause. While `<home>/daemon.restarting` names a live writer, a
+client that finds no daemon waits the same way instead of failing in the gap; the
+replacement removes the marker once bound. Keepalive drives outlive the restart in
+their own process groups and move onto the new binary between turns
+([keepalive](design/keepalive.md#across-a-daemon-restart)).
+
+`fray restart` runs one home's restart under `<home>/restart.lock` (separate
+from `daemon.lock`): a read-only preflight (`occupancy`, or the `agents` listing
+of an older daemon, marked degraded) refuses a busy daemon without `--force` and
+one with only armed waits without `--allow-armed`; a `restart` notice authored
+by `fray` (the `announce` op, no join); a second preflight, so a daemon that
+became busy meanwhile is not stopped; drain (a plain stop on a daemon without
+`graceful_restart`); start of the replacement binary; and verification that it
+answers with the expected build, the same store and a new process. The
+replacement then carries a `restarted` notice. Any failure after a posted notice
+tries to post `abandoned` (best effort: a home with no daemon answering has no
+board to tell), and a notice that cannot be posted stops the restart before
+anything changes. `--all-stale` applies this to each running daemon whose build
+differs from the replacement's, one at a time, and reports the rest as skipped.
+It rechecks each home just before acting: a daemon that stopped, or a home that
+vanished, since the listing is never started or created, and a home already on
+the target build is not restarted again.
 
 ## 6. Delivering bytes is not delivering attention
 

@@ -1,5 +1,8 @@
 """Real, disposable Fray/Mote/Git acceptance court; no models or shared stores."""
 import json, os, pathlib, signal as signals, subprocess, sys, tempfile, time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 
 FRAY, MOTE = map(lambda p: str(pathlib.Path(p).resolve()), sys.argv[1:3])
 checks = []

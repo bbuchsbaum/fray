@@ -1,5 +1,8 @@
 """Synthetic public-CLI recovery court; no installed Mote, models or shared stores."""
 import json, os, pathlib, sqlite3, subprocess, sys, tempfile, time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 FRAY = str(pathlib.Path(sys.argv[1]).resolve())
 checks = []
 STUB = r'''#!/usr/bin/env python3

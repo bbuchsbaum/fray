@@ -1,5 +1,8 @@
 """Actual CLI dispatch/handoff court using disposable stores and no models."""
 import json,os,pathlib,subprocess,sys,tempfile,time
+# Keep scratch daemons out of the user's daemon registry.
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
+os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
 FRAY,MOTE=[str(pathlib.Path(p).resolve()) for p in sys.argv[1:3]]
 checks=[]
 with tempfile.TemporaryDirectory(prefix="fray-dispatch-court-",dir="/tmp") as td:
