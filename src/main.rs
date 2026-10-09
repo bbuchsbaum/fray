@@ -274,8 +274,8 @@ enum Cmd {
         /// Restart even with armed waits (agents between two wait calls).
         #[arg(long)]
         allow_armed: bool,
-        /// Restart without posting maintenance notices. Required for a daemon
-        /// that cannot post them (no `announce` capability).
+        /// No advance notice. Required for a daemon without `announce`; its
+        /// replacement still posts `restarted`.
         #[arg(long)]
         no_announce: bool,
         /// The notice's reason. Default: "upgrade to <build>".

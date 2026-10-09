@@ -82,21 +82,22 @@ fray restart --all-stale
 After its preflight, `fray restart` posts a `restart` notice on the board as
 `fray`, lets the old daemon drain in-flight requests while it tells waits and
 watches to reconnect, starts the replacement and checks that it runs the
-expected build on the same store, then posts `restarted`. A failure after the
-notice posts `abandoned`. It refuses a busy daemon (an open wait, watch or
-listener, a live drive, or a keepalive mid-turn) unless `--force`,
-which interrupts the named holders, and one with only armed waits (agents
-between two wait calls) unless `--allow-armed`. Never pass `--force`
-without coordinating with the holders it names. A keepalive drive between
-turns survives the restart and moves onto the new binary. A daemon that
+expected build on the same store, then posts `restarted`. After a failure
+following the notice it tries to post `abandoned`, which reaches the board only
+while a daemon still answers. It refuses a busy daemon (an open wait, watch or
+listener, a live drive, or a keepalive mid-turn) unless `--force`, which
+interrupts the named holders, and one with only armed waits (agents between two
+wait calls) unless `--allow-armed`. Never pass `--force` without coordinating
+with the holders it names. A keepalive drive between turns survives the restart
+and moves onto the new binary, provided the replacement is this client's build;
+with `--exe` of another build, idle keepalives count as live. A daemon that
 becomes busy after the notice is not stopped. `--all-stale` restarts only
-running daemons; it lists busy, armed, unreachable and incompatible ones,
-any home another `fray restart` holds, and (without `--no-announce`) any
-that cannot post a notice, as skipped. It checks each home again just before
-acting: one whose daemon has stopped or whose directory has gone since the
-listing is skipped and never started, and one already on the target build is
-skipped as current. Those two skips, and dead records, do not affect the exit
-status.
+running daemons; it lists busy, armed, unreachable and incompatible ones, any
+home another `fray restart` holds, and (without `--no-announce`) any that cannot
+post a notice, as skipped. It checks each home again just before acting: one
+whose daemon has stopped or whose directory has gone since the listing is
+skipped and never started, and one already on the target build is skipped as
+current. Those two skips, and dead records, do not affect the exit status.
 
 A daemon built before restart notices existed has no `announce` capability:
 restart it once with `--no-announce`, and its replacement posts the

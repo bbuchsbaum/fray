@@ -333,20 +333,22 @@ replacement removes the marker once bound. Keepalive drives outlive the restart 
 their own process groups and move onto the new binary between turns
 ([keepalive](design/keepalive.md#across-a-daemon-restart)).
 
-`fray restart` runs one home's restart under `<home>/restart.lock` (separate from
-`daemon.lock`): a read-only preflight (`occupancy`, or the `agents` listing of an
-older daemon, marked degraded) refuses a busy daemon without `--force` and one
-with only armed waits without `--allow-armed`; a `restart` notice authored by
-`fray` (the `announce` op, no join); a second preflight, so a daemon that became
-busy meanwhile is not stopped; drain (a plain stop on a daemon without
+`fray restart` runs one home's restart under `<home>/restart.lock` (separate
+from `daemon.lock`): a read-only preflight (`occupancy`, or the `agents` listing
+of an older daemon, marked degraded) refuses a busy daemon without `--force` and
+one with only armed waits without `--allow-armed`; a `restart` notice authored
+by `fray` (the `announce` op, no join); a second preflight, so a daemon that
+became busy meanwhile is not stopped; drain (a plain stop on a daemon without
 `graceful_restart`); start of the replacement binary; and verification that it
-answers with the expected build, the same store and a new process. The replacement then carries a `restarted` notice. Any failure after a
-posted notice posts `abandoned`, and a notice that cannot be posted stops the
-restart before anything changes. `--all-stale` applies this to each running
-daemon whose build differs from the replacement's, one at a time, and reports
-the rest as skipped. It rechecks each home just before acting: a daemon that
-stopped, or a home that vanished, since the listing is never started or
-created, and a home already on the target build is not restarted again.
+answers with the expected build, the same store and a new process. The
+replacement then carries a `restarted` notice. Any failure after a posted notice
+tries to post `abandoned` (best effort: a home with no daemon answering has no
+board to tell), and a notice that cannot be posted stops the restart before
+anything changes. `--all-stale` applies this to each running daemon whose build
+differs from the replacement's, one at a time, and reports the rest as skipped.
+It rechecks each home just before acting: a daemon that stopped, or a home that
+vanished, since the listing is never started or created, and a home already on
+the target build is not restarted again.
 
 ## 6. Delivering bytes is not delivering attention
 
