@@ -803,6 +803,27 @@ fn install_reports_stale_daemons_and_the_restart_commands() {
     );
     assert!(!shown.contains("--scan --dry-run"), "{shown}");
 
+    // Only an unreachable stale daemon: listed, but no restart commands,
+    // since --all-stale would skip it.
+    let out = s.on(BIN, &registered, &["stop"]);
+    assert!(out.status.success(), "{}", text(&out));
+    until("the registered daemon to stop", || {
+        ping(&registered).is_none()
+    });
+    let wedged = s.root.join("wedged");
+    std::fs::create_dir_all(&wedged).unwrap();
+    unreachable_record(&s.state, &wedged);
+    let shown = install(&s.state);
+    assert!(
+        shown.contains(&format!("install:   {}\n", wedged.display())),
+        "{shown}"
+    );
+    assert!(shown.contains("unreachable"), "{shown}");
+    assert!(shown.contains("would skip them"), "{shown}");
+    assert!(!shown.contains("--all-stale --dry-run"), "{shown}");
+    assert!(!shown.contains("nothing was restarted. To see"), "{shown}");
+    std::fs::remove_file(registry::record_path(&s.state, &wedged)).unwrap();
+
     // A report that cannot run is a warning; the install still succeeds.
     let broken = s.root.join("not-a-dir");
     std::fs::write(&broken, b"").unwrap();

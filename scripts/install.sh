@@ -71,14 +71,21 @@ if ! stale=$("$dest" daemons --stale --scan 2>&1); then
     printf '%s\n' "$stale" | sed 's/^/install:   /' >&2
     exit 0
 fi
-# A daemon's state line: two spaces, a live state, then its pid and build.
-live='^  (running|incompatible|unreachable)( \(unregistered\))?  pid '
-if ! printf '%s\n' "$stale" | grep -Eq "$live.* STALE"; then
+# A daemon's state line: two spaces, its state, then its pid and build.
+# Only `running` daemons are restarted by --all-stale; unreachable and
+# incompatible ones are listed but would be skipped.
+listed='^  (running|incompatible|unreachable)( \(unregistered\))?  pid .* STALE'
+running='^  running( \(unregistered\))?  pid .* STALE'
+if ! printf '%s\n' "$stale" | grep -Eq "$listed"; then
     echo "install: no running daemons are out of date"
     exit 0
 fi
 echo "install: daemons still running another build:"
 printf '%s\n' "$stale" | sed 's/^/install:   /'
+if ! printf '%s\n' "$stale" | grep -Eq "$running"; then
+    echo "install: none of them answers normally (unreachable or incompatible), so fray restart --all-stale would skip them; see each one above"
+    exit 0
+fi
 # The commands must run this binary: plain `fray` only when it resolves here.
 fray=$dest
 if [ "$(command -v fray 2>/dev/null || true)" = "$dest" ]; then
@@ -88,7 +95,7 @@ case $fray in
 *[!A-Za-z0-9_./+-]*) fray="'$(printf '%s' "$fray" | sed "s/'/'\\\\''/g")'" ;;
 esac
 scan=
-if printf '%s\n' "$stale" | grep -Eq '^  (running|incompatible|unreachable) \(unregistered\)  pid '; then
+if printf '%s\n' "$stale" | grep -Eq '^  running \(unregistered\)  pid .* STALE'; then
     scan=" --scan"
 fi
 echo "install: nothing was restarted. To see what a restart would interrupt, then restart them:"
