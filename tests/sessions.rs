@@ -464,3 +464,53 @@ fn a_host_session_outlives_its_drive_run() {
     );
     assert_eq!(err.unwrap_err(), "identity_busy");
 }
+
+#[test]
+fn a_sessionless_run_that_exits_before_it_begins_releases_its_session() {
+    let mut s = board();
+    // The first run joins, then stops before its controller run begins (an
+    // orphaned process group, say): its exit releases only its own session.
+    ok(&mut s, "bob", Some("fray:first"), "join", json!({}), NOW);
+    let released = ok(
+        &mut s,
+        "bob",
+        Some("fray:first"),
+        "controller",
+        json!({"run_id":"exited-before-run","state":"failed","begin":false}),
+        NOW + 1_000,
+    );
+    assert_eq!(released["session_ended"], true);
+    assert_eq!(released["controller_held"], false);
+    ok(
+        &mut s,
+        "bob",
+        Some("fray:second"),
+        "join",
+        json!({}),
+        NOW + 2_000,
+    );
+}
+
+#[test]
+fn a_host_session_cannot_end_a_run_it_never_held() {
+    let mut s = board();
+    ok(&mut s, "bob", Some("claude:aaa"), "join", json!({}), NOW);
+    let err = run(
+        &mut s,
+        "bob",
+        Some("claude:aaa"),
+        "controller",
+        json!({"run_id":"r9","state":"failed","begin":false}),
+        NOW + 1_000,
+    );
+    assert_eq!(err.unwrap_err(), "controller_lost");
+    let err = run(
+        &mut s,
+        "bob",
+        Some("claude:bbb"),
+        "join",
+        json!({}),
+        NOW + 2_000,
+    );
+    assert_eq!(err.unwrap_err(), "identity_busy");
+}

@@ -1072,21 +1072,30 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                 conn.execute("DELETE FROM controller_details WHERE agent=?", [actor])?;
             } else {
                 let updated = conn.execute("UPDATE controllers SET state=?,updated_ms=?,reason=? WHERE agent=? AND run_id=? AND state IN ('waiting','running') AND updated_ms>?",params![state,now,reason,actor,run_id,now-120000])?;
-                if updated == 0 {
-                    return Err(Error::new(
-                        "controller_lost",
-                        "controller lease expired, stopped, or belongs to another run",
-                    ));
-                }
                 // A sessionless run's minted session dies with the run; left
                 // open, it would refuse the next run of this name as busy.
-                if let Some(session) = req.session.as_deref().filter(|s| {
+                // That holds whether or not the run still held (or ever
+                // began) the controller: a run that exits early, or whose
+                // lease lapsed, ends only its own session, never another's.
+                let minted = req.session.as_deref().filter(|s| {
                     ["stopped", "failed"].contains(&state) && crate::session::is_minted(s)
-                }) {
+                });
+                if let Some(session) = minted {
                     conn.execute(
                         "UPDATE sessions SET ended_ms=?,ended_reason='run ended' WHERE session=? AND agent=? AND ended_ms IS NULL",
                         params![now, session, actor],
                     )?;
+                }
+                if updated == 0 {
+                    if minted.is_some() {
+                        return Ok(
+                            json!({"run_id":run_id,"state":state,"controller_held":false,"session_ended":true,"updated_ms":now}),
+                        );
+                    }
+                    return Err(Error::new(
+                        "controller_lost",
+                        "controller lease expired, stopped, or belongs to another run",
+                    ));
                 }
             }
             if let Some(detail) = detail {
@@ -3659,7 +3668,7 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
             if crate::session::is_minted(&held) && controller_live(conn, actor, now)? {
                 return Err(Error::new(
                     "controller_busy",
-                    "a live controller already owns this identity; use a different --as name",
+                    "a live controller already owns this identity; use a different --as name, or, if that run has died, wait two minutes or use join --takeover",
                 ));
             }
             return Err(Error::new(

@@ -1874,6 +1874,18 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         .then(|| keep_for(home, actor))
         .transpose()?;
     send(home, actor, "join", json!({}), None, 10)?;
+    // A sessionless run's minted session must end however the run exits;
+    // once its controller run has begun, the final state update ends it.
+    let release = ReleaseMinted {
+        home,
+        actor,
+        armed: std::cell::Cell::new(
+            fray::session::current()
+                .ok()
+                .flatten()
+                .is_some_and(|s| fray::session::is_minted(&s)),
+        ),
+    };
     on_joined();
     // The handoff's run goes on only if the board says it is still that run
     // (its lease was renewed just before the exec); otherwise it is ignored
@@ -1966,6 +1978,7 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
         runner.check_orphans()?;
         runner.state("waiting", true, None)?;
     }
+    release.armed.set(false);
     let result = runner.drive();
     // The daemon is gone or ending: report and exit without waiting for one.
     runner.patient.set(false);
@@ -1990,6 +2003,26 @@ pub fn run(home: &Path, actor: &str, options: &Options, on_joined: impl FnOnce()
     }
     result?;
     cleanup
+}
+
+/// Ends a sessionless run's minted session if the run exits after `join` but
+/// before its controller run begins (orphaned group, busy name, any error or
+/// panic). A run killed outright still holds the session until IDENTITY_TTL.
+struct ReleaseMinted<'a> {
+    home: &'a Path,
+    actor: &'a str,
+    armed: std::cell::Cell<bool>,
+}
+
+impl Drop for ReleaseMinted<'_> {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            let args = json!({"run_id":"exited-before-run","state":"failed","begin":false,"reason":"exited before its run began"});
+            if let Err(e) = send(self.home, self.actor, "controller", args, None, 5) {
+                eprintln!("fray drive: could not release its session: {e}");
+            }
+        }
+    }
 }
 
 /// Take a keepalive's handoff out of this process's environment, keeping it
