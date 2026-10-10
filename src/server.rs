@@ -422,13 +422,25 @@ fn connection(mut stream: UnixStream, shared: &Shared) -> Result<()> {
             "stats" | "friction" => {
                 // Each WAL reader adds SQLite descriptors beyond the stream
                 // admission budget. Keep those within its reserved headroom.
-                if shared
-                    .metrics_readers
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                        (n < 2).then_some(n + 1)
-                    })
-                    .is_err()
-                {
+                // A compare-exchange loop, not fetch_update: that is renamed
+                // try_update on newer toolchains and deprecated under its old name.
+                let readers = &shared.metrics_readers;
+                let mut current = readers.load(Ordering::SeqCst);
+                let admitted = loop {
+                    if current >= 2 {
+                        break false;
+                    }
+                    match readers.compare_exchange(
+                        current,
+                        current + 1,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break true,
+                        Err(actual) => current = actual,
+                    }
+                };
+                if !admitted {
                     write_frame(
                         &mut stream,
                         &failure(Error::new(
