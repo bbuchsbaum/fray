@@ -6,6 +6,11 @@ import concurrent.futures, json, os, pathlib, shutil, socket, subprocess, sys, t
 # Keep scratch daemons out of the user's daemon registry.
 _STATE_DIR = tempfile.TemporaryDirectory(prefix="fray-state-")
 os.environ["FRAY_STATE_DIR"] = _STATE_DIR.name
+# Hermetic: an inherited host session or identity (an agent running the
+# suite inside Claude Code or Codex) must not leak into the binary under test;
+# a test that needs one sets it explicitly.
+for _var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDECODE", "FRAY_SESSION", "FRAY_AGENT", "FRAY_HOME"):
+    os.environ.pop(_var, None)
 
 BINARY = pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'target/debug/fray').resolve()
 AGENT = pathlib.Path(__file__).resolve().parents[1] / 'tests/fixtures/agent.py'

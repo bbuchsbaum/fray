@@ -4937,7 +4937,14 @@ fn hook(
     if let Some(path) = input["transcript_path"].as_str() {
         turn_args["transcript"] = json!(path);
     }
-    let terminal = send(home, &actor, "terminal_turn", turn_args, None, 5)?;
+    // Turns are recorded per host session; a sessionless hook has none to
+    // record, but its context is still owed.
+    let bound = fray::session::current()?.is_some();
+    let terminal = if bound {
+        send(home, &actor, "terminal_turn", turn_args, None, 5)?
+    } else {
+        json!({})
+    };
     if event == "Stop" && input["stop_hook_active"] == true {
         server::write_frame(&mut io::stdout().lock(), &json!({}))?;
         return Ok(());
@@ -5003,7 +5010,7 @@ fn hook(
         && (event == "Stop" || !peer_news)
         && !keepalive_context
     {
-        if event == "Stop" {
+        if event == "Stop" && bound {
             send(
                 home,
                 &actor,

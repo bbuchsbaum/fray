@@ -1078,6 +1078,16 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                         "controller lease expired, stopped, or belongs to another run",
                     ));
                 }
+                // A sessionless run's minted session dies with the run; left
+                // open, it would refuse the next run of this name as busy.
+                if let Some(session) = req.session.as_deref().filter(|s| {
+                    ["stopped", "failed"].contains(&state) && crate::session::is_minted(s)
+                }) {
+                    conn.execute(
+                        "UPDATE sessions SET ended_ms=?,ended_reason='run ended' WHERE session=? AND agent=? AND ended_ms IS NULL",
+                        params![now, session, actor],
+                    )?;
+                }
             }
             if let Some(detail) = detail {
                 conn.execute("INSERT INTO controller_details(agent,run_id,detail) VALUES(?,?,?) ON CONFLICT(agent) DO UPDATE SET run_id=excluded.run_id,detail=excluded.detail",params![actor,run_id,detail])?;
@@ -3644,6 +3654,14 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
             if now - session_seen(conn, actor, &held, seen, now)? < IDENTITY_TTL_MS
                 && !takeover =>
         {
+            // A minted session belongs to one `drive` run: name the live
+            // controller, not a session the caller could take over.
+            if crate::session::is_minted(&held) && controller_live(conn, actor, now)? {
+                return Err(Error::new(
+                    "controller_busy",
+                    "a live controller already owns this identity; use a different --as name",
+                ));
+            }
             return Err(Error::new(
                 "identity_busy",
                 format!(
@@ -3674,6 +3692,14 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
         params![session, actor, now, now],
     )?;
     Ok(replaced)
+}
+
+fn controller_live(conn: &Connection, actor: &str, now: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM controllers WHERE agent=? AND state IN ('waiting','running') AND updated_ms>?)",
+        params![actor, now - crate::keepalive::CONTROLLER_TTL_MS],
+        |r| r.get(0),
+    )?)
 }
 
 /// When a bound session was last seen, counting its own wait in progress

@@ -392,3 +392,75 @@ fn questions_superseding_and_withdrawing_are_not_gated() {
         NOW,
     );
 }
+
+#[test]
+fn a_finished_sessionless_run_releases_its_minted_session() {
+    let mut s = board();
+    // `fray drive` with no host session mints one for its run.
+    let begin = json!({"run_id":"r1","state":"waiting","begin":true});
+    ok(&mut s, "bob", Some("fray:first"), "join", json!({}), NOW);
+    ok(&mut s, "bob", Some("fray:first"), "controller", begin, NOW);
+    // While the run is live, a second run is told a controller holds the
+    // name, not offered a takeover of a session it could never resume.
+    let second = json!({"run_id":"r2","state":"waiting","begin":true});
+    let err = run(
+        &mut s,
+        "bob",
+        Some("fray:second"),
+        "join",
+        json!({}),
+        NOW + 1_000,
+    );
+    assert_eq!(err.unwrap_err(), "controller_busy");
+    ok(
+        &mut s,
+        "bob",
+        Some("fray:first"),
+        "controller",
+        json!({"run_id":"r1","state":"stopped"}),
+        NOW + 2_000,
+    );
+    // The next run of the same name starts at once.
+    ok(
+        &mut s,
+        "bob",
+        Some("fray:second"),
+        "join",
+        json!({}),
+        NOW + 3_000,
+    );
+    ok(
+        &mut s,
+        "bob",
+        Some("fray:second"),
+        "controller",
+        second,
+        NOW + 3_000,
+    );
+}
+
+#[test]
+fn a_host_session_outlives_its_drive_run() {
+    let mut s = board();
+    let begin = json!({"run_id":"r1","state":"waiting","begin":true});
+    ok(&mut s, "bob", Some("claude:aaa"), "join", json!({}), NOW);
+    ok(&mut s, "bob", Some("claude:aaa"), "controller", begin, NOW);
+    ok(
+        &mut s,
+        "bob",
+        Some("claude:aaa"),
+        "controller",
+        json!({"run_id":"r1","state":"failed","reason":"agent_exit"}),
+        NOW + 1_000,
+    );
+    // Only a minted session ends with its run; the terminal keeps its name.
+    let err = run(
+        &mut s,
+        "bob",
+        Some("claude:bbb"),
+        "join",
+        json!({}),
+        NOW + 2_000,
+    );
+    assert_eq!(err.unwrap_err(), "identity_busy");
+}
