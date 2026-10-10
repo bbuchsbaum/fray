@@ -109,8 +109,14 @@ fn connect(home: &Path, timeout: u64) -> Result<BufReader<UnixStream>> {
         )
         .with_details(json!({"not_sent":true}))
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(timeout.max(1))))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // Nothing has been sent yet. On macOS, setting a timeout on a socket whose
+    // peer already closed (a daemon exiting from a drain) fails with EINVAL.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(timeout.max(1))))
+        .map_err(|e| unsent(e.into()))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| unsent(e.into()))?;
     Ok(BufReader::new(stream))
 }
 fn write_request(stream: &mut UnixStream, req: &Request) -> Result<()> {
