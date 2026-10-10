@@ -110,7 +110,14 @@ impl Repo {
     fn remote(&self) -> PathBuf {
         let remote = self.root.join(".worktrees/remote.git");
         let out = Command::new("git")
-            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .args([
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
         assert!(out.status.success());
