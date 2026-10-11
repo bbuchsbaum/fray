@@ -768,6 +768,12 @@ impl Run<'_> {
                 Ok(())
             }
             Err(e) => Err(e),
+            // A minted session's final update ends the session even when the
+            // run had already lost its lease; the run still lost it.
+            Ok(v) if v["controller_held"] == false => Err(Error::new(
+                "controller_lost",
+                "controller lease expired, stopped, or belongs to another run; this run's session was ended",
+            )),
             Ok(v) => {
                 if v["stop_requested"] == true {
                     self.stop.set(true);
