@@ -124,7 +124,11 @@ fn an_idle_daemon_is_idle_without_counting_the_caller_or_recording_it() {
             .contains(&json!("occupancy")),
         "{ping}"
     );
-    let report = d.occupancy();
+    // The ping's own connection may not be reaped yet; once it is, the
+    // daemon counts no client at all while the caller's probe is open.
+    let report = d.until("earlier connections reaped", |r| {
+        r["clients"]["connected"] == 0
+    });
     assert_eq!(report["verdict"], "idle", "{report}");
     assert_eq!(report["reasons"], json!([]));
     assert_eq!(report["holders"], json!([]));
@@ -165,8 +169,9 @@ fn an_attached_wait_is_busy_and_names_its_actor_until_it_hangs_up() {
     d.rpc("join", "waiter", json!({}));
     let mut wait = d.connect();
     wait.send("wait", "waiter", json!({"timeout": 30}));
+    // Also wait for the join's connection to be reaped, leaving the waiter.
     let report = d.until("wait registered", |r| {
-        r["long_lived"].as_array().is_some_and(|l| !l.is_empty())
+        r["long_lived"].as_array().is_some_and(|l| !l.is_empty()) && r["clients"]["connected"] == 1
     });
     assert_eq!(report["verdict"], "busy", "{report}");
     assert_eq!(report["holders"], json!(["waiter"]));
