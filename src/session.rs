@@ -70,12 +70,21 @@ fn nearer_host() -> Option<&'static str> {
     None
 }
 
+/// Prefix of the session `enter` and `drive` mint for a caller with no host
+/// session. Only that one run ever holds it.
+const MINTED: &str = "fray:";
+
+/// Whether `session` was minted by a sessionless `enter` or `drive` run.
+pub fn is_minted(session: &str) -> bool {
+    session.starts_with(MINTED)
+}
+
 /// Called once by the CLI before any RPC. Managed children inherit the exact
 /// same binding, even if their own host exports a different provider session ID.
 pub fn configure(explicit: Option<&str>, hook_session: Option<&str>, managed: bool) -> Result<()> {
     let mut value = from_host(explicit, hook_session)?;
     if value.is_none() && managed {
-        value = Some(format!("fray:{}", crate::model::random_key()?));
+        value = Some(format!("{MINTED}{}", crate::model::random_key()?));
     }
     SESSION
         .set(value)

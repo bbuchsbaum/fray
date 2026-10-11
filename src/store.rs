@@ -1072,7 +1072,26 @@ pub(crate) fn mutate(conn: &Connection, req: &Request, now: i64) -> Result<Value
                 conn.execute("DELETE FROM controller_details WHERE agent=?", [actor])?;
             } else {
                 let updated = conn.execute("UPDATE controllers SET state=?,updated_ms=?,reason=? WHERE agent=? AND run_id=? AND state IN ('waiting','running') AND updated_ms>?",params![state,now,reason,actor,run_id,now-120000])?;
+                // A sessionless run's minted session dies with the run; left
+                // open, it would refuse the next run of this name as busy.
+                // That holds whether or not the run still held (or ever
+                // began) the controller: a run that exits early, or whose
+                // lease lapsed, ends only its own session, never another's.
+                let minted = req.session.as_deref().filter(|s| {
+                    ["stopped", "failed"].contains(&state) && crate::session::is_minted(s)
+                });
+                if let Some(session) = minted {
+                    conn.execute(
+                        "UPDATE sessions SET ended_ms=?,ended_reason='run ended' WHERE session=? AND agent=? AND ended_ms IS NULL",
+                        params![now, session, actor],
+                    )?;
+                }
                 if updated == 0 {
+                    if minted.is_some() {
+                        return Ok(
+                            json!({"run_id":run_id,"state":state,"controller_held":false,"session_ended":true,"updated_ms":now}),
+                        );
+                    }
                     return Err(Error::new(
                         "controller_lost",
                         "controller lease expired, stopped, or belongs to another run",
@@ -3644,6 +3663,14 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
             if now - session_seen(conn, actor, &held, seen, now)? < IDENTITY_TTL_MS
                 && !takeover =>
         {
+            // A minted session belongs to one `drive` run: name the live
+            // controller, not a session the caller could take over.
+            if crate::session::is_minted(&held) && controller_live(conn, actor, now)? {
+                return Err(Error::new(
+                    "controller_busy",
+                    "a live controller already owns this identity; use a different --as name, or, if that run has died, wait two minutes or use join --takeover",
+                ));
+            }
             return Err(Error::new(
                 "identity_busy",
                 format!(
@@ -3674,6 +3701,14 @@ fn bind_session(conn: &Connection, req: &Request, now: i64) -> Result<Option<Val
         params![session, actor, now, now],
     )?;
     Ok(replaced)
+}
+
+fn controller_live(conn: &Connection, actor: &str, now: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM controllers WHERE agent=? AND state IN ('waiting','running') AND updated_ms>?)",
+        params![actor, now - crate::keepalive::CONTROLLER_TTL_MS],
+        |r| r.get(0),
+    )?)
 }
 
 /// When a bound session was last seen, counting its own wait in progress
